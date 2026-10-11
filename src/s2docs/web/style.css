@@ -1,0 +1,63 @@
+:root {
+  --bg: #0f1115; --panel: #161a21; --border: #262c36; --fg: #e3e7ee; --muted: #8a93a3;
+  --accent: #f5a524; --link: #7cb4ff; --code: #1d222b; --ok: #4cc38a; --bad: #f07178;
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; font-size: 15px;
+}
+@media (prefers-color-scheme: light) {
+  :root { --bg: #fafafa; --panel: #fff; --border: #e3e5ea; --fg: #1c2027; --muted: #677083;
+          --accent: #c77700; --link: #1f6feb; --code: #f2f4f7; }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--fg); }
+a { color: var(--link); text-decoration: none; }
+a:hover { text-decoration: underline; }
+code, pre, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 13px; }
+pre { background: var(--code); padding: 10px 12px; border-radius: 6px; overflow-x: auto; white-space: pre-wrap; }
+code { background: var(--code); padding: 1px 5px; border-radius: 4px; }
+.muted { color: var(--muted); }
+
+.topbar { position: sticky; top: 0; z-index: 2; display: flex; gap: 12px; align-items: center;
+          padding: 10px 16px; background: var(--panel); border-bottom: 1px solid var(--border); }
+.brand { font-weight: 700; color: var(--accent); font-size: 17px; }
+#search-form { flex: 1; max-width: 720px; }
+#q, select, .filters input, .filters select, textarea {
+  width: 100%; padding: 7px 10px; border-radius: 6px; border: 1px solid var(--border);
+  background: var(--bg); color: var(--fg); font: inherit; }
+select#game { width: auto; }
+
+.layout { display: grid; grid-template-columns: 190px 1fr; min-height: calc(100vh - 54px); }
+nav { border-right: 1px solid var(--border); padding: 12px 8px; }
+nav a { display: block; padding: 6px 10px; border-radius: 6px; color: var(--fg); }
+nav a.active { background: var(--code); color: var(--accent); }
+nav a.disabled { color: var(--muted); pointer-events: none; }
+main { padding: 18px 24px; max-width: 1200px; overflow-x: auto; }
+
+h1 { font-size: 22px; margin: 0 0 4px; word-break: break-all; }
+h2 { font-size: 16px; margin: 22px 0 8px; border-bottom: 1px solid var(--border); padding-bottom: 4px; }
+.filters { display: flex; gap: 8px; margin: 10px 0 14px; flex-wrap: wrap; }
+.filters > * { flex: 1; min-width: 140px; }
+.filters label { display: flex; align-items: center; gap: 6px; flex: 0 0 auto; color: var(--muted); }
+.filters input[type=checkbox] { width: auto; }
+
+table { width: 100%; border-collapse: collapse; font-size: 14px; }
+th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); vertical-align: top; }
+th { color: var(--muted); font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing: .03em; }
+tr:hover td { background: color-mix(in srgb, var(--code) 60%, transparent); }
+
+.badge { display: inline-block; font-size: 11px; padding: 1px 6px; border-radius: 10px;
+         border: 1px solid var(--border); color: var(--muted); margin: 0 3px 3px 0; white-space: nowrap; }
+.badge.kind { color: var(--accent); border-color: var(--accent); }
+.badge.warn { color: var(--bad); border-color: var(--bad); }
+.hit { padding: 10px 0; border-bottom: 1px solid var(--border); }
+.hit .snip { color: var(--muted); font-size: 13px; margin-top: 3px; }
+mark { background: color-mix(in srgb, var(--accent) 35%, transparent); color: inherit; border-radius: 2px; }
+.pager { display: flex; gap: 10px; align-items: center; margin: 14px 0; }
+button { padding: 6px 12px; border-radius: 6px; border: 1px solid var(--border); background: var(--code);
+         color: var(--fg); cursor: pointer; font: inherit; }
+button:disabled { opacity: .4; cursor: default; }
+.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 10px; }
+.card { border: 1px solid var(--border); border-radius: 8px; padding: 12px; background: var(--panel); }
+.card .n { font-size: 22px; font-weight: 700; color: var(--accent); }
+.err { color: var(--bad); }
+.inherited td { opacity: .78; }
+@media (max-width: 760px) { .layout { grid-template-columns: 1fr; } nav { display: flex; overflow-x: auto; border: 0; } }

@@ -1,0 +1,38 @@
+[project]
+name = "s2docs"
+version = "0.1.0"
+description = "Source 2 (CS2, Deadlock) API/CLI documentation: SQLite index, FastAPI site, MCP server"
+authors = [
+    { name = "Christian Pompa", email = "chrispompaemail@gmail.com" }
+]
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.143.0",
+    "mcp[cli]>=2.3.0,<3",
+    "pydantic>=2.14.0",
+    "uvicorn[standard]>=0.54.0",
+]
+
+[project.scripts]
+s2docs = "s2docs.cli:main"
+
+[build-system]
+requires = ["uv_build>=0.12.6,<0.13.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "httpx>=0.28.1",
+    "pytest>=9.1.1",
+    "ruff>=0.17.0",
+]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
