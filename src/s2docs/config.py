@@ -74,13 +74,15 @@ class Settings:
     data_dir: Path
     db_path: Path
     sources_dir: Path
+    workspace_dir: Path  # local addon sources (scaffolded/written by the build tools)
 
 
 @lru_cache
 def get_settings() -> Settings:
     data_dir = Path(os.environ.get("S2DOCS_DATA_DIR", Path.cwd() / "data")).expanduser().resolve()
     db_path = Path(os.environ.get("S2DOCS_DB", data_dir / "s2docs.db")).expanduser().resolve()
-    return Settings(data_dir=data_dir, db_path=db_path, sources_dir=data_dir / "sources")
+    workspace = Path(os.environ.get("S2DOCS_WORKSPACE", data_dir / "workspace")).expanduser().resolve()
+    return Settings(data_dir=data_dir, db_path=db_path, sources_dir=data_dir / "sources", workspace_dir=workspace)
 
 
 def get_game(game_id: str) -> Game:

@@ -207,6 +207,9 @@ class Repository:
             raise NotFound(f"no convar/command named {name!r} in {game}")
         return self._convar_from_row(row)
 
+    def convar_names(self, game: str) -> list[str]:
+        return [r[0] for r in self.conn.execute("SELECT name FROM convars WHERE build_id = ?", (self.build_id(game),))]
+
     def convar_flags(self, game: str) -> list[tuple[str, int]]:
         rows = self.conn.execute(
             "SELECT f.flag, count(*) AS n FROM convar_flags f JOIN convars c ON c.id = f.convar_id "

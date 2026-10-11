@@ -22,7 +22,9 @@ def test_tools_are_listed_read_only(server):
     tools = run(main)
     names = {t.name for t in tools}
     assert {"search_docs", "get_convar", "get_entity", "get_schema_class", "get_script_api", "diff_builds"} <= names
-    assert all(t.annotations and t.annotations.read_only_hint for t in tools)
+    writers = {"scaffold_addon", "write_addon_file"}
+    assert all(t.annotations and t.annotations.read_only_hint for t in tools if t.name not in writers)
+    assert all(t.annotations and t.annotations.destructive_hint is False for t in tools if t.name in writers)
 
 
 def test_tool_calls(server):

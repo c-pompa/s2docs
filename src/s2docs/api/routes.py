@@ -7,9 +7,11 @@ from typing import Annotated, Literal
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Path, Query, Request
 from fastapi.responses import PlainTextResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from s2docs import models as m
+from s2docs.build.validate_cfg import validate_cfg
+from s2docs.build.validate_script import validate_cs_script
 from s2docs.config import GAMES
 from s2docs.db.connection import Database
 from s2docs.db.repository import Repository
@@ -232,6 +234,31 @@ def diff(
     to_build: Annotated[int | None, Query(alias="to")] = None,
 ):
     return repo.diff_builds(game, from_build, to_build)
+
+
+# ----------------------------------------------------------- validation
+class ScriptIn(BaseModel):
+    code: str = Field(max_length=2_000_000)
+    game: str = "cs2"
+    filename: str = "script.js"
+
+
+class CfgIn(BaseModel):
+    text: str = Field(max_length=2_000_000)
+    game: str = "cs2"
+    context: Literal["server", "client", "any"] = "server"
+
+
+@router.post("/validate/cs-script", response_model=m.ScriptValidation)
+def validate_script(body: ScriptIn, repo: Repo):
+    valid_game(body.game)
+    return validate_cs_script(repo, body.code, game=body.game, filename=body.filename)
+
+
+@router.post("/validate/cfg", response_model=m.CfgValidation)
+def validate_config(body: CfgIn, repo: Repo):
+    valid_game(body.game)
+    return validate_cfg(repo, body.text, game=body.game, context=body.context)
 
 
 # ------------------------------------------------------------- prompts

@@ -12,6 +12,7 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from s2docs.api.routes import router
+from s2docs.build.validate_script import ToolchainMissing
 from s2docs.config import get_settings
 from s2docs.db.connection import Database, DatabaseNotInitialized
 from s2docs.db.repository import NotFound
@@ -52,6 +53,10 @@ def create_app(db_path: Path | None = None, *, mount_mcp: bool = True) -> FastAP
 
     @app.exception_handler(DatabaseNotInitialized)
     async def _no_db(_: Request, exc: DatabaseNotInitialized) -> JSONResponse:
+        return JSONResponse({"detail": str(exc)}, status_code=503)
+
+    @app.exception_handler(ToolchainMissing)
+    async def _no_toolchain(_: Request, exc: ToolchainMissing) -> JSONResponse:
         return JSONResponse({"detail": str(exc)}, status_code=503)
 
     @app.exception_handler(PromptError)

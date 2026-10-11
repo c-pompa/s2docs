@@ -100,6 +100,53 @@ def _cmd_prompt(args: argparse.Namespace) -> int:
     return 0
 
 
+def _print_diags(result) -> int:
+    for d in result.diagnostics:
+        print(f"  {d.line}:{d.column} {d.severity:7} {d.category:22} {d.message}")
+        if d.hint:
+            print(f"      hint: {d.hint}")
+    print(f"{'OK' if result.ok else 'FAILED'}: {result.errors} error(s), {result.warnings} warning(s)")
+    return 0 if result.ok else 1
+
+
+def _cmd_validate_script(args: argparse.Namespace) -> int:
+    from s2docs.build.validate_script import validate_cs_script
+    from s2docs.db.repository import Repository
+
+    path = Path(args.file)
+    with Database(get_settings().db_path).reader() as conn:
+        result = validate_cs_script(
+            Repository(conn), path.read_text(encoding="utf-8"), game=args.game, filename=path.name
+        )
+    print(result.checker)
+    return _print_diags(result)
+
+
+def _cmd_validate_cfg(args: argparse.Namespace) -> int:
+    from s2docs.build.validate_cfg import validate_cfg
+    from s2docs.db.repository import Repository
+
+    with Database(get_settings().db_path).reader() as conn:
+        result = validate_cfg(
+            Repository(conn), Path(args.file).read_text(encoding="utf-8"), game=args.game, context=args.context
+        )
+    print(f"{result.commands} command(s) checked")
+    return _print_diags(result)
+
+
+def _cmd_scaffold(args: argparse.Namespace) -> int:
+    from s2docs.build.workspace import scaffold
+    from s2docs.db.repository import Repository
+
+    settings = get_settings()
+    with Database(settings.db_path).reader() as conn:
+        addon = scaffold(settings.workspace_dir, Repository(conn), game=args.game, name=args.name)
+    print(addon.root)
+    for f in addon.files:
+        print(f"  {f.path} ({f.size} B)")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="s2docs", description="Source 2 docs index, API and MCP server")
     parser.add_argument("-v", "--verbose", action="store_true")
@@ -131,6 +178,22 @@ def main(argv: list[str] | None = None) -> int:
     p.set_defaults(fn=_cmd_mcp)
 
     sub.add_parser("stats", help="Show indexed counts").set_defaults(fn=_cmd_stats)
+
+    p = sub.add_parser("validate-script", help="Type-check a cs_script .js against point_script.d.ts")
+    p.add_argument("file")
+    p.add_argument("--game", default="cs2", choices=list(GAMES))
+    p.set_defaults(fn=_cmd_validate_script)
+
+    p = sub.add_parser("validate-cfg", help="Check a .cfg against indexed convars/commands")
+    p.add_argument("file")
+    p.add_argument("--game", default="cs2", choices=list(GAMES))
+    p.add_argument("--context", default="server", choices=["server", "client", "any"])
+    p.set_defaults(fn=_cmd_validate_cfg)
+
+    p = sub.add_parser("scaffold", help="Create a new addon in the local workspace")
+    p.add_argument("name")
+    p.add_argument("--game", default="cs2", choices=["cs2"])
+    p.set_defaults(fn=_cmd_scaffold)
 
     p = sub.add_parser("prompt", help="Render a prompt template, e.g. prompt cs2_script task='...'")
     p.add_argument("name")

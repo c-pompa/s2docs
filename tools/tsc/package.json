@@ -1,0 +1,8 @@
+{
+  "name": "s2docs-tsc",
+  "private": true,
+  "description": "Pinned TypeScript compiler used to type-check cs_script against Valve point_script.d.ts",
+  "dependencies": {
+    "typescript": "5.9.3"
+  }
+}

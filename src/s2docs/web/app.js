@@ -56,7 +56,7 @@ async function api(path, params = {}) {
 const SECTIONS = [
   ["search", "Search"], ["convars", "ConVars & Commands"], ["entities", "Entities (Hammer)"],
   ["schema", "Schema"], ["events", "Game Events"], ["script", "cs_script API"], ["examples", "Examples"],
-  ["pulse", "Pulse"], ["docs", "Docs (source2.wiki)"], ["diff", "Build Diff"], ["prompts", "Prompts"], ["stats", "Stats"],
+  ["pulse", "Pulse"], ["docs", "Docs (source2.wiki)"], ["validate", "Validate"], ["diff", "Build Diff"], ["prompts", "Prompts"], ["stats", "Stats"],
 ];
 
 function parseHash() {
@@ -119,6 +119,7 @@ function bindFilters(section, rest, params) {
     b.addEventListener("click", () => go([state.game, section, ...rest], { ...params, offset: b.dataset.offset })),
   );
   view.querySelectorAll("form[data-prompt]").forEach(bindPromptForm);
+  view.querySelectorAll("form[data-validate]").forEach(bindValidateForm);
 }
 
 const pager = (page) => {
@@ -366,6 +367,19 @@ const ROUTES = {
         <td class="mono">${esc(r.name)}</td><td class="mono muted">${esc((r.before || "").slice(0, 160))}${r.change === "changed" ? " → " : ""}${esc((r.after || "").slice(0, 160))}</td></tr>`).join("")}</table>` : `<p class="muted">No changes.</p>`}`).join("")}`;
   },
 
+  async validate() {
+    const g = state.games.find((x) => x.id === state.game);
+    const scriptForm = g?.script_api ? `<h2>cs_script</h2>
+      <p class="muted">Type-checked by the TypeScript compiler against this build's <code>point_script.d.ts</code>.</p>
+      <form data-validate="cs-script"><textarea name="code" rows="14" class="mono" placeholder='import { Instance } from "cs_script/point_script";'></textarea>
+      <p><button type="submit">Check script</button></p><div class="result"></div></form>` : "";
+    return `<h1>Validate</h1>${scriptForm}
+      <h2>Config (.cfg)</h2><p class="muted">Every command is checked against the indexed convars/commands for ${esc(g?.name || state.game)}.</p>
+      <form data-validate="cfg"><textarea name="text" rows="10" class="mono" placeholder="sv_cheats 1&#10;mp_roundtime 3"></textarea>
+      <p>${select("context", "server", [["server", "server cfg"], ["client", "client cfg"], ["any", "any"]])} <button type="submit">Check cfg</button></p>
+      <div class="result"></div></form>`;
+  },
+
   async prompts() {
     const prompts = await api("/prompts");
     return `<h1>Prompts</h1><p class="muted">Guided workflows for LLM agents. The MCP server exposes the same prompts.
@@ -397,6 +411,28 @@ async function home() {
     ${tile(c.entities, "Hammer entities", "entities")}${tile(c.schema_classes, "schema classes", "schema")}
     ${tile(c.schema_enums, "schema enums", "schema")}${tile(c.game_events, "game events", "events")}
     ${c.script_symbols ? tile(c.script_symbols, "cs_script symbols", "script") : ""}${tile(c.pulse_bindings, "Pulse bindings", "pulse")}</div>`;
+}
+
+function bindValidateForm(form) {
+  form.addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    const out = form.querySelector(".result");
+    const kind = form.dataset.validate;
+    const body = { game: state.game };
+    for (const el of form.elements) if (el.name) body[el.name] = el.value;
+    out.innerHTML = `<p class="muted">Checking…</p>`;
+    const res = await fetch(`/api/validate/${kind}`, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+    });
+    const r = await res.json();
+    if (!res.ok) { out.innerHTML = `<p class="err">${esc(r.detail || res.statusText)}</p>`; return; }
+    const sevClass = { error: "warn", warning: "kind", info: "" };
+    out.innerHTML = `<p>${r.ok ? badge("OK", "kind") : badge("FAILED", "warn")} ${r.errors} error(s), ${r.warnings} warning(s)
+      ${r.checker ? `<span class="muted">· ${esc(r.checker)}</span>` : ""}</p>
+      ${r.diagnostics.length ? `<table><tr><th>Line</th><th>Severity</th><th>Category</th><th>Message</th></tr>${r.diagnostics.map((d) =>
+        `<tr><td class="mono">${d.line}:${d.column}</td><td>${badge(d.severity, sevClass[d.severity])}</td><td class="mono">${esc(d.category)}</td>
+         <td>${esc(d.message)}${d.hint ? `<div class="muted">${esc(d.hint)}</div>` : ""}</td></tr>`).join("")}</table>` : ""}`;
+  });
 }
 
 function bindPromptForm(form) {

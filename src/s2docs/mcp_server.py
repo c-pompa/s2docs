@@ -7,6 +7,7 @@ app at `/mcp` (streamable HTTP) by `s2docs serve`.
 from __future__ import annotations
 
 from collections.abc import Callable
+from pathlib import Path
 from typing import Annotated, Literal, TypeVar
 
 from mcp.server.mcpserver import MCPServer
@@ -16,7 +17,11 @@ from mcp_types import ToolAnnotations
 from pydantic import Field
 
 from s2docs import models as m
-from s2docs.config import GAMES
+from s2docs.build import workspace as ws
+from s2docs.build.validate_cfg import validate_cfg as _validate_cfg
+from s2docs.build.validate_script import ToolchainMissing
+from s2docs.build.validate_script import validate_cs_script as _validate_cs_script
+from s2docs.config import GAMES, get_settings
 from s2docs.db.connection import Database, DatabaseNotInitialized
 from s2docs.db.repository import NotFound, Repository
 from s2docs.prompts import PROMPTS, PromptError, render_prompt
@@ -25,6 +30,8 @@ T = TypeVar("T")
 
 GameId = Annotated[str, Field(description=f"Game id: one of {', '.join(GAMES)}")]
 Side = Literal["server", "client"]
+AddonName = Annotated[str, Field(description="Addon name: lowercase [a-z0-9_], e.g. 'jump_arena'")]
+RelPath = Annotated[str, Field(description="Path inside the addon, e.g. 'scripts/jump_arena.js'")]
 
 INSTRUCTIONS = """\
 Reference data for Valve's Source 2 engine games (Counter-Strike 2 = `cs2`, Deadlock = `deadlock`),
@@ -40,9 +47,11 @@ methods that the tools do not return. The prompts (`cs2_script`, `hammer_io_logi
 """
 
 READ_ONLY = ToolAnnotations(read_only_hint=True, idempotent_hint=True, open_world_hint=False)
+WRITES_WORKSPACE = ToolAnnotations(read_only_hint=False, destructive_hint=False, open_world_hint=False)
 
 
-def create_mcp_server(db: Database) -> MCPServer:
+def create_mcp_server(db: Database, workspace: Path | None = None) -> MCPServer:
+    workspace = workspace or get_settings().workspace_dir
     server = MCPServer(name="s2docs", title="Source 2 Docs", instructions=INSTRUCTIONS, version="0.1.0")
 
     def run(fn: Callable[[Repository], T]) -> T:
@@ -50,7 +59,13 @@ def create_mcp_server(db: Database) -> MCPServer:
         try:
             with db.reader() as conn:
                 return fn(Repository(conn))
-        except (NotFound, DatabaseNotInitialized, ValueError) as exc:
+        except (NotFound, DatabaseNotInitialized, ValueError, ToolchainMissing) as exc:
+            raise ToolError(str(exc)) from exc
+
+    def _ws(fn: Callable[[], T]) -> T:
+        try:
+            return fn()
+        except (ws.WorkspaceError, OSError) as exc:
             raise ToolError(str(exc)) from exc
 
     def check_game(game: str) -> None:
@@ -267,6 +282,74 @@ def create_mcp_server(db: Database) -> MCPServer:
         if game:
             check_game(game)
         return run(lambda r: r.list_docs(game=game, q=query, limit=limit))
+
+    # ------------------------------------------------------------ build tools
+
+    @server.tool(annotations=READ_ONLY)
+    def validate_cs_script(
+        code: Annotated[str | None, Field(description="JavaScript source to check")] = None,
+        addon: Annotated[str | None, Field(description="Or: addon whose file to check")] = None,
+        path: Annotated[str | None, Field(description="Path of the .js file inside the addon")] = None,
+        game: GameId = "cs2",
+    ) -> m.ScriptValidation:
+        """Type-check a cs_script with the TypeScript compiler against this build's Valve point_script.d.ts.
+        Errors with category `unknown_api` mean the method/property does not exist — fix before shipping.
+        `needs_type_narrowing` gives the subclass to cast to. ALWAYS run this before handing a script to the user."""
+        check_game(game)
+        if code is None:
+            if not (addon and path):
+                raise ToolError("pass `code`, or `addon` + `path`")
+            code = ws.read_file(workspace, game, addon, path)
+        filename = Path(path).name if path else "script.js"
+        return run(lambda r: _validate_cs_script(r, code, game=game, filename=filename))
+
+    @server.tool(annotations=READ_ONLY)
+    def validate_cfg(
+        text: Annotated[str, Field(description="Contents of a .cfg file")],
+        game: GameId,
+        context: Annotated[
+            Literal["server", "client", "any"], Field(description="Where the cfg runs (affects warnings)")
+        ] = "server",
+    ) -> m.CfgValidation:
+        """Check every command in a .cfg against the indexed convars/commands: unknown names (with suggestions),
+        out-of-range values, cheat/devonly flags, and client-vs-server context."""
+        check_game(game)
+        return run(lambda r: _validate_cfg(r, text, game=game, context=context))
+
+    @server.tool(annotations=WRITES_WORKSPACE)
+    def scaffold_addon(name: AddonName, game: GameId = "cs2", with_script: bool = True) -> m.Addon:
+        """Create a new addon in the local workspace (content/csgo_addons/<name>/ with scripts/, maps/,
+        materials/, ...), a starter cs_script, Valve's point_script.d.ts + tsconfig.json, and a README with
+        the Hammer setup steps. Fails if the addon already exists."""
+        check_game(game)
+        return run(lambda r: ws.scaffold(workspace, r, game=game, name=name, with_script=with_script))
+
+    @server.tool(annotations=READ_ONLY)
+    def list_addons(game: GameId = "cs2") -> list[str]:
+        """List addons in the local workspace."""
+        check_game(game)
+        return _ws(lambda: ws.list_addons(workspace, game))
+
+    @server.tool(annotations=READ_ONLY)
+    def get_addon(name: AddonName, game: GameId = "cs2") -> m.Addon:
+        """Show an addon's local root and file list."""
+        check_game(game)
+        return _ws(lambda: ws.describe(workspace, game, name))
+
+    @server.tool(annotations=READ_ONLY)
+    def read_addon_file(name: AddonName, path: RelPath, game: GameId = "cs2") -> str:
+        """Read a text file from an addon in the workspace."""
+        check_game(game)
+        return _ws(lambda: ws.read_file(workspace, game, name, path))
+
+    @server.tool(annotations=WRITES_WORKSPACE)
+    def write_addon_file(
+        name: AddonName, path: RelPath, content: str, game: GameId = "cs2", overwrite: bool = False
+    ) -> m.AddonFile:
+        """Write a text source file (.js, .cfg, .vmat, .vdata, panorama .xml/.css, ...) into an addon.
+        Binary/compiled assets are produced by Valve's tools, not written here. Use overwrite=true to replace."""
+        check_game(game)
+        return _ws(lambda: ws.write_file(workspace, game, name, path, content, overwrite=overwrite))
 
     # -------------------------------------------------------------- resources
     @server.resource(

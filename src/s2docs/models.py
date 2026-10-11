@@ -218,3 +218,46 @@ class Stats(BaseModel):
     schema_version: int
     games: list[GameInfo]
     counts: dict[str, dict[str, int]]
+
+
+# ------------------------------------------------------------------ build tools
+Severity = Literal["error", "warning", "info"]
+
+
+class Diagnostic(BaseModel):
+    line: int
+    column: int = 1
+    code: str
+    severity: Severity
+    category: str
+    message: str
+    hint: str | None = None
+
+
+class ScriptValidation(BaseModel):
+    ok: bool = Field(description="True when there are no errors (warnings/info allowed)")
+    errors: int
+    warnings: int
+    diagnostics: list[Diagnostic]
+    instance_methods_used: list[str] = []
+    checker: str
+
+
+class CfgValidation(BaseModel):
+    ok: bool
+    errors: int
+    warnings: int
+    commands: int
+    diagnostics: list[Diagnostic]
+
+
+class AddonFile(BaseModel):
+    path: str
+    size: int
+
+
+class Addon(BaseModel):
+    name: str
+    game: str
+    root: str = Field(description="Local content root of the addon")
+    files: list[AddonFile] = []
