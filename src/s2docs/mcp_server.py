@@ -24,6 +24,8 @@ from s2docs.build.validate_script import validate_cs_script as _validate_cs_scri
 from s2docs.config import GAMES, get_settings
 from s2docs.db.connection import Database, DatabaseNotInitialized
 from s2docs.db.repository import NotFound, Repository
+from s2docs.orchestration.engine import OrchestrationError, Orchestrator, workflow_info
+from s2docs.orchestration.workflows import WORKFLOWS
 from s2docs.prompts import PROMPTS, PromptError, render_prompt
 
 T = TypeVar("T")
@@ -31,6 +33,7 @@ T = TypeVar("T")
 GameId = Annotated[str, Field(description=f"Game id: one of {', '.join(GAMES)}")]
 Side = Literal["server", "client"]
 AddonName = Annotated[str, Field(description="Addon name: lowercase [a-z0-9_], e.g. 'jump_arena'")]
+ProjectId = Annotated[str, Field(description="Project id from start_project, e.g. 'p-1a2b3c4d'")]
 RelPath = Annotated[str, Field(description="Path inside the addon, e.g. 'scripts/jump_arena.js'")]
 
 INSTRUCTIONS = """\
@@ -350,6 +353,75 @@ def create_mcp_server(db: Database, workspace: Path | None = None) -> MCPServer:
         Binary/compiled assets are produced by Valve's tools, not written here. Use overwrite=true to replace."""
         check_game(game)
         return _ws(lambda: ws.write_file(workspace, game, name, path, content, overwrite=overwrite))
+
+    # ----------------------------------------------------------- orchestration
+    orch = Orchestrator(db, workspace)
+
+    def _orch(fn: Callable[[], T]) -> T:
+        try:
+            return fn()
+        except (OrchestrationError, NotFound, ws.WorkspaceError, ToolchainMissing) as exc:
+            raise ToolError(str(exc)) from exc
+
+    @server.tool(annotations=READ_ONLY)
+    def list_workflows(
+        game: Annotated[str | None, Field(description="Filter by game id")] = None,
+    ) -> list[m.WorkflowInfo]:
+        """List orchestration workflows: multi-step recipes (research → design → build → validate → test →
+        document) that chain this server's tools and prompts. Start one with start_project."""
+        return [workflow_info(w) for w in WORKFLOWS.values() if game is None or game in w.games]
+
+    @server.tool(annotations=WRITES_WORKSPACE)
+    def start_project(
+        workflow: Annotated[str, Field(description="Workflow id from list_workflows, or 'custom'")],
+        goal: Annotated[str, Field(description="What to build, in the user's words")],
+        game: GameId = "cs2",
+        addon: Annotated[str | None, Field(description="Addon name (default: derived from goal)")] = None,
+        inputs: Annotated[dict[str, str] | None, Field(description="Workflow inputs (see list_workflows)")] = None,
+        steps: Annotated[list[m.CustomStep] | None, Field(description="Steps for workflow='custom'")] = None,
+        title: str | None = None,
+    ) -> m.ProjectBrief:
+        """Start a persistent orchestration project and get the first ready step(s). Progress is stored on the
+        server, so any later session can continue with next_step(project_id)."""
+        return _orch(
+            lambda: orch.start(workflow, goal, game=game, addon=addon, inputs=inputs, custom_steps=steps, title=title)
+        )
+
+    @server.tool(annotations=READ_ONLY)
+    def next_step(project_id: ProjectId) -> m.ProjectBrief:
+        """Get the ready step(s) of a project: instructions, tools to use, rendered prompt text and the gate the
+        server will check when the step is marked done."""
+        return _orch(lambda: orch.brief(project_id))
+
+    @server.tool(annotations=WRITES_WORKSPACE)
+    def update_step(
+        project_id: ProjectId,
+        step_id: str,
+        status: Literal["in_progress", "done", "skipped", "blocked", "pending"],
+        notes: Annotated[str | None, Field(description="What was done / why skipped or blocked")] = None,
+        artifacts: Annotated[list[str] | None, Field(description="File paths, URLs, key findings")] = None,
+    ) -> m.ProjectBrief:
+        """Record progress on a step and get the next brief. Marking 'done' runs the step's gate (e.g. all addon
+        scripts must type-check); if it fails you get the problems back — fix them and retry."""
+        return _orch(lambda: orch.update(project_id, step_id, status, notes=notes, artifacts=artifacts))
+
+    @server.tool(annotations=READ_ONLY)
+    def get_project(project_id: ProjectId) -> m.Project:
+        """Full project state: every step's status, notes, artifacts and recent events."""
+        return _orch(lambda: orch.get(project_id))
+
+    @server.tool(annotations=READ_ONLY)
+    def list_projects(status: Literal["active", "done", "abandoned"] | None = None) -> list[m.ProjectSummary]:
+        """List orchestration projects (most recently updated first)."""
+        return _orch(lambda: orch.list(status))
+
+    @server.tool(annotations=READ_ONLY)
+    def get_prompt_text(
+        name: Annotated[str, Field(description=f"Prompt name: {', '.join(PROMPTS)}")],
+        arguments: Annotated[dict[str, str] | None, Field(description="Prompt arguments")] = None,
+    ) -> str:
+        """Render one of this server's prompts as text, for clients that can't fetch MCP prompts mid-task."""
+        return _orch(lambda: orch.prompt_text(name, arguments or {}))
 
     # -------------------------------------------------------------- resources
     @server.resource(

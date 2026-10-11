@@ -261,3 +261,107 @@ class Addon(BaseModel):
     game: str
     root: str = Field(description="Local content root of the addon")
     files: list[AddonFile] = []
+
+
+# ---------------------------------------------------------------- orchestration
+StepStatus = Literal["pending", "in_progress", "done", "skipped", "blocked"]
+
+
+class WorkflowInputInfo(BaseModel):
+    name: str
+    description: str
+    required: bool = False
+    default: str | None = None
+
+
+class WorkflowInfo(BaseModel):
+    id: str
+    title: str
+    description: str
+    games: list[str]
+    needs_addon: bool
+    inputs: list[WorkflowInputInfo] = []
+    steps: list[str] = []
+
+
+class CustomStep(BaseModel):
+    id: str = Field(pattern=r"^[a-z][a-z0-9_]{0,40}$")
+    title: str
+    kind: Literal["research", "design", "build", "validate", "test", "document"] = "build"
+    instructions: str
+    tools: list[str] = []
+    depends_on: list[str] = []
+    gate: str | None = Field(default=None, description="addon_exists | scripts_typecheck | cfgs_valid | evidence")
+
+
+class ProjectStep(BaseModel):
+    id: str
+    title: str
+    kind: str
+    status: StepStatus
+    depends_on: list[str] = []
+    gate: str | None = None
+    notes: str | None = None
+    artifacts: list[str] = []
+    updated_at: str
+
+
+class ProjectEvent(BaseModel):
+    step_id: str | None = None
+    event: str
+    detail: str | None = None
+    ts: str
+
+
+class ProjectSummary(BaseModel):
+    id: str
+    workflow: str
+    title: str
+    goal: str
+    game: str
+    addon: str | None = None
+    status: Literal["active", "done", "abandoned"]
+    progress: str
+    updated_at: str
+
+
+class Project(BaseModel):
+    id: str
+    workflow: str
+    title: str
+    goal: str
+    game: str
+    addon: str | None = None
+    inputs: dict[str, str] = {}
+    status: Literal["active", "done", "abandoned"]
+    created_at: str
+    updated_at: str
+    steps: list[ProjectStep] = []
+    recent_events: list[ProjectEvent] = []
+
+
+class StepBrief(BaseModel):
+    step_id: str
+    title: str
+    kind: str
+    status: StepStatus
+    instructions: str
+    tools: list[str] = []
+    prompt_name: str | None = None
+    prompt_text: str | None = Field(default=None, description="Rendered prompt for this step (grounded in live data)")
+    gate: str | None = None
+    gate_description: str | None = None
+    done_when: str | None = None
+
+
+class ProjectBrief(BaseModel):
+    project_id: str
+    title: str
+    goal: str
+    game: str
+    addon: str | None = None
+    status: str
+    progress: str
+    next_steps: list[StepBrief] = []
+    blocked_steps: list[str] = []
+    guidance: str

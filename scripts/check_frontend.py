@@ -30,6 +30,10 @@ ROUTES = [
     "cs2/docs?key=s2wiki%3A%2FScripting%2FCounter-Strike%202%2Fgame-modes",
     "cs2/search?q=spawn%20point",
     "cs2/search?q=%3Cimg%20src%3Dx%20onerror%3Dalert(1)%3E",
+    "cs2/validate",
+    "deadlock/validate",
+    "cs2/projects",
+    *sys.argv[2:],  # extra routes, e.g. cs2/projects/<id>
 ]
 ROW = re.compile(r'<tr|class="hit"|class="card"')
 

@@ -15,6 +15,8 @@ from s2docs.build.validate_script import validate_cs_script
 from s2docs.config import GAMES
 from s2docs.db.connection import Database
 from s2docs.db.repository import Repository
+from s2docs.orchestration.engine import Orchestrator, workflow_info
+from s2docs.orchestration.workflows import WORKFLOWS
 from s2docs.prompts import PROMPTS, render_prompt
 
 router = APIRouter(prefix="/api")
@@ -259,6 +261,68 @@ def validate_script(body: ScriptIn, repo: Repo):
 def validate_config(body: CfgIn, repo: Repo):
     valid_game(body.game)
     return validate_cfg(repo, body.text, game=body.game, context=body.context)
+
+
+# -------------------------------------------------------- orchestration
+def get_orchestrator(request: Request) -> Orchestrator:
+    return request.app.state.orchestrator
+
+
+Orch = Annotated[Orchestrator, Depends(get_orchestrator)]
+
+
+class StartProjectIn(BaseModel):
+    workflow: str
+    goal: str = Field(min_length=3, max_length=2000)
+    game: str = "cs2"
+    addon: str | None = None
+    inputs: dict[str, str] | None = None
+    steps: list[m.CustomStep] | None = None
+    title: str | None = None
+
+
+class UpdateStepIn(BaseModel):
+    status: Literal["in_progress", "done", "skipped", "blocked", "pending"]
+    notes: str | None = Field(default=None, max_length=20000)
+    artifacts: list[str] | None = None
+
+
+@router.get("/workflows", response_model=list[m.WorkflowInfo])
+def list_workflows():
+    return [workflow_info(w) for w in WORKFLOWS.values()]
+
+
+@router.get("/projects", response_model=list[m.ProjectSummary])
+def list_projects(orch: Orch, status: Literal["active", "done", "abandoned"] | None = None):
+    return orch.list(status)
+
+
+@router.post("/projects", response_model=m.ProjectBrief, status_code=201)
+def start_project(body: StartProjectIn, orch: Orch):
+    return orch.start(
+        body.workflow,
+        body.goal,
+        game=body.game,
+        addon=body.addon,
+        inputs=body.inputs,
+        custom_steps=body.steps,
+        title=body.title,
+    )
+
+
+@router.get("/projects/{project_id}", response_model=m.Project)
+def get_project(project_id: str, orch: Orch):
+    return orch.get(project_id)
+
+
+@router.get("/projects/{project_id}/brief", response_model=m.ProjectBrief)
+def project_brief(project_id: str, orch: Orch):
+    return orch.brief(project_id)
+
+
+@router.post("/projects/{project_id}/steps/{step_id}", response_model=m.ProjectBrief)
+def update_step(project_id: str, step_id: str, body: UpdateStepIn, orch: Orch):
+    return orch.update(project_id, step_id, body.status, notes=body.notes, artifacts=body.artifacts)
 
 
 # ------------------------------------------------------------- prompts

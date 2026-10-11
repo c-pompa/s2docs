@@ -90,6 +90,19 @@ def _search_ctx(repo: Repository, args: dict[str, str]) -> dict[str, str]:
     return ctx
 
 
+def _orchestrate_ctx(repo: Repository, args: dict[str, str]) -> dict[str, str]:
+    from s2docs.orchestration.workflows import WORKFLOWS
+
+    ctx = _game_ctx(repo, args)
+    lines = []
+    for w in WORKFLOWS.values():
+        if ctx["game"] in w.games:
+            inputs = ", ".join(f"{i.name} (default: {i.default})" for i in w.inputs) or "none"
+            lines.append(f"- `{w.id}`: {w.title}. {w.description} Steps: {len(w.steps)}. Inputs: {inputs}.")
+    ctx["workflows"] = "\n".join(lines) + "\n- `custom`: your own steps."
+    return ctx
+
+
 # ------------------------------------------------------------------ registry
 PROMPTS: dict[str, PromptSpec] = {
     p.name: p
@@ -134,6 +147,17 @@ PROMPTS: dict[str, PromptSpec] = {
             template="deadlock_mod.md",
             arguments=[PromptArg("goal", "What the mod should change")],
             context=lambda repo, args: _game_ctx(repo, {**args, "game": "deadlock"}),
+        ),
+        PromptSpec(
+            name="orchestrate",
+            title="Orchestrate a multi-step build",
+            description="Kick off a persistent, gated project chaining the research, prompt, build and validate tools.",
+            template="orchestrate.md",
+            arguments=[
+                PromptArg("goal", "What to build, e.g. 'an isometric Diablo-style spectator view addon'"),
+                PromptArg("game", "cs2 or deadlock", required=False),
+            ],
+            context=_orchestrate_ctx,
         ),
         PromptSpec(
             name="explain_symbol",

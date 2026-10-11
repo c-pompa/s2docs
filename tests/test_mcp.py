@@ -22,7 +22,7 @@ def test_tools_are_listed_read_only(server):
     tools = run(main)
     names = {t.name for t in tools}
     assert {"search_docs", "get_convar", "get_entity", "get_schema_class", "get_script_api", "diff_builds"} <= names
-    writers = {"scaffold_addon", "write_addon_file"}
+    writers = {"scaffold_addon", "write_addon_file", "start_project", "update_step"}
     assert all(t.annotations and t.annotations.read_only_hint for t in tools if t.name not in writers)
     assert all(t.annotations and t.annotations.destructive_hint is False for t in tools if t.name in writers)
 
@@ -60,6 +60,7 @@ def test_prompts_and_resources(server):
         "server_config",
         "deadlock_mod",
         "explain_symbol",
+        "orchestrate",
     }
     assert "open a door" in rendered.messages[0].content.text
     assert "declare module" in resource.contents[0].text

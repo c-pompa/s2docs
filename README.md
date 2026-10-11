@@ -72,7 +72,7 @@ claude mcp add --transport http s2docs http://127.0.0.1:8000/mcp
 }
 ```
 
-| Tools (all read-only) | |
+| Docs tools (read-only) | |
 |---|---|
 | `search_docs` | Full-text search over everything. Each hit's `key` feeds the matching detail tool. |
 | `get_convar`, `list_convars` | Default, min/max, flags (`cheat`, `replicated`, …) and help text |
@@ -85,7 +85,35 @@ claude mcp add --transport http s2docs http://127.0.0.1:8000/mcp
 | `list_examples`, `get_example` | Valve's cs_script sample scripts, each with the API it uses |
 | `list_docs`, `get_doc` | source2.wiki pages as Markdown, with URL and license for citation |
 
-**Prompts:** `cs2_script`, `hammer_io_logic`, `server_config`, `deadlock_mod`, `explain_symbol`. Each is a Markdown template in `src/s2docs/prompts/templates/`, filled at render time with live data from the database (e.g. the current `Instance` method index). Edit the `.md` files to tune them. The same prompts are available at `GET /api/prompts` and `POST /api/prompts/{name}/render`.
+| Build tools | |
+|---|---|
+| `validate_cs_script` | Type-checks a script with `tsc` against this build's `point_script.d.ts`. Diagnostics are categorized (`unknown_api`, `needs_type_narrowing` with the cast to use, `deprecated_api`, …) |
+| `validate_cfg` | Checks every cfg line against the indexed convars: unknown names (with suggestions), out-of-range values, cheat flags, client vs server |
+| `scaffold_addon`, `list_addons`, `get_addon`, `read_addon_file`, `write_addon_file` | Local addon workspace (`$S2DOCS_WORKSPACE`, default `data/workspace`). Writes text sources only, with no path escapes and no overwrites unless asked |
+
+| Orchestration tools | |
+|---|---|
+| `list_workflows` | Multi-step recipes: `cs2_script_feature`, `cs2_camera_addon`, `cs2_game_template`, `server_config`, or `custom` |
+| `start_project` | Creates a persistent project (stored in SQLite) and returns the first ready step(s) |
+| `next_step` | Ready steps, each with instructions, the tools to use, rendered prompt text, and its gate |
+| `update_step` | `in_progress` / `done` / `blocked` / `skipped`, with notes and artifacts. `done` runs the step's gate on the server |
+| `get_project`, `list_projects`, `get_prompt_text` | State, history, and prompt text for clients that can't fetch prompts mid-task |
+
+### Orchestration
+The server holds the plan and the quality gates. The client's model does the work. Start with the `orchestrate` prompt ("build an isometric Diablo-style viewer for CS2"), or call `start_project` directly:
+
+```
+start_project ─▶ brief (ready steps + tools + rendered prompt) ─▶ agent works ─▶ update_step(done)
+                     ▲                                                          │ gate check
+                     └──────────────── next ready steps (dependency DAG) ◀──────┘
+```
+
+- **Gates** are checked on the server, not taken on trust: `scripts_typecheck` re-runs `tsc` on every `.js` file in the addon, `cfgs_valid` validates every `.cfg`, `addon_exists`, and `evidence` (needs notes or artifacts). A failed gate returns the exact errors (HTTP 409 / MCP tool error).
+- **Steps form a DAG.** Independent steps (e.g. camera script and test cfg) become ready together, so a client can run them in parallel or hand them to subagents.
+- **Projects persist.** Any session can pick one up with `next_step <id>`, and the web UI's **Projects** page shows progress and can start projects or move steps.
+- Steps are snapshotted when a project starts, so editing `orchestration/workflows.py` never changes a project in flight.
+
+**Prompts:** `orchestrate`, `cs2_script`, `hammer_io_logic`, `server_config`, `deadlock_mod`, `explain_symbol`. Each is a Markdown template in `src/s2docs/prompts/templates/`, filled at render time with live data from the database (e.g. the current `Instance` method index). Edit the `.md` files to tune them. The same prompts are available at `GET /api/prompts` and `POST /api/prompts/{name}/render`.
 
 **Resources:** `s2docs://cs2/cs_script/point_script.d.ts` and `tsconfig.json` (put them next to your scripts for editor IntelliSense), plus `s2docs://cs2/cs_script/examples/{name}`.
 
@@ -106,6 +134,8 @@ src/s2docs/
   models.py               Pydantic models shared by the API and MCP
   prompts/                prompt registry + Markdown templates
   api/                    FastAPI app + routes (MCP mounted at /mcp, SPA at /)
+  build/                  validate_script (tsc), validate_cfg, workspace (addon files)
+  orchestration/          workflows.py (registry) + engine.py (projects, DAG, gates)
   mcp_server.py           MCP tools/prompts/resources (mcp SDK 2.x MCPServer)
   web/                    index.html, app.js, style.css (no build step)
 ```
@@ -115,14 +145,14 @@ src/s2docs/
 - `search_fts` is an FTS5 index over the current build of each game. `name` keeps identifiers whole (`_` is a token character, so `mp_round*` prefix-matches). `name_parts` and the body hold split forms (`m_iHealth` → `m i health`), so word searches find identifiers. Results are ranked by bm25 with column weights, with exact name matches first.
 - User input never becomes FTS syntax: it is reduced to quoted tokens and bound as a parameter. `LIKE` filters escape `%` and `_`. The only dynamic SQL is placeholder lists and fixed column names.
 - Entity and schema inheritance are resolved with recursive CTEs. `row_number()` keeps the nearest definition of an overridden member.
-- The API and MCP open the database read-only (`mode=ro`), one connection per request or tool call.
+- The API and MCP read docs data read-only (`mode=ro`), one connection per request or tool call. Only orchestration (`projects`, `project_steps`, `project_events`) writes, through the WAL writer connection.
 
 ## Development
 
 ```bash
-uv run pytest -q                     # 44 tests: parsers, repository, API, MCP (offline fixture tree)
+uv run pytest -q                     # 60 tests: parsers, repository, API, MCP, build tools, orchestration
 uv run ruff check src tests && uv run ruff format src tests
-uv run python scripts/check_frontend.py   # renders every SPA route in headless Chrome (server must be running on :8765)
+uv run python scripts/check_frontend.py   # renders every SPA route in headless Chrome (server on :8765; extra routes as args)
 ```
 
 ## Roadmap

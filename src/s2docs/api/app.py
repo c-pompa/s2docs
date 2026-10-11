@@ -16,18 +16,20 @@ from s2docs.build.validate_script import ToolchainMissing
 from s2docs.config import get_settings
 from s2docs.db.connection import Database, DatabaseNotInitialized
 from s2docs.db.repository import NotFound
+from s2docs.orchestration.engine import GateFailed, Orchestrator
 from s2docs.prompts import PromptError
 
 
-def create_app(db_path: Path | None = None, *, mount_mcp: bool = True) -> FastAPI:
+def create_app(db_path: Path | None = None, *, mount_mcp: bool = True, workspace: Path | None = None) -> FastAPI:
     db = Database(db_path or get_settings().db_path)
+    workspace = workspace or get_settings().workspace_dir
 
     mcp_server = None
     mcp_asgi = None
     if mount_mcp:
         from s2docs.mcp_server import create_mcp_server
 
-        mcp_server = create_mcp_server(db)
+        mcp_server = create_mcp_server(db, workspace)
         # Build the MCP ASGI app now so the session manager exists for the lifespan.
         mcp_asgi = mcp_server.streamable_http_app(streamable_http_path="/", stateless_http=True)
 
@@ -46,6 +48,7 @@ def create_app(db_path: Path | None = None, *, mount_mcp: bool = True) -> FastAP
         lifespan=lifespan,
     )
     app.state.db = db
+    app.state.orchestrator = Orchestrator(db, workspace)
 
     @app.exception_handler(NotFound)
     async def _not_found(_: Request, exc: NotFound) -> JSONResponse:
@@ -58,6 +61,10 @@ def create_app(db_path: Path | None = None, *, mount_mcp: bool = True) -> FastAP
     @app.exception_handler(ToolchainMissing)
     async def _no_toolchain(_: Request, exc: ToolchainMissing) -> JSONResponse:
         return JSONResponse({"detail": str(exc)}, status_code=503)
+
+    @app.exception_handler(GateFailed)
+    async def _gate_failed(_: Request, exc: GateFailed) -> JSONResponse:
+        return JSONResponse({"detail": str(exc), "gate_failed": True}, status_code=409)
 
     @app.exception_handler(PromptError)
     @app.exception_handler(ValueError)

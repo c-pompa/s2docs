@@ -56,7 +56,7 @@ async function api(path, params = {}) {
 const SECTIONS = [
   ["search", "Search"], ["convars", "ConVars & Commands"], ["entities", "Entities (Hammer)"],
   ["schema", "Schema"], ["events", "Game Events"], ["script", "cs_script API"], ["examples", "Examples"],
-  ["pulse", "Pulse"], ["docs", "Docs (source2.wiki)"], ["validate", "Validate"], ["diff", "Build Diff"], ["prompts", "Prompts"], ["stats", "Stats"],
+  ["pulse", "Pulse"], ["docs", "Docs (source2.wiki)"], ["validate", "Validate"], ["projects", "Projects"], ["diff", "Build Diff"], ["prompts", "Prompts"], ["stats", "Stats"],
 ];
 
 function parseHash() {
@@ -120,6 +120,8 @@ function bindFilters(section, rest, params) {
   );
   view.querySelectorAll("form[data-prompt]").forEach(bindPromptForm);
   view.querySelectorAll("form[data-validate]").forEach(bindValidateForm);
+  view.querySelectorAll("form[data-start-project]").forEach(bindStartProject);
+  view.querySelectorAll("form[data-step]").forEach(bindStepForm);
 }
 
 const pager = (page) => {
@@ -367,6 +369,48 @@ const ROUTES = {
         <td class="mono">${esc(r.name)}</td><td class="mono muted">${esc((r.before || "").slice(0, 160))}${r.change === "changed" ? " → " : ""}${esc((r.after || "").slice(0, 160))}</td></tr>`).join("")}</table>` : `<p class="muted">No changes.</p>`}`).join("")}`;
   },
 
+  async projects([pid]) {
+    const statusBadge = (s) => badge(s, s === "done" ? "kind" : s === "blocked" ? "warn" : "");
+    if (pid) {
+      const [p, b] = await Promise.all([api(`/projects/${enc(pid)}`), api(`/projects/${enc(pid)}/brief`)]);
+      const ready = b.next_steps.map((s) => `<div class="card" style="margin-bottom:10px">
+          <strong>${esc(s.title)}</strong> ${badge(s.kind)} ${s.gate ? badge("gate: " + s.gate, "warn") : ""}
+          <pre>${esc(s.instructions)}</pre>
+          ${s.tools.length ? `<p class="muted">Tools: ${s.tools.map((t) => `<code>${esc(t)}</code>`).join(" ")}</p>` : ""}
+          ${s.prompt_text ? `<details><summary>Prompt: ${esc(s.prompt_name)}</summary><pre>${esc(s.prompt_text)}</pre></details>` : ""}
+          <form data-step="${esc(s.step_id)}" data-project="${esc(pid)}">
+            <textarea name="notes" rows="2" placeholder="notes / evidence"></textarea>
+            <p>${["in_progress", "done", "blocked", "skipped"].map((st) => `<button name="status" value="${st}">${st}</button>`).join(" ")}</p>
+            <div class="result"></div></form></div>`).join("");
+      return `<p>${link([state.game, "projects"], "← Projects")}</p><h1>${esc(p.title)}</h1>
+        <p>${statusBadge(p.status)}${badge(p.workflow)}${badge(p.game)}${p.addon ? badge("addon: " + p.addon) : ""} <span class="mono muted">${esc(p.id)}</span></p>
+        <p>${esc(p.goal)}</p><p class="muted">${esc(b.guidance)}</p>
+        <p class="muted">Agent hand-off: <code>continue project ${esc(p.id)}</code> (MCP tool <code>next_step</code>)</p>
+        <h2>Steps (${esc(b.progress)})</h2>
+        <table><tr><th>Step</th><th>Status</th><th>Depends on</th><th>Notes / artifacts</th></tr>${p.steps.map((s) =>
+          `<tr><td><strong>${esc(s.title)}</strong><div class="muted mono">${esc(s.id)} · ${esc(s.kind)}</div></td><td>${statusBadge(s.status)}</td>
+           <td class="mono muted">${s.depends_on.map(esc).join(", ")}</td>
+           <td>${esc((s.notes || "").slice(0, 300))}${s.artifacts.length ? `<div class="muted mono">${s.artifacts.map(esc).join("<br>")}</div>` : ""}</td></tr>`).join("")}</table>
+        ${ready ? `<h2>Ready now</h2>${ready}` : ""}`;
+    }
+    const [projects, workflows] = await Promise.all([api("/projects"), api("/workflows")]);
+    const wfOptions = workflows.filter((w) => w.games.includes(state.game)).map((w) => [w.id, w.title]);
+    return `<h1>Projects</h1><p class="muted">Orchestrated, multi-step builds. Start one here or from an MCP client
+      (prompt <code>orchestrate</code>), then hand the project id to your agent.</p>
+      <form data-start-project class="card">
+        <p>${select("workflow", wfOptions[0]?.[0] || "", wfOptions)}</p>
+        <p><textarea name="goal" rows="2" placeholder="Goal, e.g. an isometric Diablo-style spectator view of the match"></textarea></p>
+        <p><input name="addon" placeholder="addon name (optional, lowercase_snake)"></p>
+        <p><textarea name="inputs" rows="2" placeholder="inputs, one key=value per line (optional)"></textarea></p>
+        <button type="submit">Start project</button><div class="result"></div></form>
+      <h2>Workflows</h2>${workflows.map((w) => `<details><summary><strong>${esc(w.title)}</strong> <span class="mono muted">${esc(w.id)}</span> ${w.games.map((g) => badge(g)).join("")}</summary>
+        <p>${esc(w.description)}</p><ol>${w.steps.map((s) => `<li class="mono">${esc(s)}</li>`).join("")}</ol></details>`).join("")}
+      <h2>All projects</h2>${projects.length ? `<table><tr><th>Project</th><th>Workflow</th><th>Status</th><th>Progress</th><th>Updated</th></tr>
+      ${projects.map((p) => `<tr><td>${link([state.game, "projects", p.id], p.title)}<div class="muted">${esc(p.goal.slice(0, 90))}</div></td>
+        <td class="mono">${esc(p.workflow)}</td><td>${statusBadge(p.status)}</td><td>${esc(p.progress)}</td><td class="muted">${esc(p.updated_at)}</td></tr>`).join("")}</table>`
+        : `<p class="muted">No projects yet.</p>`}`;
+  },
+
   async validate() {
     const g = state.games.find((x) => x.id === state.game);
     const scriptForm = g?.script_api ? `<h2>cs_script</h2>
@@ -411,6 +455,38 @@ async function home() {
     ${tile(c.entities, "Hammer entities", "entities")}${tile(c.schema_classes, "schema classes", "schema")}
     ${tile(c.schema_enums, "schema enums", "schema")}${tile(c.game_events, "game events", "events")}
     ${c.script_symbols ? tile(c.script_symbols, "cs_script symbols", "script") : ""}${tile(c.pulse_bindings, "Pulse bindings", "pulse")}</div>`;
+}
+
+async function postJson(url, body) {
+  const res = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  return { ok: res.ok, body: await res.json().catch(() => ({})) };
+}
+
+function bindStartProject(form) {
+  form.addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    const f = form.elements;
+    const inputs = Object.fromEntries(f.inputs.value.split("\n").map((l) => l.split("=")).filter((kv) => kv.length === 2 && kv[0].trim())
+      .map(([k, v]) => [k.trim(), v.trim()]));
+    const r = await postJson("/api/projects", { workflow: f.workflow.value, goal: f.goal.value.trim(), game: state.game,
+      addon: f.addon.value.trim() || null, inputs });
+    if (!r.ok) { form.querySelector(".result").innerHTML = `<p class="err">${esc(r.body.detail)}</p>`; return; }
+    go([state.game, "projects", r.body.project_id]);
+  });
+}
+
+function bindStepForm(form) {
+  form.addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    const status = ev.submitter?.value || "in_progress";
+    const r = await postJson(`/api/projects/${enc(form.dataset.project)}/steps/${enc(form.dataset.step)}`,
+      { status, notes: form.elements.notes.value.trim() || null });
+    if (!r.ok) {
+      form.querySelector(".result").innerHTML = `<pre class="err">${esc(typeof r.body.detail === "string" ? r.body.detail : JSON.stringify(r.body.detail))}</pre>`;
+      return;
+    }
+    route();
+  });
 }
 
 function bindValidateForm(form) {
