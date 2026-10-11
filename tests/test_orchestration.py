@@ -65,7 +65,11 @@ def test_camera_project_flow_and_gates(orch, tmp_path, repo):
     # implement_camera and config are independent: both ready at once
     assert {s.step_id for s in brief.next_steps} == {"implement_camera", "config"}
 
-    with pytest.raises(GateFailed, match="no .cfg files"):
+    with pytest.raises(GateFailed, match="no cfg/"):
+        orch.update(pid, "config", "done", notes="x")
+    # a non-console .cfg outside cfg/ (GSI VDF) is not a console cfg and doesn't satisfy or fail the gate
+    ws.write_file(tmp_path / "ws", "cs2", addon, "gsi/gamestate_integration_x.cfg", '"x" { "uri" "http://h" }')
+    with pytest.raises(GateFailed, match="no cfg/"):
         orch.update(pid, "config", "done", notes="x")
     ws.write_file(tmp_path / "ws", "cs2", addon, "cfg/test.cfg", "mp_roundtme 3\n")
     with pytest.raises(GateFailed, match="unknown_command"):
@@ -87,6 +91,8 @@ def test_scripts_typecheck_gate(orch, tmp_path, repo):
     orch.update(pid, "scaffold", "done", notes="ok")
     # The scaffolded starter uses real-API methods absent from the test fixture d.ts, so replace it.
     ws.write_file(tmp_path / "ws", "cs2", "jump_boost", "scripts/jump_boost.js", BAD, overwrite=True)
+    # Node tooling outside scripts/ is not cs_script and must not be type-checked against point_script.d.ts
+    ws.write_file(tmp_path / "ws", "cs2", "jump_boost", "tools/helper.js", "require('net').connect(1);")
     orch.update(pid, "implement", "done", notes="written")
     with pytest.raises(GateFailed, match="unknown_api") as exc:
         orch.update(pid, "validate", "done", notes="checked")

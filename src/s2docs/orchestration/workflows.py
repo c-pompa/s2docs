@@ -12,8 +12,8 @@ from dataclasses import dataclass, field
 # Gates the engine knows how to check (see engine._check_gate).
 GATES = {
     "addon_exists": "the addon has been scaffolded in the workspace",
-    "scripts_typecheck": "every .js file in the addon passes validate_cs_script with 0 errors",
-    "cfgs_valid": "every .cfg file in the addon passes validate_cfg with 0 errors",
+    "scripts_typecheck": "every scripts/**/*.js file in the addon passes validate_cs_script with 0 errors",
+    "cfgs_valid": "every cfg/**/*.cfg file in the addon passes validate_cfg with 0 errors",
     "evidence": "notes or artifacts describing the result must be provided",
 }
 

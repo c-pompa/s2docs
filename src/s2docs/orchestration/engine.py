@@ -366,9 +366,11 @@ class Orchestrator:
         if gate == "addon_exists":
             return
         if gate == "scripts_typecheck":
-            files = [f.path for f in addon.files if f.path.endswith(".js")]
+            # Only cs_script sources (scripts/) are checked against point_script.d.ts; other .js in the addon
+            # (e.g. external tools) is not engine script.
+            files = [f.path for f in addon.files if f.path.startswith("scripts/") and f.path.endswith(".js")]
             if not files:
-                raise GateFailed("no .js files in the addon to validate")
+                raise GateFailed("no scripts/*.js files in the addon to validate")
             problems = []
             with self.db.reader() as conn:
                 repo = Repository(conn)
@@ -382,9 +384,10 @@ class Orchestrator:
                 raise GateFailed("scripts have errors:\n" + "\n".join(problems[:25]))
             return
         if gate == "cfgs_valid":
-            files = [f.path for f in addon.files if f.path.endswith(".cfg")]
+            # Console cfgs live under cfg/; other .cfg files (e.g. gamestate_integration VDF) aren't commands.
+            files = [f.path for f in addon.files if f.path.startswith("cfg/") and f.path.endswith(".cfg")]
             if not files:
-                raise GateFailed("no .cfg files in the addon (expected under cfg/)")
+                raise GateFailed("no cfg/*.cfg files in the addon")
             problems = []
             with self.db.reader() as conn:
                 repo = Repository(conn)
