@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
 
@@ -16,6 +16,12 @@ class Game:
     mod_dir: str  # folder under game/ (csgo, citadel)
     repo: str  # SteamTracking GameTracking repository
     script_api: str | None = None  # official scripting API shipped as .d.ts, if any
+    # Valve hand-written FGD entry points: root label -> file name, resolved against game/<mod>, then game/core.
+    hammer_fgd_roots: dict[str, str] = field(default_factory=dict)
+
+    @property
+    def fgd_search_dirs(self) -> list[str]:
+        return [f"game/{self.mod_dir}", "game/core"]
 
     @property
     def sparse_patterns(self) -> list[str]:
@@ -26,6 +32,8 @@ class Game:
             "/game/core/pak01_dir/resource/*.gameevents",
             f"/game/{self.mod_dir}/pak01_dir/resource/*.gameevents",
         ]
+        if self.hammer_fgd_roots:
+            patterns += [f"/game/{self.mod_dir}/**/*.fgd", "/game/core/**/*.fgd"]
         if self.script_api == "cs_script":
             patterns.append("/content/csgo_addons/cs_script_demo/maps/scripts/")
         return patterns
@@ -39,6 +47,12 @@ GAMES: dict[str, Game] = {
         mod_dir="csgo",
         repo="https://github.com/SteamTracking/GameTracking-CS2.git",
         script_api="cs_script",
+        hammer_fgd_roots={
+            "hammer": "csgo.fgd",
+            "modeldoc": "models_gamedata.fgd",
+            "cs2_item_editor": "tools/cs2_item_editor/cs2_item_editor.fgd",
+            "addoninfo": "tools/workshop_addoninfo.fgd",
+        },
     ),
     "deadlock": Game(
         id="deadlock",
@@ -48,6 +62,11 @@ GAMES: dict[str, Game] = {
         repo="https://github.com/SteamTracking/GameTracking-Deadlock.git",
     ),
 }
+
+# Community documentation sources (cloned shallowly next to the GameTracking checkouts).
+SOURCE2WIKI_REPO = "https://github.com/Source2Wiki/Source2Wiki.git"
+SOURCE2WIKI_SITE = "https://www.source2.wiki"
+SOURCE2WIKI_LICENSE = "CC BY-SA 4.0 (Source2Wiki contributors)"
 
 
 @dataclass(frozen=True, slots=True)

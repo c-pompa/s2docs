@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import sqlite3
 from collections.abc import Iterable
 from dataclasses import dataclass, field
@@ -132,11 +133,14 @@ def load_build(
         ).fetchone()[0]
 
         # Search index only covers the current build of each game.
-        conn.execute("DELETE FROM search_fts WHERE game_id = ?", (game.id,))
+        # (Human docs are indexed separately and survive game reloads.)
+        conn.execute("DELETE FROM search_fts WHERE game_id = ? AND kind != 'doc'", (game.id,))
         fts = _FtsWriter(conn, game.id, build_id)
 
         _load_convars(conn, build_id, dump, fts, stats)
-        _load_entities(conn, build_id, dump, fts, stats)
+        hammer = _load_hammer_fgds(conn, build_id, root, game, stats)
+        server_entities = _load_entities(conn, build_id, dump, fts, stats, hammer)
+        _index_hammer_only(fts, hammer, server_entities, stats)
         _load_schemas(conn, build_id, dump, fts, stats)
         _load_events(conn, build_id, root, game, fts, stats)
         _load_pulse(conn, build_id, dump, fts, stats)
@@ -189,7 +193,11 @@ def _load_convars(conn, build_id, dump: Path, fts: _FtsWriter, stats: LoadStats)
             stats.bump(kind)
 
 
-def _load_entities(conn, build_id, dump: Path, fts: _FtsWriter, stats: LoadStats) -> None:
+def _load_entities(
+    conn, build_id, dump: Path, fts: _FtsWriter, stats: LoadStats, hammer: dict[str, p.HammerClass]
+) -> set[str]:
+    """Load runtime (DumpSource2) entities. Returns the set of server classnames."""
+    server: set[str] = set()
     for side in ("server", "client"):
         path = dump / "entities" / f"{side}.fgd"
         if not path.exists():
@@ -236,15 +244,105 @@ def _load_entities(conn, build_id, dump: Path, fts: _FtsWriter, stats: LoadStats
             io = " ".join(f"{m.kind} {_ident(m.name)}" for m in ent.members if m.kind != "keyvalue")
             kvs = " ".join(_ident(m.name) for m in ent.members if m.kind == "keyvalue")
             descs = [m.description for m in ent.members if m.description]
+            valve = hammer.get(ent.classname) if side == "server" else None
             fts.add(
                 "entity",
                 f"{side}:{ent.classname}",
                 ent.classname,
-                f"{side} entity",
-                [ent.description, ent.cpp_class, " ".join(ent.bases), io, kvs, *descs],
+                f"{side} entity" + (f" — {valve.tool_name}" if valve and valve.tool_name else ""),
+                [ent.description, ent.cpp_class, " ".join(ent.bases), io, kvs, *descs, *_hammer_text(valve)],
             )
+            if side == "server":
+                server.add(ent.classname)
             stats.bump(f"entity_{side}")
             stats.bump("entity_members", len(ent.members))
+    return server
+
+
+def _hammer_text(cls: p.HammerClass | None) -> list[str]:
+    """Searchable text from a Valve FGD class: description, tool name/tip, member labels and help."""
+    if cls is None:
+        return []
+    out = [cls.description or "", cls.tool_name or "", cls.tool_tip or ""]
+    for m in cls.members:
+        out.append(" ".join(x for x in (_ident(m.name), m.label, m.description) if x))
+    return out
+
+
+def _load_hammer_fgds(conn, build_id, root: Path, game: Game, stats: LoadStats) -> dict[str, p.HammerClass]:
+    """Load Valve's hand-written FGDs for each configured root. Returns the 'hammer' root's classes."""
+
+    def read(name: str) -> str | None:
+        for d in game.fgd_search_dirs:
+            path = root / d / name
+            if path.is_file():
+                return path.read_text(encoding="utf-8", errors="replace")
+        log.warning("%s: FGD include %r not found", game.id, name)
+        return None
+
+    hammer: dict[str, p.HammerClass] = {}
+    for label, entry in game.hammer_fgd_roots.items():
+        if read(entry) is None:
+            continue
+        classes = p.resolve_hammer_fgds(entry, read)
+        if label == "hammer":
+            hammer = classes
+        for cls in classes.values():
+            cid = conn.execute(
+                "INSERT INTO hammer_classes (build_id, root, source_file, classname, class_type, description, "
+                "tool_name, tool_tip, tool_group) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id",
+                (
+                    build_id,
+                    label,
+                    cls.source_file,
+                    cls.classname,
+                    cls.class_type,
+                    cls.description,
+                    cls.tool_name,
+                    cls.tool_tip,
+                    cls.tool_group,
+                ),
+            ).fetchone()[0]
+            conn.executemany(
+                "INSERT INTO hammer_class_bases (class_id, ordinal, base_name) VALUES (?, ?, ?)",
+                [(cid, i, b) for i, b in enumerate(cls.bases)],
+            )
+            conn.executemany(
+                "INSERT INTO hammer_members (class_id, ordinal, kind, name, type, label, default_value, "
+                "description, choices, meta) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                [
+                    (
+                        cid,
+                        i,
+                        m.kind,
+                        m.name,
+                        m.type,
+                        m.label,
+                        m.default,
+                        m.description,
+                        json.dumps(m.choices) if m.choices else None,
+                        json.dumps(m.meta),
+                    )
+                    for i, m in enumerate(cls.members)
+                ],
+            )
+            stats.bump(f"hammer_{label}")
+    return hammer
+
+
+def _index_hammer_only(fts: _FtsWriter, hammer: dict[str, p.HammerClass], server: set[str], stats) -> None:
+    """Editor-only classes (in Valve's FGD but not registered at runtime) still get search entries."""
+    for cls in hammer.values():
+        if cls.class_type == "BaseClass" or cls.classname in server:
+            continue
+        fts.add(
+            "entity",
+            f"server:{cls.classname}",
+            cls.classname,
+            "Hammer entity (editor)" + (f" — {cls.tool_name}" if cls.tool_name else ""),
+            _hammer_text(cls),
+        )
+        stats.bump("entity_hammer_only")
 
 
 def _load_schemas(conn, build_id, dump: Path, fts: _FtsWriter, stats: LoadStats) -> None:
@@ -403,3 +501,41 @@ def _load_cs_script(conn, build_id, root: Path, fts: _FtsWriter, stats: LoadStat
                 [s.signature, s.doc],
             )
         stats.bump("script_symbols")
+
+    _load_cs_script_examples(conn, build_id, script_dir, fts, stats)
+
+
+_IMPORT = re.compile(r'import\s*\{([^}]*)\}\s*from\s*"cs_script/point_script"')
+_INSTANCE_CALL = re.compile(r"\bInstance\.(\w+)")
+
+
+def describe_cs_script(code: str) -> tuple[list[str], list[str]]:
+    """Return (imported symbols, Instance methods used) for a cs_script source file."""
+    imports = sorted({x.strip() for m in _IMPORT.finditer(code) for x in m.group(1).split(",") if x.strip()})
+    calls = sorted(set(_INSTANCE_CALL.findall(code)))
+    return imports, calls
+
+
+def _load_cs_script_examples(conn, build_id, script_dir: Path, fts: _FtsWriter, stats: LoadStats) -> None:
+    """Valve's sample scripts from the cs_script_demo addon."""
+    game_id = fts.game_id
+    for path in sorted(script_dir.glob("*.js")):
+        code = path.read_text(encoding="utf-8", errors="replace")
+        imports, calls = describe_cs_script(code)
+        desc = (
+            f"Valve sample script from the cs_script_demo addon. Imports: {', '.join(imports) or 'none'}. "
+            f"Uses Instance.{', Instance.'.join(calls) if calls else ' (no Instance calls)'}."
+        )
+        conn.execute(
+            "INSERT INTO examples (build_id, game_id, api, name, path, origin, description, content) "
+            "VALUES (?, ?, 'cs_script', ?, ?, 'valve', ?, ?)",
+            (build_id, game_id, path.name, str(_CS_SCRIPT_DIR / path.name), desc, code),
+        )
+        fts.add(
+            "example",
+            f"cs_script/{path.name}",
+            path.stem,
+            "cs_script example (Valve)",
+            [desc, " ".join(_ident(c) for c in calls), " ".join(imports)],
+        )
+        stats.bump("examples")

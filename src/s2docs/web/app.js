@@ -11,6 +11,34 @@ const enc = encodeURIComponent;
 const snippet = (s) => esc(s).replace(/\*\*(.+?)\*\*/g, "<mark>$1</mark>");
 const badge = (t, cls = "") => `<span class="badge ${cls}">${esc(t)}</span>`;
 const firstLine = (s) => (s || "").split("\n")[0];
+// Valve FGD text contains <br> line breaks; everything else stays escaped.
+const rich = (s) => esc(s).replace(/&lt;br\s*\/?&gt;/gi, "<br>");
+const stripTags = (s) => String(s).replace(/<[^>]+>/g, " ");
+
+// Minimal Markdown renderer for docs: escape first, then add a small safe subset of formatting.
+function markdown(src) {
+  const blocks = [];
+  let text = String(src).replace(/```(\w*)\n([\s\S]*?)```/g, (_, lang, code) => {
+    blocks.push(`<pre><code>${esc(code)}</code></pre>`);
+    return `\u0000${blocks.length - 1}\u0000`;
+  });
+  text = esc(text)
+    .replace(/(?:^\|.*\|[ \t]*(?:\n|$))+/gm, (block) => {
+      const rows = block.trim().split("\n").filter((r) => !/^\|[\s|:-]+\|$/.test(r.trim()));
+      const cells = (r) => r.trim().replace(/^\||\|$/g, "").split("|").map((c) => c.trim());
+      const [head, ...body] = rows;
+      return `<table><tr>${cells(head).map((c) => `<th>${c}</th>`).join("")}</tr>${body
+        .map((r) => `<tr>${cells(r).map((c) => `<td>${c}</td>`).join("")}</tr>`).join("")}</table>`;
+    })
+    .replace(/^### (.*)$/gm, "<h4>$1</h4>").replace(/^## (.*)$/gm, "<h3>$1</h3>").replace(/^# (.*)$/gm, "<h2>$1</h2>")
+    .replace(/`([^`\n]+)`/g, "<code>$1</code>")
+    .replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>")
+    .replace(/\[([^\]\n]+)\]\((https?:\/\/[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>')
+    .replace(/^\s*[-*] (.*)$/gm, "<li>$1</li>")
+    .replace(/^:::(\w+)\s*$/gm, '<div class="muted">[$1]</div>').replace(/^:::\s*$/gm, "")
+    .replace(/\n{2,}/g, "<br><br>");
+  return text.replace(/\u0000(\d+)\u0000/g, (_, i) => blocks[Number(i)]);
+}
 
 async function api(path, params = {}) {
   const url = new URL("/api" + path, location.origin);
@@ -27,8 +55,8 @@ async function api(path, params = {}) {
 // ------------------------------------------------------------------ routing
 const SECTIONS = [
   ["search", "Search"], ["convars", "ConVars & Commands"], ["entities", "Entities (Hammer)"],
-  ["schema", "Schema"], ["events", "Game Events"], ["script", "cs_script API"], ["pulse", "Pulse"],
-  ["diff", "Build Diff"], ["prompts", "Prompts"], ["stats", "Stats"],
+  ["schema", "Schema"], ["events", "Game Events"], ["script", "cs_script API"], ["examples", "Examples"],
+  ["pulse", "Pulse"], ["docs", "Docs (source2.wiki)"], ["diff", "Build Diff"], ["prompts", "Prompts"], ["stats", "Stats"],
 ];
 
 function parseHash() {
@@ -48,7 +76,7 @@ const link = (parts, label, params = {}) => {
 function renderNav(active) {
   const g = state.games.find((x) => x.id === state.game);
   $("#nav").innerHTML = SECTIONS.map(([id, label]) => {
-    const disabled = id === "script" && !g?.script_api;
+    const disabled = (id === "script" || id === "examples") && !g?.script_api;
     return `<a href="#/${enc(state.game)}/${id}" class="${id === active ? "active" : ""} ${disabled ? "disabled" : ""}">${esc(label)}</a>`;
   }).join("");
   $("#build").textContent = g?.current_build ? `build ${g.current_build} · ${g.patch_version || ""}` : "not indexed";
@@ -118,6 +146,8 @@ function hitLink(hit) {
     case "event": return link([g, "events", k], hit.name);
     case "script": { const [t, mem] = k.includes(".") ? k.split(".") : [k, ""]; return link([g, "script", t], k, mem ? { m: mem } : {}); }
     case "pulse": return link([g, "pulse", k], hit.name);
+    case "example": return link([g, "examples", k.replace(/^cs_script\//, "")], k);
+    case "doc": return link([state.game, "docs"], hit.name, { key: k });
     default: return esc(hit.name);
   }
 }
@@ -164,33 +194,71 @@ const ROUTES = {
     if (cls) {
       const e = await api(`/games/${state.game}/entities/${enc(side)}/${enc(cls)}`);
       const rows = (kind) => e.members.filter((m) => m.kind === kind);
+      const srcBadge = (m) => m.source === "valve_fgd" ? badge("editor key", "kind") : m.source === "runtime" ? badge("runtime only") : "";
+      const entLink = (n) => link([state.game, "entities", e.side, n], n);
       const memberTable = (kind, cols) => {
         const items = rows(kind);
         if (!items.length) return `<p class="muted">None.</p>`;
         return `<table><tr>${cols.map((c) => `<th>${c}</th>`).join("")}</tr>${items.map((m) =>
-          `<tr class="${m.defined_in !== e.classname ? "inherited" : ""}"><td class="mono">${esc(m.name)}</td><td class="mono">${esc(m.type)}</td>
-           <td>${esc(m.description || "")}${m.choices ? `<div class="muted">${m.choices.map(([v, l]) => `${esc(v)}=${esc(l)}`).join(", ")}</div>` : ""}
+          `<tr class="${m.defined_in !== e.classname ? "inherited" : ""}">
+           <td class="mono">${esc(m.name)}${m.label && m.label !== m.name ? `<div class="muted">${esc(m.label)}</div>` : ""}</td>
+           <td class="mono">${esc(m.type)}${m.default_value != null ? `<div class="muted">= ${esc(m.default_value)}</div>` : ""}</td>
+           <td>${rich(m.description || "")}${m.choices ? `<div class="muted">${m.choices.map(([v, l]) => `${esc(v)}=${esc(l)}`).join(", ")}</div>` : ""}
            ${m.notes ? `<div class="muted mono">${esc(m.notes)}</div>` : ""}</td>
-           <td>${m.defined_in === e.classname ? "" : link([state.game, "entities", e.side, m.defined_in], m.defined_in)}${m.component ? badge(m.component) : ""}</td></tr>`).join("")}</table>`;
+           <td>${m.defined_in === e.classname ? "" : esc(m.defined_in)} ${srcBadge(m)}${m.component ? badge(m.component) : ""}</td></tr>`).join("")}</table>`;
       };
       return `<p>${link([state.game, "entities"], "← Entities", { side: e.side })}</p>
         <h1 class="mono">${esc(e.classname)}</h1>
-        <p>${badge(e.side, "kind")}${badge(e.class_type)}${e.cpp_class ? badge(e.cpp_class) : ""}</p>
-        ${e.description ? `<p>${esc(e.description)}</p>` : ""}
-        <p class="muted">Inherits: ${e.inheritance.map((b) => link([state.game, "entities", e.side, b], b)).join(" → ") || "—"}</p>
+        <p>${badge(e.side, "kind")}${badge(e.class_type)}${e.cpp_class ? badge(e.cpp_class) : ""}${e.tool_name ? badge("Hammer: " + e.tool_name) : ""}
+          ${e.origin === "valve_fgd" ? badge("editor-only (not registered at runtime)", "warn") : ""}${e.fgd_file ? badge("Valve FGD: " + e.fgd_file) : ""}</p>
+        ${e.description ? `<p>${rich(e.description)}</p>` : ""}${e.tool_tip ? `<p class="muted">${esc(e.tool_tip)}</p>` : ""}
+        <p class="muted">Runtime inherits: ${e.inheritance.map(entLink).join(" → ") || "—"}</p>
+        ${e.fgd_inheritance.length ? `<p class="muted">Valve FGD bases: ${e.fgd_inheritance.map(esc).join(" → ")}</p>` : ""}
         <h2>Outputs (${rows("output").length})</h2>${memberTable("output", ["Output", "Param", "Description", "From"])}
         <h2>Inputs (${rows("input").length})</h2>${memberTable("input", ["Input", "Param", "Description", "From"])}
-        <h2>Keyvalues (${rows("keyvalue").length})</h2>${memberTable("keyvalue", ["Key", "Type", "Description", "From"])}`;
+        <h2>Keyvalues (${rows("keyvalue").length})</h2>${memberTable("keyvalue", ["Key / label", "Type / default", "Description", "From"])}`;
     }
     const s = p.side || "server";
     const page = await api(`/games/${state.game}/entities`, { q: p.q, side: s, io: p.io, include_base: p.base === "1", limit: 100, offset: p.offset });
     return `<h1>Hammer entities</h1>
-      <form class="filters">${input("q", p.q, "classname contains…")}${input("io", p.io, "has input/output (e.g. OnTrigger)")}
+      <form class="filters">${input("q", p.q, "classname, C++ class or Hammer name contains…")}${input("io", p.io, "has input/output (e.g. OnTrigger)")}
         ${select("side", s, [["server", "server"], ["client", "client"]])}
         <label><input type="checkbox" name="base" ${p.base ? "checked" : ""}> include base classes</label></form>
-      <table><tr><th>Classname</th><th>C++ class</th><th>Bases</th></tr>
-      ${page.items.map((e) => `<tr><td class="mono">${link([state.game, "entities", e.side, e.classname], e.classname)}</td>
-        <td class="mono muted">${esc(e.cpp_class || "")}</td><td class="mono">${e.bases.map(esc).join(", ")}</td></tr>`).join("")}</table>${pager(page)}`;
+      <table><tr><th>Classname</th><th>Hammer name</th><th>Description</th><th>Bases</th></tr>
+      ${page.items.map((e) => `<tr><td class="mono">${link([state.game, "entities", e.side, e.classname], e.classname)}
+        ${e.origin === "valve_fgd" ? badge("editor-only", "warn") : ""}</td><td>${esc(e.tool_name || "")}</td>
+        <td class="muted">${esc(stripTags(e.description || "").slice(0, 120))}</td><td class="mono">${e.bases.map(esc).join(", ")}</td></tr>`).join("")}</table>${pager(page)}`;
+  },
+
+  async examples([name]) {
+    if (name) {
+      const ex = await api(`/games/${state.game}/examples/${enc(name)}`);
+      return `<p>${link([state.game, "examples"], "← Examples")}</p><h1 class="mono">${esc(ex.name)}</h1>
+        <p>${badge(ex.origin === "valve" ? "Valve sample" : "community", "kind")}${badge(ex.api)}<span class="muted mono"> ${esc(ex.path)}</span></p>
+        <p class="muted">${esc(ex.description || "")}</p><pre>${esc(ex.content)}</pre>`;
+    }
+    const list = await api(`/games/${state.game}/examples`);
+    if (!list.length) return `<h1>Examples</h1><p class="muted">No examples for this game.</p>`;
+    return `<h1>Examples</h1><p class="muted">Sample scripts shipped by Valve in the <code>cs_script_demo</code> addon.</p>
+      <table><tr><th>Name</th><th>API</th><th>Description</th></tr>${list.map((x) => `<tr><td class="mono">${link([state.game, "examples", x.name], x.name)}</td>
+      <td>${esc(x.api)}</td><td class="muted">${esc(x.description || "")}</td></tr>`).join("")}</table>`;
+  },
+
+  async docs(_, p) {
+    if (p.key) {
+      const d = await api("/doc", { key: p.key });
+      return `<p>${link([state.game, "docs"], "← Docs")}</p><h1>${esc(d.title)}</h1>
+        <p>${badge(d.source, "kind")}${d.game ? badge(d.game) : badge("all games")}
+        <a href="${esc(d.url)}" target="_blank" rel="noopener">${esc(d.url)}</a></p>
+        ${d.description ? `<p class="muted">${esc(d.description)}</p>` : ""}
+        <div class="doc">${markdown(d.body || "")}</div>
+        <p class="muted">License: ${esc(d.license || "unknown")}. Content from ${esc(d.source)}; see the original page for images and edits.</p>`;
+    }
+    const page = await api("/docs", { game: state.game, q: p.q, limit: 100, offset: p.offset });
+    return `<h1>Docs</h1><p class="muted">Community documentation from <a href="https://www.source2.wiki" target="_blank" rel="noopener">source2.wiki</a> (CC BY-SA 4.0).</p>
+      <form class="filters">${input("q", p.q, "title or path contains…")}</form>
+      <table><tr><th>Title</th><th>Path</th><th>Game</th></tr>${page.items.map((d) => `<tr><td>${link([state.game, "docs"], d.title, { key: d.key })}</td>
+      <td class="muted mono">${esc(d.key.replace(/^s2wiki:/, ""))}</td><td>${esc(d.game || "all")}</td></tr>`).join("")}</table>${pager(page)}`;
   },
 
   async schema([name], p) {

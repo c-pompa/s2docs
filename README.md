@@ -15,8 +15,19 @@ Everything is extracted from each game build, then served three ways:
 | Game events | 273 | 196 | `game/*/pak01_dir/resource/*.gameevents` |
 | Pulse bindings | 2,488 | 2,646 | `DumpSource2/module_metadata/*/pulse_bindings.txt` |
 | cs_script API symbols | 517 | — | `point_script.d.ts` (Valve's official declarations) |
+| Valve Hammer FGD classes (labels, help, defaults, choices) | 430 (63 editor-only) | — | `game/csgo/csgo.fgd` + `game/core/*.fgd` |
+| Valve sample scripts | 7 | — | `content/csgo_addons/cs_script_demo/maps/scripts/*.js` |
+| Community docs | 185 pages (all games) | | [source2.wiki](https://www.source2.wiki) (CC BY-SA 4.0) |
 
-All data comes from [SteamTracking GameTracking](https://github.com/SteamTracking) repositories, which are re-dumped on every game patch. No game install is needed. See [RESEARCH.md](RESEARCH.md) for the full source survey.
+### Where the data comes from
+
+| Source | Authored by | How we get it |
+|---|---|---|
+| `point_script.d.ts`, `tsconfig.json`, sample `*.js`, `*.gameevents`, Hammer `*.fgd`, `steam.inf` | **Valve**, copied verbatim from the game install | [SteamTracking GameTracking](https://github.com/SteamTracking) mirrors the files on every patch |
+| Convars/commands, runtime entity lists, schema, Pulse bindings | **Valve's binaries**, extracted with [DumpSource2](https://github.com/ValveResourceFormat/DumpSource2) | Same GameTracking repos (`DumpSource2/`) |
+| Wiki pages | source2.wiki community, CC BY-SA 4.0 | Shallow, sparse git clone of [Source2Wiki/Source2Wiki](https://github.com/Source2Wiki/Source2Wiki) |
+
+No game install is needed. Entity lookups merge both entity sources. Every member is tagged `runtime` (registered by the binary), `valve_fgd` (an editor-only key from Valve's FGD) or `both`. The Valve Developer Community wiki is not ingested: it sits behind an anti-bot proof-of-work wall (Anubis) that deliberately blocks scripted clients. See [RESEARCH.md](RESEARCH.md) for the full source survey.
 
 ## Quick start
 
@@ -31,6 +42,7 @@ Other commands:
 ```bash
 uv run s2docs sync --game cs2         # one game
 uv run s2docs sync --no-fetch         # re-index the existing checkout (e.g. after parser changes)
+uv run s2docs sync --docs-only        # only refresh source2.wiki   (--skip-docs to skip it)
 uv run s2docs load cs2 /path/to/GameTracking-CS2   # index a full local clone
 uv run s2docs stats
 uv run s2docs prompt cs2_script task="teleport players who touch the lava"
@@ -70,10 +82,12 @@ claude mcp add --transport http s2docs http://127.0.0.1:8000/mcp
 | `get_script_api`, `list_script_types` | The cs_script API (`Instance` = `Domain`), including inherited members |
 | `search_pulse` | Pulse visual-scripting node bindings |
 | `diff_builds` | What changed between two indexed builds (convars, entities, schema, events, script API) |
+| `list_examples`, `get_example` | Valve's cs_script sample scripts, each with the API it uses |
+| `list_docs`, `get_doc` | source2.wiki pages as Markdown, with URL and license for citation |
 
 **Prompts:** `cs2_script`, `hammer_io_logic`, `server_config`, `deadlock_mod`, `explain_symbol`. Each is a Markdown template in `src/s2docs/prompts/templates/`, filled at render time with live data from the database (e.g. the current `Instance` method index). Edit the `.md` files to tune them. The same prompts are available at `GET /api/prompts` and `POST /api/prompts/{name}/render`.
 
-**Resources:** `s2docs://cs2/cs_script/point_script.d.ts` and `tsconfig.json`. Put them next to your scripts for editor IntelliSense.
+**Resources:** `s2docs://cs2/cs_script/point_script.d.ts` and `tsconfig.json` (put them next to your scripts for editor IntelliSense), plus `s2docs://cs2/cs_script/examples/{name}`.
 
 ## Architecture
 
@@ -106,7 +120,7 @@ src/s2docs/
 ## Development
 
 ```bash
-uv run pytest -q                     # 34 tests: parsers, repository, API, MCP (offline fixture tree)
+uv run pytest -q                     # 44 tests: parsers, repository, API, MCP (offline fixture tree)
 uv run ruff check src tests && uv run ruff format src tests
 uv run python scripts/check_frontend.py   # renders every SPA route in headless Chrome (server must be running on :8765)
 ```

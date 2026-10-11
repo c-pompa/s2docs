@@ -28,9 +28,10 @@ Side = Literal["server", "client"]
 
 INSTRUCTIONS = """\
 Reference data for Valve's Source 2 engine games (Counter-Strike 2 = `cs2`, Deadlock = `deadlock`),
-extracted from each game build: console variables/commands, Hammer entities (keyvalues, inputs, outputs),
-the engine schema (C++ classes, fields, enums, VData), game events, Pulse bindings, and CS2's official
-cs_script (JavaScript) API from point_script.d.ts.
+extracted from each game build: console variables/commands, Hammer entities (keyvalues, inputs, outputs,
+merged with Valve's hand-written Hammer FGD labels/help/defaults), the engine schema (C++ classes, fields,
+enums, VData), game events, Pulse bindings, CS2's official cs_script (JavaScript) API from point_script.d.ts,
+Valve's cs_script sample scripts, and community docs from source2.wiki (CC BY-SA 4.0 — cite the doc URL).
 
 Workflow: start with `search_docs`, then fetch exact details with the matching get_* tool. Treat these
 results as the source of truth for names and signatures. Do not invent convars, entity I/O or API
@@ -73,7 +74,8 @@ def create_mcp_server(db: Database) -> MCPServer:
     ) -> m.Page[m.SearchHit]:
         """Full-text search across everything. Each hit's `key` feeds the detail tool for its `kind`:
         convar/command→get_convar(name), entity→get_entity('side:classname'), schema_class/schema_enum→
-        get_schema_class('module:Name'), event→get_game_event, script→get_script_api, pulse→search_pulse."""
+        get_schema_class('module:Name'), event→get_game_event, script→get_script_api, pulse→search_pulse,
+        example→get_example(key), doc→get_doc(key). With `game` set, general docs are included too."""
         if game:
             check_game(game)
         return run(lambda r: r.search(query, game=game, kinds=kinds, limit=limit))
@@ -233,6 +235,39 @@ def create_mcp_server(db: Database) -> MCPServer:
         check_game(game)
         return run(lambda r: r.diff_builds(game, from_build, to_build))
 
+    @server.tool(annotations=READ_ONLY)
+    def list_examples(game: GameId = "cs2") -> list[m.Example]:
+        """List example scripts (Valve's cs_script_demo samples) with the API each one uses."""
+        check_game(game)
+        return run(lambda r: r.list_examples(game))
+
+    @server.tool(annotations=READ_ONLY)
+    def get_example(
+        name: Annotated[str, Field(description="Example name, e.g. 'trace.js' or 'cs_script/trace.js'")],
+        game: GameId = "cs2",
+    ) -> m.Example:
+        """Get the full source of an example script. Prefer adapting these Valve-written patterns."""
+        check_game(game)
+        return run(lambda r: r.get_example(game, name))
+
+    @server.tool(annotations=READ_ONLY)
+    def get_doc(
+        key: Annotated[str, Field(description="Doc key from search_docs (e.g. 's2wiki:/Basics') or URL")],
+    ) -> m.Doc:
+        """Get a community documentation page (source2.wiki) as Markdown, with its URL and license for citation."""
+        return run(lambda r: r.get_doc(key))
+
+    @server.tool(annotations=READ_ONLY)
+    def list_docs(
+        game: Annotated[str | None, Field(description="Game id; general Source 2 pages are always included")] = None,
+        query: Annotated[str | None, Field(description="Substring of title or path")] = None,
+        limit: Annotated[int, Field(ge=1, le=200)] = 50,
+    ) -> m.Page[m.Doc]:
+        """Browse community documentation pages (titles, URLs) without bodies."""
+        if game:
+            check_game(game)
+        return run(lambda r: r.list_docs(game=game, q=query, limit=limit))
+
     # -------------------------------------------------------------- resources
     @server.resource(
         "s2docs://cs2/cs_script/point_script.d.ts",
@@ -251,6 +286,15 @@ def create_mcp_server(db: Database) -> MCPServer:
     )
     def cs_script_tsconfig() -> str:
         return run(lambda r: r.raw_file("cs2", "cs_script/tsconfig.json"))
+
+    @server.resource(
+        "s2docs://cs2/cs_script/examples/{name}",
+        name="cs_script example",
+        description="Valve's cs_script sample scripts (hello.js, trace.js, input.js, ...).",
+        mime_type="text/javascript",
+    )
+    def cs_script_example(name: str) -> str:
+        return run(lambda r: r.get_example("cs2", name).content or "")
 
     # ---------------------------------------------------------------- prompts
     for spec in PROMPTS.values():

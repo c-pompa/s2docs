@@ -18,7 +18,7 @@ def _cmd_sync(args: argparse.Namespace) -> int:
 
     settings = get_settings()
     db = Database(settings.db_path)
-    games = [args.game] if args.game else list(GAMES)
+    games = [] if args.docs_only else ([args.game] if args.game else list(GAMES))
     rc = 0
     for gid in games:
         game = get_game(gid)
@@ -33,6 +33,20 @@ def _cmd_sync(args: argparse.Namespace) -> int:
         except Exception as exc:  # report and continue with the next game
             logging.getLogger("s2docs").exception("sync failed for %s", gid)
             print(f"{gid}: FAILED: {exc}", file=sys.stderr)
+            rc = 1
+    if not args.skip_docs:
+        from s2docs.ingest.wiki import load_wiki, sync_wiki_source
+
+        try:
+            root = settings.sources_dir / "source2wiki"
+            if not args.no_fetch or not root.exists():
+                root = sync_wiki_source(settings.sources_dir)
+            with db.writer() as conn:
+                counts = load_wiki(conn, root)
+            print(f"source2.wiki: loaded {json.dumps(counts)}")
+        except Exception as exc:
+            logging.getLogger("s2docs").exception("docs sync failed")
+            print(f"source2.wiki: FAILED: {exc}", file=sys.stderr)
             rc = 1
     return rc
 
@@ -95,6 +109,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--game", choices=list(GAMES))
     p.add_argument("--no-fetch", action="store_true", help="Reuse the existing checkout under data/sources")
     p.add_argument("--keep", type=int, default=5, help="Builds to keep per game (for diffs)")
+    p.add_argument("--skip-docs", action="store_true", help="Don't refresh community docs (source2.wiki)")
+    p.add_argument("--docs-only", action="store_true", help="Only refresh community docs")
     p.set_defaults(fn=_cmd_sync)
 
     p = sub.add_parser("load", help="Load a local GameTracking checkout")

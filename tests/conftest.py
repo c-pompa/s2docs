@@ -14,6 +14,7 @@ import pytest
 from s2docs.config import GAMES
 from s2docs.db.connection import Database
 from s2docs.ingest.loader import load_build
+from s2docs.ingest.wiki import load_wiki
 
 CONVARS = """\
 mp_roundtime 5 (min: 0.1, max: 60, gamedll notify replicated release)
@@ -224,6 +225,85 @@ declare module "cs_script/point_script"
 }
 """
 
+VALVE_BASE_FGD = """\
+//===== Copyright (c) Valve Corporation =====
+@VisGroupFilter { filter_type = "toolsMaterial" material = "toolsclip.vmat" group = "Tool Brushes/Clip" }
+@mapsize(-16384, 16384)
+
+@BaseClass = Targetname
+[
+\ttargetname(target_source) { sort_priority = 90 } : "Name" : : "The name that other entities refer to this entity by."
+]
+
+@SolidClass base(Targetname) tags( Trigger ) = trigger_multiple :
+\t"A trigger volume that can be " +
+\t"triggered multiple times.<br>Second line."
+[
+\twait(float) : "Delay Before Reset" : 1 : "Seconds before it can trigger again."
+\tspawnflags(flags) =
+\t[
+\t\t1 : "Clients" : 1
+\t\t2 : "NPCs" : 0
+\t]
+\t// Outputs
+\toutput OnTrigger(void) : "Fired whenever the trigger is activated."
+]
+
+@PointClass base(Targetname) iconsprite("editor/x.vmat")
+\tmetadata
+\t{
+\t\tentity_tool_name = "Editor Thing"
+\t\tentity_tool_tip = "Only placed in Hammer"
+\t}
+= editor_only_thing : "Exists only in Hammer."
+[
+\tmode(choices) [ group="Misc" ] : "Mode" : "1" : "How it works" =
+\t[
+\t\t"0" : "Off"
+\t\t"1" : "On"
+\t]
+\tinput DoIt(void) : "Does it."
+]
+
+@PointClass = removed_thing []
+"""
+
+VALVE_MOD_FGD = """\
+@include "base.fgd"
+@exclude removed_thing
+
+@OverrideClass
+\tmetadata { entity_tool_name = "Trigger (multiple)" }
+= trigger_multiple
+[
+\twait(float) : "Delay Before Reset" : 2 : "Overridden default."
+]
+"""
+
+HELLO_JS = (
+    'import { Instance } from "cs_script/point_script";\nInstance.Msg("Hello!");\nInstance.OnPlayerJump(() => {});\n'
+)
+
+WIKI_PAGES = {
+    "docs/Basics/index.mdx": "---\ntitle: Basics\n---\nThe basics of Source 2.\n",
+    "docs/Scripting/Counter-Strike 2/cs_script/1-introduction.mdx": (
+        "---\ntitle: Intro to cs_script\ndescription: Getting started\n---\n"
+        "import {Game} from '@site/src/components/Software';\n\n"
+        '<Game name="cs2"/> scripts use <Convar name="sv_cheats"/> and `Instance.OnPlayerJump`.\n\n'
+        "```js\nconst x = <div>kept</div>;\n```\n"
+    ),
+    "docs/Scripting/_partial.mdx": "partial, not a page\n",
+}
+
+
+def write_wiki(root: Path) -> Path:
+    for rel, text in WIKI_PAGES.items():
+        path = root / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+    return root
+
+
 TSCONFIG = '{ "compilerOptions": { "target": "es2022" } }\n'
 
 
@@ -243,6 +323,9 @@ def write_tree(root: Path, *, build: int = 1000, extra_convar: str | None = None
         "game/csgo/pak01_dir/resource/mod.gameevents": MOD_EVENTS,
         "content/csgo_addons/cs_script_demo/maps/scripts/point_script.d.ts": DTS,
         "content/csgo_addons/cs_script_demo/maps/scripts/tsconfig.json": TSCONFIG,
+        "content/csgo_addons/cs_script_demo/maps/scripts/hello.js": HELLO_JS,
+        "game/core/base.fgd": VALVE_BASE_FGD,
+        "game/csgo/csgo.fgd": VALVE_MOD_FGD,
     }
     for rel, text in files.items():
         path = root / rel
@@ -258,6 +341,7 @@ def db(tmp_path: Path) -> Database:
     tree = write_tree(tmp_path / "src")
     with database.writer() as conn:
         load_build(conn, GAMES["cs2"], tree)
+        load_wiki(conn, write_wiki(tmp_path / "wiki"))
     return database
 
 

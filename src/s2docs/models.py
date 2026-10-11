@@ -17,6 +17,7 @@ SearchKind = Literal[
     "event",
     "script",
     "pulse",
+    "example",
     "doc",
 ]
 SEARCH_KINDS: tuple[str, ...] = SearchKind.__args__  # type: ignore[attr-defined]
@@ -70,15 +71,26 @@ class ConVar(BaseModel):
     description: str | None = None
 
 
+Origin = Literal["runtime", "valve_fgd", "both"]
+
+
 class EntityMember(BaseModel):
     kind: Literal["keyvalue", "input", "output"]
     name: str
     type: str | None = None
+    label: str | None = Field(default=None, description="Hammer display label (Valve FGD)")
+    default_value: str | None = Field(default=None, description="Hammer default (Valve FGD)")
     description: str | None = None
-    notes: str | None = None
+    notes: str | None = Field(default=None, description="Runtime dump notes: C++ field, PVAL types, Pulse node")
     component: str | None = None
     choices: list[tuple[str, str]] | None = None
     defined_in: str = Field(description="Entity class that declares this member")
+    source: Origin = Field(
+        default="runtime",
+        description="runtime = registered by the game binary; valve_fgd = only in Valve's Hammer FGD "
+        "(editor/compile-time key); both = present in each",
+    )
+    sort_key: tuple[int, int] = Field(default=(0, 0), exclude=True)
 
 
 class EntitySummary(BaseModel):
@@ -88,11 +100,37 @@ class EntitySummary(BaseModel):
     cpp_class: str | None = None
     description: str | None = None
     bases: list[str] = []
+    tool_name: str | None = Field(default=None, description="Name in Hammer's entity tool")
+    origin: Origin = "runtime"
 
 
 class Entity(EntitySummary):
-    inheritance: list[str] = Field(default=[], description="Ancestor chain, nearest first")
+    tool_tip: str | None = None
+    tool_group: str | None = None
+    fgd_file: str | None = Field(default=None, description="Valve FGD file that defines the class")
+    inheritance: list[str] = Field(default=[], description="Runtime ancestor chain, nearest first")
+    fgd_inheritance: list[str] = Field(default=[], description="Valve FGD base classes, nearest first")
     members: list[EntityMember] = []
+
+
+class Example(BaseModel):
+    api: str
+    name: str
+    path: str
+    origin: Literal["valve", "community"]
+    description: str | None = None
+    content: str | None = None
+
+
+class Doc(BaseModel):
+    key: str
+    source: str
+    title: str
+    url: str
+    game: str | None = None
+    description: str | None = None
+    license: str | None = None
+    body: str | None = None
 
 
 class SchemaField(BaseModel):

@@ -101,7 +101,8 @@ class Repository:
         where = ["search_fts MATCH ?"]
         params: list[object] = [match]
         if game:
-            where.append("game_id = ?")
+            # '*' marks general docs that apply to every game.
+            where.append("(game_id = ? OR game_id = '*')")
             params.append(game)
         if kinds:
             bad = set(kinds) - set(m.SEARCH_KINDS)
@@ -215,6 +216,38 @@ class Repository:
         return [(r["flag"], r["n"]) for r in rows]
 
     # --------------------------------------------------------------- entities
+    # Two sources are merged:
+    #   runtime   — DumpSource2 FGD: what the game binary actually registers (authoritative names/types)
+    #   valve_fgd — Valve's hand-written Hammer FGD: labels, help text, defaults, choices, editor-only keys
+    # Server entities may exist only in Valve's FGD (editor/compile-time classes).
+
+    _ENTITY_UNION = """
+        WITH ents AS (
+            SELECT e.classname, e.side, e.class_type, e.cpp_class,
+                   coalesce(h.description, e.description) AS description,
+                   h.tool_name, e.id AS eid, h.id AS hid,
+                   CASE WHEN h.id IS NULL THEN 'runtime' ELSE 'both' END AS origin
+            FROM entities e
+            LEFT JOIN hammer_classes h
+              ON h.build_id = e.build_id AND h.root = 'hammer' AND h.classname = e.classname AND e.side = 'server'
+            WHERE e.build_id = :b
+            UNION ALL
+            SELECT h.classname, 'server', h.class_type, NULL, h.description, h.tool_name, NULL, h.id, 'valve_fgd'
+            FROM hammer_classes h
+            WHERE h.build_id = :b AND h.root = 'hammer'
+              AND NOT EXISTS (SELECT 1 FROM entities e
+                              WHERE e.build_id = h.build_id AND e.side = 'server' AND e.classname = h.classname)
+        )
+    """
+    _ENTITY_BASES = """
+        coalesce(
+          (SELECT group_concat(base_name, ',') FROM
+             (SELECT base_name FROM entity_bases b WHERE b.entity_id = ents.eid ORDER BY ordinal)),
+          (SELECT group_concat(base_name, ',') FROM
+             (SELECT base_name FROM hammer_class_bases b WHERE b.class_id = ents.hid ORDER BY ordinal))
+        ) AS bases
+    """
+
     def list_entities(
         self,
         game: str,
@@ -228,36 +261,34 @@ class Repository:
     ) -> m.Page[m.EntitySummary]:
         """List entities. `io` filters to entities that *declare* an input/output with that name."""
         limit, offset = _clamp(limit, offset)
-        where: list[str] = ["e.build_id = ?"]
-        params: list[object] = [self.build_id(game)]
+        where: list[str] = []
+        params: dict[str, object] = {"b": self.build_id(game)}
         if side:
-            where.append("e.side = ?")
-            params.append(side)
+            where.append("side = :side")
+            params["side"] = side
         if not include_base:
-            where.append("e.class_type != 'BaseClass'")
+            where.append("class_type NOT IN ('BaseClass', 'OverrideClass')")
         if q:
-            where.append("(e.classname LIKE ? ESCAPE '\\' OR e.cpp_class LIKE ? ESCAPE '\\')")
-            params += [_like(q), _like(q)]
+            where.append(
+                "(classname LIKE :q ESCAPE '\\' OR cpp_class LIKE :q ESCAPE '\\' OR tool_name LIKE :q ESCAPE '\\')"
+            )
+            params["q"] = _like(q)
         if io:
             where.append(
-                "EXISTS (SELECT 1 FROM entity_members em WHERE em.entity_id = e.id "
-                "AND em.kind IN ('input', 'output') AND em.name = ? COLLATE NOCASE)"
+                "(EXISTS (SELECT 1 FROM entity_members em WHERE em.entity_id = ents.eid "
+                "         AND em.kind IN ('input', 'output') AND em.name = :io COLLATE NOCASE)"
+                " OR EXISTS (SELECT 1 FROM hammer_members hm WHERE hm.class_id = ents.hid "
+                "         AND hm.kind IN ('input', 'output') AND hm.name = :io COLLATE NOCASE))"
             )
-            params.append(io)
-        where_sql = " AND ".join(where)
-        total = self.conn.execute(f"SELECT count(*) FROM entities e WHERE {where_sql}", params).fetchone()[0]
+            params["io"] = io
+        where_sql = ("WHERE " + " AND ".join(where)) if where else ""
+        total = self.conn.execute(f"{self._ENTITY_UNION} SELECT count(*) FROM ents {where_sql}", params).fetchone()[0]
         rows = self.conn.execute(
-            f"""SELECT e.*, (SELECT group_concat(base_name, ',') FROM
-                   (SELECT base_name FROM entity_bases b WHERE b.entity_id = e.id ORDER BY ordinal)) AS bases
-                FROM entities e WHERE {where_sql} ORDER BY e.classname LIMIT ? OFFSET ?""",
-            [*params, limit, offset],
+            f"{self._ENTITY_UNION} SELECT ents.*, {self._ENTITY_BASES} FROM ents {where_sql} "
+            "ORDER BY classname, side LIMIT :limit OFFSET :offset",
+            {**params, "limit": limit, "offset": offset},
         ).fetchall()
-        return m.Page(
-            items=[self._entity_summary(r) for r in rows],
-            total=total,
-            limit=limit,
-            offset=offset,
-        )
+        return m.Page(items=[self._entity_summary(r) for r in rows], total=total, limit=limit, offset=offset)
 
     @staticmethod
     def _entity_summary(r: sqlite3.Row) -> m.EntitySummary:
@@ -268,21 +299,12 @@ class Repository:
             cpp_class=r["cpp_class"],
             description=r["description"],
             bases=r["bases"].split(",") if r["bases"] else [],
+            tool_name=r["tool_name"],
+            origin=r["origin"],
         )
 
-    def get_entity(self, game: str, classname: str, *, side: str = "server", inherited: bool = True) -> m.Entity:
-        bid = self.build_id(game)
-        root = self.conn.execute(
-            """SELECT e.*, (SELECT group_concat(base_name, ',') FROM
-                   (SELECT base_name FROM entity_bases b WHERE b.entity_id = e.id ORDER BY ordinal)) AS bases
-               FROM entities e WHERE e.build_id = ? AND e.side = ? AND e.classname = ?""",
-            (bid, side, classname),
-        ).fetchone()
-        if root is None:
-            raise NotFound(f"no {side} entity {classname!r} in {game}")
-
-        max_depth = 64 if inherited else 0
-        rows = self.conn.execute(
+    def _runtime_members(self, bid: int, side: str, root_id: int, classname: str, max_depth: int):
+        return self.conn.execute(
             """
             WITH RECURSIVE chain(id, classname, depth, path) AS (
                 SELECT ?, ?, 0, ',' || ? || ','
@@ -300,42 +322,151 @@ class Repository:
                 FROM nearest n JOIN entity_members em ON em.entity_id = n.id
             )
             SELECT * FROM ranked WHERE rn = 1
-            ORDER BY CASE kind WHEN 'keyvalue' THEN 0 WHEN 'input' THEN 1 ELSE 2 END, depth, ordinal
             """,
-            (root["id"], root["classname"], root["id"], bid, side, max_depth),
-        ).fetchall()
-        chain = self.conn.execute(
-            """
-            WITH RECURSIVE chain(id, classname, depth) AS (
-                SELECT ?, ?, 0
-                UNION
-                SELECT e.id, e.classname, c.depth + 1 FROM chain c
-                JOIN entity_bases b ON b.entity_id = c.id
-                JOIN entities e ON e.build_id = ? AND e.side = ? AND e.classname = b.base_name
-                WHERE c.depth < 64
-            )
-            SELECT classname, min(depth) AS d FROM chain WHERE depth > 0 GROUP BY classname ORDER BY d, classname
-            """,
-            (root["id"], root["classname"], bid, side),
+            (root_id, classname, root_id, bid, side, max_depth),
         ).fetchall()
 
-        members = [
-            m.EntityMember(
-                kind=r["kind"],
-                name=r["name"],
-                type=r["type"],
-                description=r["description"],
-                notes=r["notes"],
-                component=r["component"],
-                choices=json.loads(r["choices"]) if r["choices"] else None,
-                defined_in=r["defined_in"],
+    def _hammer_chain(self, bid: int, classname: str, max_depth: int) -> tuple[list[str], list[sqlite3.Row]]:
+        """Valve FGD inheritance chain (nearest first) and its members, nearest definition winning."""
+        chain = self.conn.execute(
+            """
+            WITH RECURSIVE chain(id, classname, depth, path) AS (
+                SELECT id, classname, 0, ',' || id || ',' FROM hammer_classes
+                WHERE build_id = ? AND root = 'hammer' AND classname = ?
+                UNION ALL
+                SELECT h.id, h.classname, c.depth + 1, c.path || h.id || ','
+                FROM chain c
+                JOIN hammer_class_bases b ON b.class_id = c.id
+                JOIN hammer_classes h ON h.build_id = ? AND h.root = 'hammer' AND h.classname = b.base_name
+                WHERE c.depth < ? AND instr(c.path, ',' || h.id || ',') = 0
             )
-            for r in rows
-        ]
-        summary = self._entity_summary(root)
+            SELECT id, classname, min(depth) AS depth FROM chain GROUP BY id ORDER BY depth, classname
+            """,
+            (bid, classname, bid, max_depth),
+        ).fetchall()
+        if not chain:
+            return [], []
+        ids = [r["id"] for r in chain]
+        depth = {r["id"]: r["depth"] for r in chain}
+        owner = {r["id"]: r["classname"] for r in chain}
+        rows = self.conn.execute(
+            f"SELECT * FROM hammer_members WHERE class_id IN ({_placeholders(ids)})", ids
+        ).fetchall()
+        best: dict[tuple[str, str], tuple[tuple[int, int], sqlite3.Row, str]] = {}
+        for r in rows:
+            key = (r["kind"], r["name"].lower())
+            rank = (depth[r["class_id"]], r["ordinal"])
+            if key not in best or rank < best[key][0]:
+                best[key] = (rank, r, owner[r["class_id"]])
+        ordered = sorted(best.values(), key=lambda x: x[0])
+        merged = [dict(r) | {"defined_in": cls} for _, r, cls in ordered]
+        return [r["classname"] for r in chain[1:]], merged  # type: ignore[return-value]
+
+    def get_entity(self, game: str, classname: str, *, side: str = "server", inherited: bool = True) -> m.Entity:
+        bid = self.build_id(game)
+        max_depth = 64 if inherited else 0
+        root = self.conn.execute(
+            """SELECT e.*, (SELECT group_concat(base_name, ',') FROM
+                   (SELECT base_name FROM entity_bases b WHERE b.entity_id = e.id ORDER BY ordinal)) AS bases
+               FROM entities e WHERE e.build_id = ? AND e.side = ? AND e.classname = ?""",
+            (bid, side, classname),
+        ).fetchone()
+        hclass = None
+        if side == "server":
+            hclass = self.conn.execute(
+                """SELECT h.*, (SELECT group_concat(base_name, ',') FROM
+                       (SELECT base_name FROM hammer_class_bases b WHERE b.class_id = h.id ORDER BY ordinal)) AS bases
+                   FROM hammer_classes h WHERE h.build_id = ? AND h.root = 'hammer' AND h.classname = ?""",
+                (bid, classname),
+            ).fetchone()
+        if root is None and hclass is None:
+            raise NotFound(f"no {side} entity {classname!r} in {game}")
+
+        fgd_inheritance, fgd_members = self._hammer_chain(bid, classname, max_depth) if hclass else ([], [])
+        fgd_by_key = {(r["kind"], r["name"].lower()): r for r in fgd_members}
+
+        members: list[m.EntityMember] = []
+        runtime_keys: set[tuple[str, str]] = set()
+        runtime_rows = self._runtime_members(bid, side, root["id"], root["classname"], max_depth) if root else []
+        for r in runtime_rows:
+            key = (r["kind"], r["name"].lower())
+            runtime_keys.add(key)
+            v = fgd_by_key.get(key)
+            choices = json.loads(r["choices"]) if r["choices"] else None
+            if v is not None and v["choices"]:
+                choices = json.loads(v["choices"])
+            members.append(
+                m.EntityMember(
+                    kind=r["kind"],
+                    name=r["name"],
+                    type=r["type"],
+                    label=v["label"] if v else None,
+                    default_value=v["default_value"] if v else None,
+                    description=(v["description"] if v and v["description"] else r["description"]),
+                    notes=r["notes"],
+                    component=r["component"],
+                    choices=choices,
+                    defined_in=r["defined_in"],
+                    source="both" if v else "runtime",
+                    sort_key=(r["depth"], r["ordinal"]),
+                )
+            )
+        for v in fgd_members:
+            if (v["kind"], v["name"].lower()) in runtime_keys:
+                continue
+            members.append(
+                m.EntityMember(
+                    kind=v["kind"],
+                    name=v["name"],
+                    type=v["type"],
+                    label=v["label"],
+                    default_value=v["default_value"],
+                    description=v["description"],
+                    choices=json.loads(v["choices"]) if v["choices"] else None,
+                    defined_in=v["defined_in"],
+                    source="valve_fgd",
+                    sort_key=(99, v["ordinal"]),
+                )
+            )
+        kind_order = {"keyvalue": 0, "input": 1, "output": 2}
+        members.sort(key=lambda x: (kind_order[x.kind], x.sort_key))
+
+        runtime_chain = []
+        if root is not None:
+            runtime_chain = [
+                r["classname"]
+                for r in self.conn.execute(
+                    """
+                    WITH RECURSIVE chain(id, classname, depth) AS (
+                        SELECT ?, ?, 0
+                        UNION
+                        SELECT e.id, e.classname, c.depth + 1 FROM chain c
+                        JOIN entity_bases b ON b.entity_id = c.id
+                        JOIN entities e ON e.build_id = ? AND e.side = ? AND e.classname = b.base_name
+                        WHERE c.depth < 64
+                    )
+                    SELECT classname, min(depth) AS d FROM chain WHERE depth > 0
+                    GROUP BY classname ORDER BY d, classname
+                    """,
+                    (root["id"], root["classname"], bid, side),
+                )
+            ]
+
+        src = root if root is not None else hclass
         return m.Entity(
-            **summary.model_dump(),
-            inheritance=[r["classname"] for r in chain],
+            classname=src["classname"],
+            side=side,
+            class_type=(hclass["class_type"] if hclass else root["class_type"]),
+            cpp_class=root["cpp_class"] if root else None,
+            description=(hclass["description"] if hclass and hclass["description"] else src["description"]),
+            bases=(src["bases"] or "").split(",") if src["bases"] else [],
+            tool_name=hclass["tool_name"] if hclass else None,
+            tool_tip=hclass["tool_tip"] if hclass else None,
+            tool_group=hclass["tool_group"] if hclass else None,
+            fgd_file=hclass["source_file"] if hclass else None,
+            origin="both" if (root and hclass) else ("runtime" if root else "valve_fgd"),
+            inheritance=runtime_chain,
+            fgd_inheritance=fgd_inheritance,
             members=members,
         )
 
@@ -606,6 +737,72 @@ class Repository:
             raise NotFound(f"no raw file {path!r} for {game}")
         return row["content"]
 
+    # --------------------------------------------------------------- examples
+    def _example(self, r: sqlite3.Row, with_content: bool) -> m.Example:
+        return m.Example(
+            api=r["api"],
+            name=r["name"],
+            path=r["path"],
+            origin=r["origin"],
+            description=r["description"],
+            content=r["content"] if with_content else None,
+        )
+
+    def list_examples(self, game: str, *, api: str | None = None) -> list[m.Example]:
+        rows = self.conn.execute(
+            "SELECT * FROM examples WHERE build_id = ? AND (? IS NULL OR api = ?) ORDER BY api, name",
+            (self.build_id(game), api, api),
+        ).fetchall()
+        return [self._example(r, False) for r in rows]
+
+    def get_example(self, game: str, name: str, *, api: str = "cs_script") -> m.Example:
+        name = name.removeprefix(f"{api}/")
+        row = self.conn.execute(
+            "SELECT * FROM examples WHERE build_id = ? AND api = ? AND (name = ? OR name = ? || '.js')",
+            (self.build_id(game), api, name, name),
+        ).fetchone()
+        if row is None:
+            raise NotFound(f"no {api} example {name!r} in {game}")
+        return self._example(row, True)
+
+    # ------------------------------------------------------------------- docs
+    def _doc(self, r: sqlite3.Row, with_body: bool) -> m.Doc:
+        return m.Doc(
+            key=r["doc_key"],
+            source=r["source"],
+            title=r["title"],
+            url=r["url"],
+            game=r["game_id"],
+            description=r["description"],
+            license=r["license"],
+            body=r["body"] if with_body else None,
+        )
+
+    def list_docs(
+        self, *, game: str | None = None, q: str | None = None, limit: int = 50, offset: int = 0
+    ) -> m.Page[m.Doc]:
+        limit, offset = _clamp(limit, offset)
+        where: list[str] = ["doc_key IS NOT NULL"]
+        params: list[object] = []
+        if game:
+            where.append("(game_id = ? OR game_id IS NULL)")
+            params.append(game)
+        if q:
+            where.append("(title LIKE ? ESCAPE '\\' OR source_path LIKE ? ESCAPE '\\')")
+            params += [_like(q), _like(q)]
+        where_sql = " AND ".join(where)
+        total = self.conn.execute(f"SELECT count(*) FROM docs WHERE {where_sql}", params).fetchone()[0]
+        rows = self.conn.execute(
+            f"SELECT * FROM docs WHERE {where_sql} ORDER BY source_path LIMIT ? OFFSET ?", [*params, limit, offset]
+        ).fetchall()
+        return m.Page(items=[self._doc(r, False) for r in rows], total=total, limit=limit, offset=offset)
+
+    def get_doc(self, key: str) -> m.Doc:
+        row = self.conn.execute("SELECT * FROM docs WHERE doc_key = ? OR url = ?", (key, key)).fetchone()
+        if row is None:
+            raise NotFound(f"no doc {key!r}")
+        return self._doc(row, True)
+
     # ------------------------------------------------------------------ pulse
     def list_pulse(
         self,
@@ -739,6 +936,8 @@ class Repository:
             "game_events": "SELECT count(DISTINCT name) FROM game_events WHERE build_id = ?",
             "script_symbols": "SELECT count(*) FROM script_symbols WHERE build_id = ?",
             "pulse_bindings": "SELECT count(*) FROM pulse_bindings WHERE build_id = ?",
+            "valve_fgd_classes": "SELECT count(*) FROM hammer_classes WHERE build_id = ? AND root = 'hammer'",
+            "examples": "SELECT count(*) FROM examples WHERE build_id = ?",
         }
         games = self.games()
         for g in games:
@@ -746,4 +945,7 @@ class Repository:
                 continue
             bid = self.build_id(g.id)
             counts[g.id] = {k: self.conn.execute(sql, (bid,)).fetchone()[0] for k, sql in queries.items()}
+        counts["docs"] = {
+            r["source"]: r["n"] for r in self.conn.execute("SELECT source, count(*) AS n FROM docs GROUP BY source")
+        }
         return m.Stats(schema_version=schema_version(self.conn), games=games, counts=counts)

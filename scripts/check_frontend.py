@@ -22,6 +22,13 @@ ROUTES = [
     "cs2/stats",
     "deadlock/convars?flag=cheat",
     "deadlock/schema/CCitadel_Ability_Baba_BenchRun_VData",
+    "cs2/entities/server/trigger_multiple",
+    "cs2/entities/server/env_fire",
+    "cs2/examples",
+    "cs2/examples/trace.js",
+    "cs2/docs",
+    "cs2/docs?key=s2wiki%3A%2FScripting%2FCounter-Strike%202%2Fgame-modes",
+    "cs2/search?q=spawn%20point",
     "cs2/search?q=%3Cimg%20src%3Dx%20onerror%3Dalert(1)%3E",
 ]
 ROW = re.compile(r'<tr|class="hit"|class="card"')

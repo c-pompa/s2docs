@@ -180,6 +180,30 @@ def script_file(game: Game, filename: Literal["point_script.d.ts", "tsconfig.jso
     )
 
 
+# ------------------------------------------------------------ examples
+@router.get("/games/{game}/examples", response_model=list[m.Example])
+def list_examples(game: Game, repo: Repo, api: str | None = None):
+    return repo.list_examples(game, api=api)
+
+
+@router.get("/games/{game}/examples/{name}", response_model=m.Example)
+def get_example(game: Game, name: str, repo: Repo, api: str = "cs_script"):
+    return repo.get_example(game, name, api=api)
+
+
+# ---------------------------------------------------------------- docs
+@router.get("/docs", response_model=m.Page[m.Doc])
+def list_docs(repo: Repo, game: str | None = None, q: str | None = None, limit: Limit = 50, offset: Offset = 0):
+    if game is not None:
+        valid_game(game)
+    return repo.list_docs(game=game, q=q, limit=limit, offset=offset)
+
+
+@router.get("/doc", response_model=m.Doc)
+def get_doc(repo: Repo, key: Annotated[str, Query(description="Doc key (from search) or URL")]):
+    return repo.get_doc(key)
+
+
 # --------------------------------------------------------------- pulse
 @router.get("/games/{game}/pulse", response_model=m.Page[m.PulseBinding])
 def list_pulse(
