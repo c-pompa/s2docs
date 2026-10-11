@@ -29,12 +29,16 @@ ROW = re.compile(r'<tr|class="hit"|class="card"')
 for route in ROUTES:
     dom = subprocess.run(
         [CHROME, "--headless=new", "--disable-gpu", "--virtual-time-budget=5000", "--dump-dom", f"{BASE}/#/{route}"],
-        capture_output=True, text=True, timeout=60,
+        capture_output=True,
+        text=True,
+        timeout=60,
     ).stdout
     main = re.search(r"<main[^>]*>(.*?)</main>", dom, re.S)
     body = main.group(1) if main else ""
     h1 = re.search(r"<h1[^>]*>(.*?)</h1>", body, re.S)
     title = html.unescape(re.sub(r"<[^>]+>", "", h1.group(1))) if h1 else None
     err = re.search(r'class="err">(.*?)<', body)
-    print(f"{route:55} h1={title!r:48} rows={len(ROW.findall(body)):4} "
-          f"err={html.unescape(err.group(1)) if err else None} img_tag={'<img' in body}")
+    print(
+        f"{route:55} h1={title!r:48} rows={len(ROW.findall(body)):4} "
+        f"err={html.unescape(err.group(1)) if err else None} img_tag={'<img' in body}"
+    )
