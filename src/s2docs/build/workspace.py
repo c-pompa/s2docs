@@ -161,6 +161,17 @@ Test the input hook: `ent_fire {name}_script RunScriptInput ping`.
 """
 
 
+_README_PLAIN_TEMPLATE = """\
+# {name}
+
+CS2 addon scaffolded by s2docs (no cs_script).
+
+## Layout
+- `cfg/` — console configs (validate with `validate_cfg`)
+- `maps/ materials/ models/ sounds/ panorama/ scripts/` — other content
+"""
+
+
 def scaffold(workspace: Path, repo: Repository, *, game: str, name: str, with_script: bool = True) -> m.Addon:
     root = addon_root(workspace, game, name)
     if root.exists():
@@ -168,7 +179,8 @@ def scaffold(workspace: Path, repo: Repository, *, game: str, name: str, with_sc
     for sub in CONTENT_SUBDIRS:
         (root / sub).mkdir(parents=True, exist_ok=True)
         (root / sub / ".gitkeep").touch()
-    (root / "README.md").write_text(_README_TEMPLATE.format(name=name), encoding="utf-8")
+    readme = _README_TEMPLATE if with_script else _README_PLAIN_TEMPLATE
+    (root / "README.md").write_text(readme.format(name=name), encoding="utf-8")
     if with_script:
         (root / "scripts" / f"{name}.js").write_text(_SCRIPT_TEMPLATE.format(name=name), encoding="utf-8")
         for f in ("point_script.d.ts", "tsconfig.json"):

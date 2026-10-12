@@ -118,6 +118,9 @@ def test_scaffold_and_file_safety(repo: Repository, tmp_path):
     assert f.size == 5 and ws.read_file(tmp_path, "cs2", "jump_arena", "scripts/jump_arena.js") == "// v2"
     with pytest.raises(ws.WorkspaceError):
         ws.scaffold(tmp_path, repo, game="deadlock", name="nope")  # no workshop tools for deadlock
+    plain = ws.scaffold(tmp_path, repo, game="cs2", name="plain_addon", with_script=False)
+    assert not any(f.path.endswith(".js") for f in plain.files)
+    assert "cs_script" not in ws.read_file(tmp_path, "cs2", "plain_addon", "README.md").replace("(no cs_script)", "")
 
 
 @needs_tsc
