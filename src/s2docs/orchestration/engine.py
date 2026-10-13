@@ -15,6 +15,7 @@ import secrets
 from pathlib import Path
 from string import Template
 
+from s2docs import evidence
 from s2docs import models as m
 from s2docs.build import workspace as ws
 from s2docs.build.validate_cfg import validate_cfg
@@ -325,7 +326,7 @@ class Orchestrator:
         merged_artifacts = [*step.artifacts, *(artifacts or [])]
         merged_notes = "\n\n".join(x for x in (step.notes, notes) if x) or None
         if status == "done" and step.gate:
-            self._check_gate(project, step.gate, merged_notes, merged_artifacts)
+            self._check_gate(project, step_id, step.gate, merged_notes, merged_artifacts)
 
         with self.db.writer() as conn, conn:
             conn.execute(
@@ -352,10 +353,16 @@ class Orchestrator:
         return self._load(pid)
 
     # ---------------------------------------------------------------- gates
-    def _check_gate(self, project: m.Project, gate: str, notes: str | None, artifacts: list[str]) -> None:
+    def _check_gate(self, project: m.Project, step_id: str, gate: str, notes: str | None, artifacts: list[str]) -> None:
         if gate == "evidence":
-            if not (notes or artifacts):
-                raise GateFailed("this step needs evidence: pass `notes` and/or `artifacts` describing the result")
+            # Notes alone no longer pass: the step must have a real, non-note evidence row attached to
+            # it (this is the gate that once let a step be marked done before its README existed).
+            if evidence.count_for_step(self.db, project.id, step_id, exclude_note=True) < 1:
+                raise GateFailed(
+                    f"step {step_id} needs evidence: record at least one non-note evidence row for it with the "
+                    "`add_evidence` tool (kinds: console_transcript, file_hash, pixel_diff, screenshot, other) "
+                    "before marking it done — notes/artifacts alone no longer satisfy the evidence gate"
+                )
             return
         if not project.addon:
             raise GateFailed(f"gate {gate} needs an addon on the project")

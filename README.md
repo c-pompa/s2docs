@@ -121,6 +121,19 @@ The same operations exist on the CLI (`s2docs host list|show|register|probe|lock
 
 CLI: `s2docs build start|status|log|wait|cancel|list` and `s2docs deploy push|verify|list` (global `--json` → one `{"schema": "s2docs/v1", …}` object on stdout, logs to stderr; exit codes 0 ok, 1 error, 2 locked, 3 not found, 6 partial, 7 timeout/cancelled). HTTP: `/api/hosts/{id}/builds`, `/api/builds/…`, `/api/deploys`.
 
+| Evidence tools | | 
+|---|---|
+| `add_evidence` | Store a structured evidence row for a project step: `kind` (`console_transcript` / `file_hash` / `pixel_diff` / `screenshot` / `note` / `other`), `ref` (path / url / command) and `data` (JSON detail — md5s, pixel-diff pct + noise floor, transcript excerpt). **A step with an `evidence` gate cannot be marked done until at least one non-note row exists for it** |
+| `list_evidence` | Evidence rows (newest first), filtered by project, step and/or kind |
+
+| Test-run tools | |
+|---|---|
+| `test_start` | Open a server-side test session (`name`, optional `host` / `project`); claims the host lease server-side. Record fields (`name`, `step`, `state`, `elapsed`) mirror the in-game TEST STATUS HUD strip |
+| `test_step`, `test_finish`, `test_clear` | Set the current step, finish `pass`/`fail` (releases the lease; records a console-transcript evidence row on the linked project), or dismiss (`iso_test off`) |
+| `test_status`, `list_test_runs` | One run (or the current active run) and recent runs, optionally by state |
+
+CLI: `s2docs evidence add|list|show` and `s2docs test start|step|finish|clear|status|list`. HTTP: `/api/evidence`, `/api/evidence/{id}`, `/api/test-runs` (+ `/current`, `/{id}/step|finish|clear`).
+
 | Orchestration tools | |
 |---|---|
 | `list_workflows` | Multi-step recipes: `cs2_script_feature`, `cs2_camera_addon`, `cs2_game_template`, `server_config`, or `custom` |
@@ -138,7 +151,7 @@ start_project ─▶ brief (ready steps + tools + rendered prompt) ─▶ agent 
                      └──────────────── next ready steps (dependency DAG) ◀──────┘
 ```
 
-- **Gates** are checked on the server, not taken on trust: `scripts_typecheck` re-runs `tsc` on every `.js` file in the addon, `cfgs_valid` validates every `.cfg`, `addon_exists`, and `evidence` (needs notes or artifacts). A failed gate returns the exact errors (HTTP 409 / MCP tool error).
+- **Gates** are checked on the server, not taken on trust: `scripts_typecheck` re-runs `tsc` on every `.js` file in the addon, `cfgs_valid` validates every `.cfg`, `addon_exists`, and `evidence` — which requires at least one stored non-note evidence row for the step (via `add_evidence`); notes and artifacts alone no longer pass. A failed gate returns the exact errors (HTTP 409 / MCP tool error).
 - **Steps form a DAG.** Independent steps (e.g. camera script and test cfg) become ready together, so a client can run them in parallel or hand them to subagents.
 - **Projects persist.** Any session can pick one up with `next_step <id>`, and the web UI's **Projects** page shows progress and can start projects or move steps.
 - Steps are snapshotted when a project starts, so editing `orchestration/workflows.py` never changes a project in flight.
@@ -169,6 +182,8 @@ src/s2docs/
   hosts.py                host registry + server-side leases (claim/heartbeat/release, TTL expiry)
   builds.py               server-owned build runs (SSH launch, UTF-16 log tail, host lease)
   deploys.py              deployment registry (scp push + Get-FileHash MD5 verification)
+  evidence.py             structured evidence store — what the `evidence` gate checks (kind/ref/data)
+  test_runs.py            in-game test sessions mirroring the TEST STATUS HUD strip (start/step/finish/off)
   mcp_server.py           MCP tools/prompts/resources (mcp SDK 2.x MCPServer)
   web/                    index.html, app.js, style.css (no build step)
 ```
@@ -183,7 +198,7 @@ src/s2docs/
 ## Development
 
 ```bash
-uv run pytest -q                     # 86 tests: parsers, repository, API, MCP, build tools, orchestration, hosts, builds/deploys
+uv run pytest -q                     # 98 tests: parsers, repository, API, MCP, build tools, orchestration, hosts, builds/deploys, evidence, test runs
 uv run ruff check src tests && uv run ruff format src tests
 uv run python scripts/check_frontend.py   # renders every SPA route in headless Chrome (server on :8765; extra routes as args)
 ```

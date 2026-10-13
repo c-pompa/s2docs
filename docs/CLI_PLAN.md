@@ -1,9 +1,9 @@
 # s2docs CLI & agent-interaction plan
 
-Status: Phase 1 (host registry + locks), Phase 2 (native MCP registration) and **Phase 3 (build
-runs + deploy registry) implemented**; Phases 4 (evidence) and 5 (test-run) are design. Scope: the
-`s2docs` command surface and how agents, scripts and CI should reach s2docs. This plan defines the
-CLI/MCP/HTTP shapes the services must expose.
+Status: Phases 1 (host registry + locks), 2 (native MCP registration), 3 (build runs + deploy
+registry), **4 (evidence store) and 5 (test-run records) implemented**. Scope: the `s2docs` command
+surface and how agents, scripts and CI should reach s2docs. This plan defines the CLI/MCP/HTTP
+shapes the services must expose.
 
 ### Phase 3 implementation notes (where this plan was ambiguous)
 - **`build start` needs a command.** The plan lists `build start <addon> [--map M]`, but a plain
@@ -22,6 +22,22 @@ CLI/MCP/HTTP shapes the services must expose.
   HTTP surfaces all use `register`, not `add`/`rm`.
 - **Exit codes.** 2 = locked (matching Phase 1) rather than the table's "usage error"; 7 =
   timeout/cancelled; 6 = partial (a batch with some failures, detail in `--json`).
+
+### Phase 4+5 implementation notes (where this plan was ambiguous)
+- **The `evidence` gate checks records, not prose.** The old gate only asked that `notes`/`artifacts`
+  were present — which once let a step be marked done before its README existed. It now requires at
+  least one stored `evidence` row of a kind other than `note` for that project/step (migration
+  `0006`); notes alone fail with a message telling the caller to use `add_evidence`. A row is
+  `kind` + `ref` (path/url/command) + `data` (JSON: md5s, pixel-diff pct + noise floor, transcript
+  excerpt, …). `ref` ≤ 4096 chars, `data` ≤ 64 KiB.
+- **Test runs are server-side records; pushing to the in-game HUD stays the caller's job.** The
+  record carries exactly the strip's fields (`name`, `step`, `state`, `elapsed`) so a worker mirrors
+  each `iso_test start|step|pass|fail|off` transition with one call. `test start` claims the host
+  lease server-side (`test:<run-id>`); `finish`/`clear` release it; `finish` also drops a
+  `console_transcript` evidence row on the linked project (when there is one). `elapsed` is computed
+  from `started_at` (`finished_at` once terminal). The CLI is `evidence add|list|show` and
+  `test start|step|finish|clear|status|list`; MCP/HTTP mirror it. `test step`'s text is positional
+  on the CLI, `--note`/`--data` carry prose and structured detail.
 
 ## 0. Principle: one service layer, three thin facades
 
@@ -250,11 +266,12 @@ Matches the parallel service work; each phase ships service → MCP tool → CLI
    (migration `0005`); `build start|status|log|wait|cancel|list`; `deploy push|verify|list` incl.
    `--manifest`/`--parallel`; build runs acquire the host lease server-side, deploys verify MD5s
    server-side. Retired `sleep`-poll babysitting.
-4. **Evidence records.** `Evidence` model + store; `evidence add|list|show`; rewire the `evidence`
-   gate to read structured records (linked to project/step/run, with artifact hashes) instead of
-   transcription notes.
-5. **Test-run tool.** `TestRun` service; `test start|step|finish`; holds the host lock for the whole
-   session, writes an evidence record on `finish`. MCP front door for in-game testing.
+4. **Evidence records.** *(implemented)* `Evidence` model + store (migration `0006`); `evidence
+   add|list|show`; the `evidence` gate now reads structured records (linked to project/step, with
+   artifact hashes) instead of transcription notes — notes alone no longer pass.
+5. **Test-run tool.** *(implemented)* `TestRun` service; `test start|step|finish` (+ `clear`,
+   `status`, `list`); holds the host lock for the whole session, writes an evidence record on
+   `finish`. MCP front door for in-game testing; fields mirror the TEST STATUS HUD strip.
 
 ## 7. Non-goals / open questions
 

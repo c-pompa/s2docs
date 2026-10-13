@@ -14,7 +14,8 @@ GATES = {
     "addon_exists": "the addon has been scaffolded in the workspace",
     "scripts_typecheck": "every scripts/**/*.js file in the addon passes validate_cs_script with 0 errors",
     "cfgs_valid": "every cfg/**/*.cfg file in the addon passes validate_cfg with 0 errors",
-    "evidence": "notes or artifacts describing the result must be provided",
+    "evidence": "at least one non-note evidence row for the step must be recorded via add_evidence "
+    "(console_transcript / file_hash / pixel_diff / screenshot / other) — notes alone don't pass",
 }
 
 
@@ -96,6 +97,7 @@ def _test(depends: tuple[str, ...]) -> StepSpec:
             "what you observed. If no host is available yet, give the user the exact manual steps and mark this "
             "step `blocked` with the reason."
         ),
+        tools=("add_evidence",),
         depends_on=depends,
         gate="evidence",
         done_when=(
@@ -114,7 +116,7 @@ def _document(depends: tuple[str, ...]) -> StepSpec:
             "setup (entities, targetnames, keyvalues), console commands and inputs, known limitations (mark any "
             "@experimental API used), and the build number it was validated against (`list_games`)."
         ),
-        tools=("write_addon_file", "list_games"),
+        tools=("write_addon_file", "list_games", "add_evidence"),
         depends_on=depends,
         gate="evidence",
     )
@@ -158,6 +160,7 @@ _register(
                     "get_example",
                     "get_entity",
                     "get_doc",
+                    "add_evidence",
                 ),
                 gate="evidence",
             ),
@@ -171,6 +174,7 @@ _register(
                     "inputs or commands for testing. The prompt below holds the authoring rules and the live API index."
                 ),
                 prompt={"name": "cs2_script", "args": {"task": "$goal"}},
+                tools=("add_evidence",),
                 depends_on=("research",),
                 gate="evidence",
             ),
@@ -198,7 +202,7 @@ _register(
                     "Write this into the README."
                 ),
                 prompt={"name": "hammer_io_logic", "args": {"goal": "Map setup for: $goal", "game": "$game"}},
-                tools=("get_entity", "find_entities_with_io", "write_addon_file"),
+                tools=("get_entity", "find_entities_with_io", "write_addon_file", "add_evidence"),
                 depends_on=("validate",),
                 gate="evidence",
             ),
@@ -238,7 +242,15 @@ _register(
                     "`PointTemplate.ForceSpawn` for spawning a camera entity. Note that observers (CSObserverPawn) "
                     "have no custom camera. Search docs for 'camera'. Report the rig options and their trade-offs."
                 ),
-                tools=("get_script_api", "search_docs", "get_entity", "list_examples", "get_example", "get_doc"),
+                tools=(
+                    "get_script_api",
+                    "search_docs",
+                    "get_entity",
+                    "list_examples",
+                    "get_example",
+                    "get_doc",
+                    "add_evidence",
+                ),
                 gate="evidence",
             ),
             StepSpec(
@@ -253,6 +265,7 @@ _register(
                     "disconnects."
                 ),
                 prompt={"name": "cs2_script", "args": {"task": "$goal — camera rig: $view_style, following $subject"}},
+                tools=("add_evidence",),
                 depends_on=("research",),
                 gate="evidence",
             ),
@@ -305,7 +318,7 @@ _register(
                     "or point_template entities, and spawn points. Confirm each with `get_entity` and write it into "
                     "the README."
                 ),
-                tools=("get_entity", "write_addon_file"),
+                tools=("get_entity", "write_addon_file", "add_evidence"),
                 depends_on=("validate",),
                 gate="evidence",
             ),
@@ -350,6 +363,7 @@ _register(
                     "get_doc",
                     "list_examples",
                     "get_example",
+                    "add_evidence",
                 ),
                 gate="evidence",
             ),
@@ -364,6 +378,7 @@ _register(
                     "(spawns, arena, point_script/point_template names)."
                 ),
                 prompt={"name": "cs2_script", "args": {"task": "Game template: $goal ($view_style; $core_loop)"}},
+                tools=("add_evidence",),
                 depends_on=("research",),
                 gate="evidence",
             ),
@@ -414,7 +429,7 @@ _register(
                     "custom_hud_layout, triggers) with their keyvalues and I/O confirmed via `get_entity`."
                 ),
                 prompt={"name": "hammer_io_logic", "args": {"goal": "Blockout for: $goal", "game": "$game"}},
-                tools=("get_entity", "find_entities_with_io", "write_addon_file"),
+                tools=("get_entity", "find_entities_with_io", "write_addon_file", "add_evidence"),
                 depends_on=("validate",),
                 gate="evidence",
             ),
@@ -445,7 +460,7 @@ _register(
                 title="Validate",
                 kind="validate",
                 instructions="Run `validate_cfg` on the draft and fix every error. Paste the final cfg into the notes.",
-                tools=("validate_cfg",),
+                tools=("validate_cfg", "add_evidence"),
                 depends_on=("draft",),
                 gate="evidence",
             ),

@@ -16,7 +16,7 @@ from mcp.server.mcpserver.prompts.base import Prompt, PromptArgument
 from mcp_types import ToolAnnotations
 from pydantic import Field
 
-from s2docs import builds, deploys, hosts
+from s2docs import builds, deploys, evidence, hosts, test_runs
 from s2docs import models as m
 from s2docs.build import workspace as ws
 from s2docs.build.validate_cfg import validate_cfg as _validate_cfg
@@ -599,6 +599,95 @@ def create_mcp_server(db: Database, workspace: Path | None = None) -> MCPServer:
     ) -> list[m.Deployment]:
         """Recent deployments (newest first), optionally one host."""
         return _runs(lambda: deploys.list_deployments(db, host_id=host_id))
+
+    # -------------------------------------------------------------- evidence
+    def _ev(fn: Callable[[], T]) -> T:
+        try:
+            return fn()
+        except (evidence.EvidenceError, test_runs.TestRunError, hosts.HostError, NotFound) as exc:
+            raise ToolError(str(exc)) from exc
+
+    @server.tool(annotations=HOSTS_WRITE)
+    def add_evidence(
+        project_id: ProjectId,
+        step_id: Annotated[str, Field(description="Project step the evidence proves (e.g. 'research')")],
+        kind: m.EvidenceKind,
+        ref: Annotated[str | None, Field(description="Path / url / command the evidence points at")] = None,
+        data: Annotated[
+            dict | None,
+            Field(description="Structured detail: e.g. {'pixel_diff_pct': 1.2, 'noise_floor': 0.5} or {'md5': '...'}"),
+        ] = None,
+    ) -> m.Evidence:
+        """Record structured evidence for a step. This is what the `evidence` gate checks — a step with an
+        evidence gate CANNOT be marked done until at least one non-note row exists for it. Use kind='note'
+        only for a supplementary remark (it does not satisfy the gate)."""
+        return _ev(lambda: evidence.add(db, kind=kind, project_id=project_id, step_id=step_id, ref=ref, data=data))
+
+    @server.tool(annotations=READ_ONLY)
+    def list_evidence(
+        project_id: Annotated[str | None, Field(description="Restrict to one project")] = None,
+        step_id: Annotated[str | None, Field(description="Restrict to one step")] = None,
+        kind: m.EvidenceKind | None = None,
+    ) -> list[m.Evidence]:
+        """List evidence rows (newest first), optionally filtered by project, step and/or kind."""
+        return _ev(lambda: evidence.list_evidence(db, project_id=project_id, step_id=step_id, kind=kind))
+
+    # ------------------------------------------------------------- test runs
+    @server.tool(annotations=HOSTS_WRITE)
+    def test_start(
+        name: Annotated[str, Field(description="Label shown on the HUD strip, e.g. 'iso_test'")],
+        host_id: Annotated[str | None, Field(description="Host to claim for the session (optional)")] = None,
+        project_id: Annotated[str | None, Field(description="Project this session belongs to (optional)")] = None,
+    ) -> m.TestRun:
+        """Start a server-side test session (state=running). Claims the host lease when a host is given.
+        Mirror the state onto the in-game TEST STATUS HUD yourself via `iso_test start` over netcon."""
+        return _ev(lambda: test_runs.start(db, name, host_id=host_id, project_id=project_id))
+
+    @server.tool(annotations=HOSTS_WRITE)
+    def test_step(
+        run_id: Annotated[str, Field(description="Run id from test_start, e.g. 't-1a2b3c4d'")],
+        text: Annotated[str, Field(description="Current step label, e.g. 'wall-occlusion probe'")],
+    ) -> m.TestRun:
+        """Set the running session's current step (the HUD strip's `iso_test step`). Running runs only."""
+        return _ev(lambda: test_runs.step(db, run_id, text))
+
+    @server.tool(annotations=HOSTS_WRITE)
+    def test_finish(
+        run_id: str,
+        result: Literal["pass", "fail"],
+        note: Annotated[str | None, Field(description="What happened / the failure")] = None,
+    ) -> m.TestRun:
+        """Finish a running session pass/fail (the HUD's `iso_test pass|fail`): releases the host lease and
+        records a console-transcript evidence row on the linked project when there is one."""
+        return _ev(lambda: test_runs.finish(db, run_id, result, note=note))
+
+    @server.tool(annotations=HOSTS_WRITE)
+    def test_clear(run_id: str) -> m.TestRun:
+        """Dismiss a session (`iso_test off`): state=idle, releasing a still-held host lease."""
+        return _ev(lambda: test_runs.clear(db, run_id))
+
+    @server.tool(annotations=READ_ONLY)
+    def test_status(
+        run_id: Annotated[
+            str | None, Field(description="Run id; omit for the current (most recent active) run")
+        ] = None,
+    ) -> m.TestRun:
+        """One test run's record, or the current active run when no id is given."""
+
+        def _status() -> m.TestRun:
+            run = test_runs.get(db, run_id) if run_id else test_runs.current(db)
+            if run is None:
+                raise test_runs.TestRunError("no active test run")
+            return run
+
+        return _ev(_status)
+
+    @server.tool(annotations=READ_ONLY)
+    def list_test_runs(
+        state: Annotated[m.TestRunState | None, Field(description="Restrict to one state")] = None,
+    ) -> list[m.TestRun]:
+        """Recent test sessions (newest first), optionally filtered by state."""
+        return _ev(lambda: test_runs.list_runs(db, state=state))
 
     # -------------------------------------------------------------- resources
     @server.resource(

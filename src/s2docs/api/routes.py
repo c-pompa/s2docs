@@ -10,7 +10,7 @@ from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, Field
 
 from s2docs import builds as build_svc
-from s2docs import deploys, hosts
+from s2docs import deploys, evidence, hosts, test_runs
 from s2docs import models as m
 from s2docs.build.validate_cfg import validate_cfg
 from s2docs.build.validate_script import validate_cs_script
@@ -467,6 +467,86 @@ def get_deploy(deploy_id: str, db: Db):
 @router.post("/deploys/{deploy_id}/verify", response_model=m.Deployment)
 def verify_deploy(deploy_id: str, db: Db):
     return deploys.verify(db, deploy_id)
+
+
+# ---------------------------------------------------------------- evidence
+class EvidenceIn(BaseModel):
+    project_id: str
+    step_id: str | None = None
+    kind: m.EvidenceKind
+    ref: str | None = None
+    data: dict = Field(default_factory=dict)
+
+
+@router.post("/evidence", response_model=m.Evidence, status_code=201)
+def add_evidence(body: EvidenceIn, db: Db):
+    return evidence.add(
+        db, kind=body.kind, project_id=body.project_id, step_id=body.step_id, ref=body.ref, data=body.data
+    )
+
+
+@router.get("/evidence", response_model=list[m.Evidence])
+def list_evidence(db: Db, project_id: str | None = None, step_id: str | None = None, kind: str | None = None):
+    return evidence.list_evidence(db, project_id=project_id, step_id=step_id, kind=kind)
+
+
+@router.get("/evidence/{evidence_id}", response_model=m.Evidence)
+def get_evidence(evidence_id: str, db: Db):
+    return evidence.get(db, evidence_id)
+
+
+# --------------------------------------------------------------- test runs
+class TestRunIn(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+    host_id: str | None = None
+    project_id: str | None = None
+
+
+class TestStepIn(BaseModel):
+    text: str = Field(min_length=1, max_length=2000)
+
+
+class TestFinishIn(BaseModel):
+    result: Literal["pass", "fail"]
+    note: str | None = None
+
+
+@router.post("/test-runs", response_model=m.TestRun, status_code=201)
+def start_test_run(body: TestRunIn, db: Db):
+    return test_runs.start(db, body.name, host_id=body.host_id, project_id=body.project_id)
+
+
+@router.get("/test-runs", response_model=list[m.TestRun])
+def list_test_runs(db: Db, state: m.TestRunState | None = None):
+    return test_runs.list_runs(db, state=state)
+
+
+@router.get("/test-runs/current", response_model=m.TestRun)
+def current_test_run(db: Db):
+    run = test_runs.current(db)
+    if run is None:
+        raise HTTPException(404, "no active test run")
+    return run
+
+
+@router.get("/test-runs/{run_id}", response_model=m.TestRun)
+def get_test_run(run_id: str, db: Db):
+    return test_runs.get(db, run_id)
+
+
+@router.post("/test-runs/{run_id}/step", response_model=m.TestRun)
+def step_test_run(run_id: str, body: TestStepIn, db: Db):
+    return test_runs.step(db, run_id, body.text)
+
+
+@router.post("/test-runs/{run_id}/finish", response_model=m.TestRun)
+def finish_test_run(run_id: str, body: TestFinishIn, db: Db):
+    return test_runs.finish(db, run_id, body.result, note=body.note)
+
+
+@router.post("/test-runs/{run_id}/clear", response_model=m.TestRun)
+def clear_test_run(run_id: str, db: Db):
+    return test_runs.clear(db, run_id)
 
 
 # ------------------------------------------------------------- prompts

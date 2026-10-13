@@ -455,3 +455,39 @@ class Deployment(BaseModel):
     notes: str | None = None
     created_at: str
     updated_at: str
+
+
+# ------------------------------------------------------------------ evidence
+EvidenceKind = Literal["console_transcript", "file_hash", "pixel_diff", "screenshot", "note", "other"]
+EVIDENCE_KINDS: tuple[str, ...] = EvidenceKind.__args__  # type: ignore[attr-defined]
+
+
+class Evidence(BaseModel):
+    id: str
+    project_id: str
+    step_id: str | None = Field(default=None, description="Owning step; None = project-level evidence")
+    kind: EvidenceKind
+    ref: str | None = Field(default=None, description="Path / url / command the evidence points at")
+    data: dict = Field(default_factory=dict, description="Structured detail (md5s, pixel diff pct, transcript excerpt)")
+    created_at: str
+
+
+# ----------------------------------------------------------------- test runs
+TestRunState = Literal["idle", "running", "pass", "fail"]
+
+
+class TestRun(BaseModel):
+    """A server-side in-game test session, mirroring the iso-spectate TEST STATUS HUD strip fields."""
+
+    id: str
+    host_id: str | None = None
+    project_id: str | None = None
+    name: str
+    step: str = ""
+    state: TestRunState
+    elapsed_sec: int = Field(default=0, description="Seconds since started_at (frozen at finished_at once terminal)")
+    note: str | None = None
+    started_at: str | None = None
+    finished_at: str | None = None
+    created_at: str
+    updated_at: str

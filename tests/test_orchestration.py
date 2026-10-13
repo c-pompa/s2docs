@@ -5,6 +5,7 @@ import pytest
 from fastapi.testclient import TestClient
 from mcp import Client
 
+from s2docs import evidence
 from s2docs import models as m
 from s2docs.api.app import create_app
 from s2docs.build import workspace as ws
@@ -18,6 +19,11 @@ from tests.test_build import BAD, GOOD, needs_tsc
 @pytest.fixture
 def orch(db, tmp_path):
     return Orchestrator(db, tmp_path / "ws")
+
+
+def _attest(db, pid: str, step: str, **data) -> None:
+    """Satisfy the `evidence` gate the way an agent would: one non-note evidence row for the step."""
+    evidence.add(db, kind="console_transcript", project_id=pid, step_id=step, data=data or {"observed": "ok"})
 
 
 def test_workflow_registry_references_real_tools_and_prompts(db, tmp_path):
@@ -40,7 +46,7 @@ def test_slug_addon():
     assert slug_addon("3D thing") == "addon_3d_thing"
 
 
-def test_camera_project_flow_and_gates(orch, tmp_path, repo):
+def test_camera_project_flow_and_gates(orch, tmp_path, repo, db):
     brief = orch.start("cs2_camera_addon", "isometric diablo style match viewer", inputs={"view_style": "iso 55/45"})
     pid, addon = brief.project_id, brief.addon
     assert addon == "isometric_diablo_style_match_viewer"
@@ -49,13 +55,16 @@ def test_camera_project_flow_and_gates(orch, tmp_path, repo):
 
     with pytest.raises(OrchestrationError, match="depends on unfinished"):
         orch.update(pid, "design_rig", "done", notes="x")
-    with pytest.raises(GateFailed, match="evidence"):
-        orch.update(pid, "research", "done")
+    # notes alone no longer pass the evidence gate — a real (non-note) evidence row is required
+    with pytest.raises(GateFailed, match="add_evidence"):
+        orch.update(pid, "research", "done", notes="looked it up")
+    _attest(db, pid, "research", api="CustomPlayerCamera + FOLLOW_POSITION")
     brief = orch.update(pid, "research", "done", notes="CustomPlayerCamera + FOLLOW_POSITION", artifacts=["api.md"])
 
     design = brief.next_steps[0]
     assert design.step_id == "design_rig" and design.prompt_name == "cs2_script"
     assert "isometric diablo style match viewer" in design.prompt_text  # prompt rendered with live context
+    _attest(db, pid, "design_rig", rig="CONTROLLED, iso 55/45")
     orch.update(pid, "design_rig", "done", notes="rig chosen")
 
     with pytest.raises(GateFailed, match="does not exist"):
@@ -83,9 +92,10 @@ def test_camera_project_flow_and_gates(orch, tmp_path, repo):
 
 
 @needs_tsc
-def test_scripts_typecheck_gate(orch, tmp_path, repo):
+def test_scripts_typecheck_gate(orch, tmp_path, repo, db):
     pid = orch.start("cs2_script_feature", "jump boost", addon="jump_boost").project_id
     for step in ("research", "design"):
+        _attest(db, pid, step, ok=True)
         orch.update(pid, step, "done", notes="ok")
     ws.scaffold(tmp_path / "ws", repo, game="cs2", name="jump_boost")
     orch.update(pid, "scaffold", "done", notes="ok")
@@ -145,9 +155,24 @@ def test_orchestration_api(db, tmp_path):
         pid = r.json()["project_id"]
         r = c.post(f"/api/projects/{pid}/steps/research", json={"status": "done"})
         assert r.status_code == 409 and r.json()["gate_failed"]
+        # a note kind alone must not satisfy the gate
+        note = c.post("/api/evidence", json={"project_id": pid, "step_id": "research", "kind": "note", "data": {}})
+        assert note.status_code == 201
+        r = c.post(f"/api/projects/{pid}/steps/research", json={"status": "done", "notes": "limits listed"})
+        assert r.status_code == 409 and r.json()["gate_failed"]
+        # a real evidence row does
+        ev = c.post(
+            "/api/evidence",
+            json={"project_id": pid, "step_id": "research", "kind": "console_transcript", "data": {"limits": 3}},
+        )
+        assert ev.status_code == 201
         r = c.post(f"/api/projects/{pid}/steps/research", json={"status": "done", "notes": "limits listed"})
         assert r.status_code == 200 and r.json()["next_steps"][0]["step_id"] == "architecture"
         assert c.get(f"/api/projects/{pid}").json()["steps"][0]["status"] == "done"
+        assert c.get("/api/evidence", params={"project_id": pid, "step_id": "research"}).json()[0]["kind"] in (
+            "note",
+            "console_transcript",
+        )
         assert c.get("/api/projects/p-missing").status_code == 404
 
 
@@ -161,16 +186,28 @@ def test_orchestration_mcp(db, tmp_path):
             )
             pid = started.structured_content["project_id"]
             gate = await c.call_tool("update_step", {"project_id": pid, "step_id": "research", "status": "done"})
+            ev = await c.call_tool(
+                "add_evidence",
+                {
+                    "project_id": pid,
+                    "step_id": "research",
+                    "kind": "console_transcript",
+                    "data": {"api": ["CustomPlayerCamera"]},
+                },
+            )
             ok = await c.call_tool(
                 "update_step", {"project_id": pid, "step_id": "research", "status": "done", "notes": "found API"}
             )
+            listed = await c.call_tool("list_evidence", {"project_id": pid})
             text = await c.call_tool("get_prompt_text", {"name": "orchestrate", "arguments": {"goal": "iso view"}})
             kickoff = await c.get_prompt("orchestrate", {"goal": "isometric viewer"})
-            return started, gate, ok, text, kickoff
+            return started, gate, ev, ok, listed, text, kickoff
 
-    started, gate, ok, text, kickoff = anyio.run(main)
+    started, gate, ev, ok, listed, text, kickoff = anyio.run(main)
     assert started.structured_content["addon"] == "iso_view"
     assert gate.is_error and "evidence" in gate.content[0].text
+    assert not ev.is_error and ev.structured_content["kind"] == "console_transcript"
     assert ok.structured_content["next_steps"][0]["prompt_name"] == "cs2_script"
+    assert listed.structured_content["result"][0]["step_id"] == "research"
     assert "cs2_camera_addon" in text.structured_content["result"]
     assert "start_project" in kickoff.messages[0].content.text

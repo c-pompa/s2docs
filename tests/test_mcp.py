@@ -36,6 +36,11 @@ def test_tools_are_listed_read_only(server):
         "build_cancel",
         "deploy_push",
         "deploy_verify",
+        "add_evidence",
+        "test_start",
+        "test_step",
+        "test_finish",
+        "test_clear",
     }
     assert all(t.annotations and t.annotations.read_only_hint for t in tools if t.name not in writers)
     assert all(t.annotations and t.annotations.destructive_hint is False for t in tools if t.name in writers)

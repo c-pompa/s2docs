@@ -26,6 +26,10 @@ EXIT_TIMEOUT = 7
 _DURATION_RE = re.compile(r"^(\d+)([smhd]?)$")
 _DURATION_UNITS = {"": 1, "s": 1, "m": 60, "h": 3600, "d": 86400}
 
+# Kept as literals so `cli.py`'s hot path never imports the Pydantic models module.
+_EVIDENCE_KINDS = ("console_transcript", "file_hash", "pixel_diff", "screenshot", "note", "other")
+_TEST_STATES = ("idle", "running", "pass", "fail")
+
 
 def _parse_duration(value: str) -> int:
     """Parse '1h', '90m', '300s' or a bare number of seconds into seconds."""
@@ -391,6 +395,92 @@ def _cmd_deploy(args: argparse.Namespace) -> int:
     return _fail(f"unknown deploy command {args.deploy_cmd!r}", EXIT_ERROR)
 
 
+def _human_evidence(ev) -> list[str]:
+    out = [f"{ev.id}  {ev.kind}  project={ev.project_id}  step={ev.step_id or '-'}"]
+    if ev.ref:
+        out.append(f"  ref: {ev.ref}")
+    if ev.data:
+        out.append(f"  data: {json.dumps(ev.data)}")
+    out.append(f"  created: {ev.created_at}")
+    return out
+
+
+def _cmd_evidence(args: argparse.Namespace) -> int:
+    from s2docs import evidence
+    from s2docs.db.repository import NotFound
+
+    db = Database(get_settings().db_path)
+    try:
+        if args.evidence_cmd == "add":
+            kind = args.kind or ("note" if args.note else None)
+            if kind is None:
+                return _fail("pass --kind or --note", EXIT_ERROR)
+            data = json.loads(args.data) if args.data else {}
+            if args.note:
+                data = {**data, "text": args.note}
+            ev = evidence.add(db, kind=kind, project_id=args.project, step_id=args.step, ref=args.ref, data=data)
+            return _emit(args, {"evidence": ev.model_dump()}, _human_evidence(ev))
+        if args.evidence_cmd == "list":
+            rows = evidence.list_evidence(db, project_id=args.project, step_id=args.step, kind=args.kind)
+            human = [f"{e.id}  {e.kind:18}  {e.step_id or '-':16}  {e.ref or ''}" for e in rows]
+            return _emit(args, {"evidence": [e.model_dump() for e in rows]}, human or ["no evidence"])
+        if args.evidence_cmd == "show":
+            ev = evidence.get(db, args.evidence_id)
+            return _emit(args, {"evidence": ev.model_dump()}, _human_evidence(ev))
+    except NotFound as exc:
+        return _fail(str(exc), EXIT_NOT_FOUND)
+    except (evidence.EvidenceError, json.JSONDecodeError) as exc:
+        return _fail(str(exc), EXIT_ERROR)
+    return _fail(f"unknown evidence command {args.evidence_cmd!r}", EXIT_ERROR)
+
+
+def _human_test(run) -> list[str]:
+    out = [f"{run.id}  {run.name}  {run.state}  step={run.step or '-'}  elapsed={run.elapsed_sec}s"]
+    if run.host_id:
+        out.append(f"  host: {run.host_id}")
+    if run.project_id:
+        out.append(f"  project: {run.project_id}")
+    if run.note:
+        out.append(f"  note: {run.note}")
+    return out
+
+
+def _cmd_test(args: argparse.Namespace) -> int:
+    from s2docs import hosts, test_runs
+    from s2docs.db.repository import NotFound
+
+    db = Database(get_settings().db_path)
+    try:
+        if args.test_cmd == "start":
+            run = test_runs.start(db, args.name, host_id=args.host, project_id=args.project)
+            return _emit(args, {"test_run": run.model_dump()}, _human_test(run))
+        if args.test_cmd == "step":
+            run = test_runs.step(db, args.run_id, args.text)
+            return _emit(args, {"test_run": run.model_dump()}, _human_test(run))
+        if args.test_cmd == "finish":
+            run = test_runs.finish(db, args.run_id, args.result, note=args.note)
+            return _emit(args, {"test_run": run.model_dump()}, _human_test(run))
+        if args.test_cmd == "clear":
+            run = test_runs.clear(db, args.run_id)
+            return _emit(args, {"test_run": run.model_dump()}, _human_test(run))
+        if args.test_cmd == "status":
+            run = test_runs.get(db, args.run_id) if args.run_id else test_runs.current(db)
+            if run is None:
+                return _fail("no active test run", EXIT_NOT_FOUND)
+            return _emit(args, {"test_run": run.model_dump()}, _human_test(run))
+        if args.test_cmd == "list":
+            runs = test_runs.list_runs(db, state=args.state)
+            human = [f"{r.id}  {r.name}  {r.state:8}  step={r.step or '-'}  elapsed={r.elapsed_sec}s" for r in runs]
+            return _emit(args, {"test_runs": [r.model_dump() for r in runs]}, human or ["no test runs"])
+    except NotFound as exc:
+        return _fail(str(exc), EXIT_NOT_FOUND)
+    except hosts.HostLocked as exc:
+        return _fail(f"LOCKED: {exc}", EXIT_LOCKED)
+    except (test_runs.TestRunError, hosts.HostError) as exc:
+        return _fail(str(exc), EXIT_ERROR)
+    return _fail(f"unknown test command {args.test_cmd!r}", EXIT_ERROR)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="s2docs", description="Source 2 docs index, API and MCP server")
     parser.add_argument("-v", "--verbose", action="store_true")
@@ -518,6 +608,48 @@ def main(argv: list[str] | None = None) -> int:
     q = dc.add_parser("list", help="List deployments (newest first)")
     q.add_argument("--host")
     p.set_defaults(fn=_cmd_deploy)
+
+    p = sub.add_parser("evidence", help="Evidence store: what the orchestration `evidence` gate checks")
+    ev = p.add_subparsers(dest="evidence_cmd", required=True)
+    q = ev.add_parser("add", help="Record one evidence row for a project step")
+    q.add_argument("--project", required=True, help="Project id")
+    q.add_argument("--step", help="Step id the evidence proves")
+    q.add_argument(
+        "--kind",
+        choices=list(_EVIDENCE_KINDS),
+        help="Evidence kind (notes alone don't satisfy the gate)",
+    )
+    q.add_argument("--ref", help="Path / url / command the evidence points at")
+    q.add_argument("--data", help="Structured detail as a JSON object, e.g. '{\"pixel_diff_pct\": 1.2}'")
+    q.add_argument("--note", help="Shortcut: record a note (kind=note) with this text")
+    q = ev.add_parser("list", help="List evidence rows (newest first)")
+    q.add_argument("--project")
+    q.add_argument("--step")
+    q.add_argument("--kind", choices=list(_EVIDENCE_KINDS))
+    q = ev.add_parser("show", help="Show one evidence row")
+    q.add_argument("evidence_id")
+    p.set_defaults(fn=_cmd_evidence)
+
+    p = sub.add_parser("test", help="In-game test-run records (mirror of the TEST STATUS HUD strip)")
+    tc = p.add_subparsers(dest="test_cmd", required=True)
+    q = tc.add_parser("start", help="Start a test session (claims the host lease if --host is given)")
+    q.add_argument("--name", required=True, help="Label shown on the HUD, e.g. 'iso_test'")
+    q.add_argument("--host", help="Host to claim for the session")
+    q.add_argument("--project", help="Project this session belongs to")
+    q = tc.add_parser("step", help="Set the running session's current step")
+    q.add_argument("run_id")
+    q.add_argument("text", help="Step label, e.g. 'wall-occlusion probe'")
+    q = tc.add_parser("finish", help="Finish a running session pass/fail (releases the host lease)")
+    q.add_argument("run_id")
+    q.add_argument("--result", choices=["pass", "fail"], default="pass")
+    q.add_argument("--note")
+    q = tc.add_parser("clear", help="Dismiss a session (`iso_test off`)")
+    q.add_argument("run_id")
+    q = tc.add_parser("status", help="Show a run, or the current active run")
+    q.add_argument("run_id", nargs="?")
+    q = tc.add_parser("list", help="List test runs (newest first)")
+    q.add_argument("--state", choices=list(_TEST_STATES))
+    p.set_defaults(fn=_cmd_test)
 
     args = parser.parse_args(argv)
     # stdout is the MCP stdio channel: logs must go to stderr.
