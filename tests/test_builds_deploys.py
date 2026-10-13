@@ -9,6 +9,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import re
+import threading
 
 import anyio
 import pytest
@@ -37,15 +38,19 @@ class _Result:
 
 
 # ------------------------------------------------------------------ build fakes
-def fake_popen(payload: bytes = b"", rc: int = 0, hang: bool = False, record: list | None = None):
-    """A subprocess.Popen stand-in: writes `payload` to the stdout file, then 'finishes'."""
+def fake_popen(payload: bytes = b"", rc: int = 0, hang: bool = False, record: list | None = None, gate=None):
+    """A subprocess.Popen stand-in: writes `payload` to the stdout file, then 'finishes'.
+
+    With `gate` (a threading.Event) the process stays alive until the test sets it,
+    removing the race where the watcher finalizes the run before the test asserts.
+    """
 
     class _P:
         def __init__(self, argv, stdout=None, stderr=None, **_kw):
             self.argv = argv
             self.pid = 4242
             self._rc = rc
-            self._done = not hang
+            self._done = not hang and gate is None
             self.terminated = False
             if record is not None:
                 record.append(argv)
@@ -54,7 +59,12 @@ def fake_popen(payload: bytes = b"", rc: int = 0, hang: bool = False, record: li
                 stdout.flush()
 
         def poll(self):
-            return None if not self._done else self._rc
+            if self._done:
+                return self._rc
+            if gate is not None and gate.is_set():
+                self._done = True
+                return self._rc
+            return None
 
         def wait(self, timeout=None):
             return self._rc
@@ -78,9 +88,11 @@ def _start(bdb, tmp_path, **kw):
 # ------------------------------------------------------------------- build runs
 def test_build_start_success(bdb, tmp_path, monkeypatch):
     payload = "Compile Summary: 1234 compiled, 2 failed, 0 warnings\r\nDone.\r\n".encode("utf-16")
-    monkeypatch.setattr(builds.subprocess, "Popen", fake_popen(payload=payload, rc=0))
+    gate = threading.Event()
+    monkeypatch.setattr(builds.subprocess, "Popen", fake_popen(payload=payload, rc=0, gate=gate))
     run = _start(bdb, tmp_path)
     assert run.status == "running" and run.handle == "4242"
+    gate.set()  # let the fake compiler exit; the watcher then finalizes the run
     finished = builds.wait(bdb, run.id, timeout_sec=5, poll_sec=0.02)
     assert finished.status == "succeeded" and finished.exit_code == 0
     assert finished.summary == {"compiled": 1234, "failed": 2, "warnings": 0}
