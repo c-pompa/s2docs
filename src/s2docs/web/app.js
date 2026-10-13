@@ -3,7 +3,7 @@
 
 const $ = (sel) => document.querySelector(sel);
 const view = $("#view");
-const state = { games: [], game: localStorage.getItem("s2docs.game") || "cs2" };
+const state = { games: [], game: localStorage.getItem("s2docs.game") || "cs2", activityActive: false };
 
 const esc = (v) =>
   String(v ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
@@ -45,6 +45,17 @@ const STATE_CLASS = {
 };
 const stateBadge = (s) => badge(s, STATE_CLASS[s] ?? "");
 const summaryText = (s) => Object.entries(s || {}).map(([k, v]) => `${v} ${k}`).join(", ") || "—";
+// A lock's 'stuck' flag (added by the lock-phase work) is rendered when present and tolerated when not.
+const lockStuckBadge = (lock) => (lock && lock.stuck ? badge("STUCK", "warn") : "");
+// Material-guard findings on a build run (missing/reserved materials) — the run can be 'succeeded' and still carry them.
+const materialWarning = (r) => {
+  const w = r && r.warnings;
+  if (!w || w.clean) return "";
+  const n = Object.values(w.counts || {}).reduce((a, b) => a + Number(b || 0), 0);
+  return badge(`⚠ ${n} material${n === 1 ? "" : "s"}`, "warn");
+};
+// A run's phase/notes line (build start --notes, or a finalize note like 'timed out after 360s').
+const runPhase = (r) => firstLine(r && r.notes ? r.notes : "");
 const gpuOf = (h) => {
   const gpus = h.facts?.probe?.gpu || h.facts?.gpu || [];
   return gpus.map((g) => `${g.name || "gpu"}${g.util_pct != null ? ` (${g.util_pct}%)` : ""}`).join(", ") || "—";
@@ -56,9 +67,7 @@ const lockCell = (lock) => {
     ? ` · phase ${esc(lock.phase)}${lock.phase_age_sec != null ? ` ${human(lock.phase_age_sec)}` : ""}`
     : " · no phase reported";
   const state = lock.stuck ? "STUCK" : lock.fresh ? "fresh" : "STALE";
-  return `${badge(lock.owner, lock.fresh && !lock.stuck ? "kind" : "warn")}${
-    lock.stuck ? " " + badge("STUCK", "warn") : ""
-  }<div class="muted">${state} · heartbeat ${human(lock.age_sec)} ago · ttl ${human(lock.ttl_sec)}${phase}${
+  return `${badge(lock.owner, lock.fresh && !lock.stuck ? "kind" : "warn")}${lockStuckBadge(lock)}<div class="muted">${state} · heartbeat ${human(lock.age_sec)} ago · ttl ${human(lock.ttl_sec)}${phase}${
     lock.stuck && lock.stuck_reason ? `<br>${esc(lock.stuck_reason)}` : ""
   }</div>`;
 };
@@ -81,8 +90,10 @@ const buildRows = (runs) =>
           (r) =>
             `<tr><td class="mono">${esc(r.id)}<div class="muted">${esc(r.kind)}</div></td>` +
             `<td>${link(["hosts", r.host_id], r.host_id)}</td>` +
-            `<td>${stateBadge(r.status)}${r.exit_code != null ? `<div class="muted mono">exit ${r.exit_code}</div>` : ""}</td>` +
-            `<td class="muted">${human(runElapsed(r))}</td><td class="muted">${esc(summaryText(r.summary))}</td></tr>`,
+            `<td>${stateBadge(r.status)}${lockStuckBadge(r.lock)}${r.exit_code != null ? `<div class="muted mono">exit ${r.exit_code}</div>` : ""}</td>` +
+            `<td class="muted">${human(runElapsed(r))}</td><td class="muted">${esc(summaryText(r.summary))}${materialWarning(r)}${
+              runPhase(r) ? `<div class="muted">${esc(runPhase(r))}</div>` : ""
+            }</td></tr>`,
         )
         .join("")}</table>`
     : `<p class="muted">No build runs.</p>`;
@@ -156,7 +167,7 @@ async function api(path, params = {}) {
 const SECTIONS = [
   ["search", "Search"], ["convars", "ConVars & Commands"], ["entities", "Entities (Hammer)"],
   ["schema", "Schema"], ["events", "Game Events"], ["script", "cs_script API"], ["examples", "Examples"],
-  ["pulse", "Pulse"], ["docs", "Docs (source2.wiki)"], ["validate", "Validate"], ["projects", "Projects"],
+  ["pulse", "Pulse"], ["docs", "Docs (source2.wiki)"], ["validate", "Validate"], ["projects", "Orchestration"],
   ["hosts", "Hosts"], ["activity", "Activity"], ["diff", "Build Diff"], ["prompts", "Prompts"], ["stats", "Stats"],
 ];
 // Pages that are about the whole install (hosts/runs), not one game — routed as #/<section>, no game prefix.
@@ -195,7 +206,7 @@ async function route() {
   }
   const [section = "search", ...rest] = parts;
   renderNav(section);
-  clearInterval(liveTimer); // any auto-refresh from the previous page stops now
+  clearTimeout(liveTimer); // any auto-refresh from the previous page stops now
   liveTimer = null;
   if (section === "search" && params.q !== undefined) $("#q").value = params.q;
   view.innerHTML = `<p class="muted">Loading…</p>`;
@@ -205,14 +216,19 @@ async function route() {
     bindFilters(section, rest, params);
     // A live page (Hosts/Activity) parked a render fn in pendingLive; refill its #live region on a timer
     // so the strip updates without re-rendering the header or jumping the scroll position.
+    // `ms` may be a function (e.g. poll fast while a run is active, slow when idle); a recursive
+    // setTimeout re-evaluates it after every tick, which setInterval cannot do.
     if (pendingLive) {
       const { selector, render, ms } = pendingLive;
       pendingLive = null;
-      liveTimer = setInterval(async () => {
+      const delay = () => (typeof ms === "function" ? ms() : ms);
+      const tick = async () => {
         const el = view.querySelector(selector);
-        if (!el) { clearInterval(liveTimer); return; }
+        if (!el) { liveTimer = null; return; }
         try { el.innerHTML = await render(); } catch { /* keep the last good view */ }
-      }, ms);
+        liveTimer = setTimeout(tick, delay());
+      };
+      liveTimer = setTimeout(tick, delay());
     }
   } catch (e) {
     view.innerHTML = `<h1>Error</h1><p class="err">${esc(e.message)}</p>`;
@@ -276,6 +292,60 @@ function hitLink(hit) {
     default: return esc(hit.name);
   }
 }
+
+// ---------------------------------------------------- orchestration DAG helpers
+// Longest-path depth per step (0 = no deps), used to lay the DAG out in dependency columns.
+function stepDepths(steps) {
+  const byId = Object.fromEntries(steps.map((s) => [s.id, s]));
+  const depth = {};
+  const visit = (id, seen) => {
+    if (depth[id] != null) return depth[id];
+    if (seen.has(id)) return 0; // cycle guard: treat the back-edge as depth 0
+    seen.add(id);
+    const deps = (byId[id]?.depends_on || []).filter((d) => byId[d]);
+    depth[id] = deps.length ? 1 + Math.max(...deps.map((d) => visit(d, seen))) : 0;
+    return depth[id];
+  };
+  steps.forEach((s) => visit(s.id, new Set()));
+  return depth;
+}
+
+// A compact step-level DAG: one column per dependency depth, connected left→right.
+function stepDag(steps) {
+  if (!steps.length) return `<p class="muted">No steps.</p>`;
+  const depth = stepDepths(steps);
+  const maxDepth = Math.max(0, ...Object.values(depth));
+  const cols = [];
+  for (let d = 0; d <= maxDepth; d++) cols.push(steps.filter((s) => depth[s.id] === d));
+  return `<div class="dag">${cols
+    .map(
+      (layer, i) =>
+        `<div class="dag-col">${layer
+          .map(
+            (s) =>
+              `<div class="dag-node ${esc(s.status)}"><strong>${esc(s.title)}</strong>` +
+              `<div class="muted mono">${esc(s.id)} · ${esc(s.kind)} · ${esc(s.status)}${s.gate ? " · gate:" + esc(s.gate) : ""}</div></div>`,
+          )
+          .join("")}</div>` + (i < cols.length - 1 ? `<div class="dag-arrow">→</div>` : ""),
+    )
+    .join("")}</div>`;
+}
+
+// --------------------------------------------------------------------- Activity
+// Shown when nothing has flowed through the build/test/deploy services yet — the failure mode that
+// read as 'the page is broken' when in fact no work had been recorded.
+const activityEmptyState = () => `<div class="card">
+  <strong>No activity yet — and that is expected until work goes through the services.</strong>
+  <p class="muted">This page is <strong>service-fed</strong>: a row appears here when work goes through the s2docs
+  <strong>build / test / deploy</strong> services. It is <em>not</em> a view of any CS2 that happens to be running
+  somewhere — if nothing has been recorded yet, the page is correctly empty.</p>
+  <p class="muted">Start something and it shows up within a few seconds:</p>
+  <ul class="muted">
+    <li><code>build_start</code> (MCP) or <code>s2docs build start &lt;host&gt; -- &lt;command&gt;</code> — a compile/command on a host</li>
+    <li><code>test_start</code> or <code>s2docs test start &lt;name&gt;</code> — an in-game test session (the HUD strip)</li>
+    <li><code>deploy_push</code> or <code>s2docs deploy push …</code> — files pushed to a host</li>
+  </ul>
+  <p class="muted">Read-only: nothing on this page mutates a host or a run.</p></div>`;
 
 // ------------------------------------------------------------------- views
 const ROUTES = {
@@ -491,10 +561,47 @@ const ROUTES = {
         <td class="mono">${esc(r.name)}</td><td class="mono muted">${esc((r.before || "").slice(0, 160))}${r.change === "changed" ? " → " : ""}${esc((r.after || "").slice(0, 160))}</td></tr>`).join("")}</table>` : `<p class="muted">No changes.</p>`}`).join("")}`;
   },
 
+  // "projects" are orchestration DAGs (multi-step plans the server tracks), distinct from the
+  // build/test/deploy runs on the Activity page. Each project opens to a step-level view.
   async projects([pid]) {
     const statusBadge = (s) => badge(s, s === "done" ? "kind" : s === "blocked" ? "warn" : "");
     if (pid) {
-      const [p, b] = await Promise.all([api(`/projects/${enc(pid)}`), api(`/projects/${enc(pid)}/brief`)]);
+      const [p, b, ev] = await Promise.all([
+        api(`/projects/${enc(pid)}`),
+        api(`/projects/${enc(pid)}/brief`),
+        api("/evidence", { project_id: pid }).catch(() => []),
+      ]);
+      // Group evidence rows per step: total, gate-relevant (non-note) count, and per-kind breakdown.
+      const evByStep = {};
+      for (const e of ev || []) {
+        const key = e.step_id || "(project)";
+        const c = (evByStep[key] ||= { all: 0, nonnote: 0, kinds: {} });
+        c.all += 1;
+        if (e.kind !== "note") c.nonnote += 1;
+        c.kinds[e.kind] = (c.kinds[e.kind] || 0) + 1;
+      }
+      // An 'evidence' gate passes only with >=1 stored non-note row; other gates pass when the step is done.
+      const gateOk = (s) => (s.gate === "evidence" ? (evByStep[s.id]?.nonnote || 0) > 0 : s.status === "done");
+      const evCell = (id) => {
+        const c = evByStep[id];
+        if (!c) return `<span class="muted">none</span>`;
+        const kinds = Object.entries(c.kinds).map(([k, n]) => `${n} ${k}`).join(", ");
+        return `${badge(`${c.all} row${c.all === 1 ? "" : "s"}`, "kind")}<div class="muted">${c.nonnote} non-note (gate)</div>${
+          kinds ? `<div class="muted mono">${esc(kinds)}</div>` : ""
+        }`;
+      };
+      const stepRowsHtml = p.steps
+        .map(
+          (s) =>
+            `<tr><td><strong>${esc(s.title)}</strong><div class="muted mono">${esc(s.id)} · ${esc(s.kind)}</div></td>` +
+            `<td>${statusBadge(s.status)}</td>` +
+            `<td>${s.gate ? badge(s.gate, gateOk(s) ? "kind" : "warn") : `<span class="muted">—</span>`}</td>` +
+            `<td>${evCell(s.id)}</td>` +
+            `<td class="muted">${s.updated_at ? `${esc(human(secsAgo(s.updated_at)))} ago` : "—"}</td>` +
+            `<td class="mono muted">${s.depends_on.map(esc).join(", ") || "—"}</td>` +
+            `<td>${esc((s.notes || "").slice(0, 300))}${s.artifacts.length ? `<div class="muted mono">${s.artifacts.map(esc).join("<br>")}</div>` : ""}</td></tr>`,
+        )
+        .join("");
       const ready = b.next_steps.map((s) => `<div class="card" style="margin-bottom:10px">
           <strong>${esc(s.title)}</strong> ${badge(s.kind)} ${s.gate ? badge("gate: " + s.gate, "warn") : ""}
           <pre>${esc(s.instructions)}</pre>
@@ -504,21 +611,23 @@ const ROUTES = {
             <textarea name="notes" rows="2" placeholder="notes / evidence"></textarea>
             <p>${["in_progress", "done", "blocked", "skipped"].map((st) => `<button name="status" value="${st}">${st}</button>`).join(" ")}</p>
             <div class="result"></div></form></div>`).join("");
-      return `<p>${link([state.game, "projects"], "← Projects")}</p><h1>${esc(p.title)}</h1>
+      return `<p>${link([state.game, "projects"], "← Orchestration")}</p><h1>${esc(p.title)}</h1>
         <p>${statusBadge(p.status)}${badge(p.workflow)}${badge(p.game)}${p.addon ? badge("addon: " + p.addon) : ""} <span class="mono muted">${esc(p.id)}</span></p>
+        <p class="muted">This is an <strong>orchestration DAG</strong> — the server's multi-step plan — not a build/test run.
+          For the runs these steps drive on hosts, see ${link(["activity"], "Activity")}.</p>
         <p>${esc(p.goal)}</p><p class="muted">${esc(b.guidance)}</p>
         <p class="muted">Agent hand-off: <code>continue project ${esc(p.id)}</code> (MCP tool <code>next_step</code>)</p>
+        <h2>Step graph</h2>${stepDag(p.steps)}
         <h2>Steps (${esc(b.progress)})</h2>
-        <table><tr><th>Step</th><th>Status</th><th>Depends on</th><th>Notes / artifacts</th></tr>${p.steps.map((s) =>
-          `<tr><td><strong>${esc(s.title)}</strong><div class="muted mono">${esc(s.id)} · ${esc(s.kind)}</div></td><td>${statusBadge(s.status)}</td>
-           <td class="mono muted">${s.depends_on.map(esc).join(", ")}</td>
-           <td>${esc((s.notes || "").slice(0, 300))}${s.artifacts.length ? `<div class="muted mono">${s.artifacts.map(esc).join("<br>")}</div>` : ""}</td></tr>`).join("")}</table>
+        <table><tr><th>Step</th><th>State</th><th>Gate</th><th>Evidence</th><th>Updated</th><th>Depends on</th><th>Notes / artifacts</th></tr>${stepRowsHtml}</table>
         ${ready ? `<h2>Ready now</h2>${ready}` : ""}`;
     }
     const [projects, workflows] = await Promise.all([api("/projects"), api("/workflows")]);
     const wfOptions = workflows.filter((w) => w.games.includes(state.game)).map((w) => [w.id, w.title]);
-    return `<h1>Projects</h1><p class="muted">Orchestrated, multi-step builds. Start one here or from an MCP client
-      (prompt <code>orchestrate</code>), then hand the project id to your agent.</p>
+    return `<h1>Orchestration</h1><p class="muted">Multi-step <strong>orchestration DAGs</strong>: the server holds the plan and the
+      quality gates, your agent does the work. These are plans, not runs — for the build/test/deploy runs they drive, see
+      ${link(["activity"], "Activity")}. Start one here or from an MCP client (prompt <code>orchestrate</code>), then hand
+      the project id to your agent. Click a project to open its step-level view: step states, gates, evidence and notes.</p>
       <form data-start-project class="card">
         <p>${select("workflow", wfOptions[0]?.[0] || "", wfOptions)}</p>
         <p><textarea name="goal" rows="2" placeholder="Goal, e.g. an isometric Diablo-style spectator view of the match"></textarea></p>
@@ -584,34 +693,79 @@ const ROUTES = {
         api("/deploys"),
         api("/test-runs/current").catch(() => null),
       ]);
-      const activeBuilds = builds.filter((b) => b.status === "running" || b.status === "queued");
-      const now = current
-        ? `<div class="card"><strong>TEST</strong> ${stateBadge(current.state)} ${esc(current.name)} — <span class="mono">${esc(
-            current.step || "(no step)",
-          )}</span> <span class="muted">· ${human(current.elapsed_sec)} · host ${esc(current.host_id || "—")}${
-            current.project_id ? ` · ${esc(current.project_id)}` : ""
-          }</span></div>`
-        : `<p class="muted">No active test run.</p>`;
-      const activeList = activeBuilds.length
-        ? activeBuilds
-            .map(
-              (b) =>
-                `<div class="card" style="margin-bottom:8px">${stateBadge(b.status)} <span class="mono">${esc(b.id)}</span> on ${link(
-                  ["hosts", b.host_id],
-                  b.host_id,
-                )} <span class="muted">· ${esc(b.kind)} · ${human(runElapsed(b))}</span><div class="muted mono">${esc(
-                  b.command,
-                )}</div></div>`,
-            )
-            .join("")
-        : `<p class="muted">No active build runs.</p>`;
-      return `<h2>Now</h2>${now}<h3 class="muted">Active builds</h3>${activeList}
-        <h2>Test runs (${tests.length})</h2>${testRows(tests.slice(0, 20))}
-        <h2>Build runs (${builds.length})</h2>${buildRows(builds.slice(0, 20))}
-        <h2>Deployments (${deploys.length})</h2>${deployRows(deploys.slice(0, 20))}`;
+      const isActiveBuild = (b) => b.status === "running" || b.status === "queued";
+      const activeBuilds = builds.filter(isActiveBuild);
+      const activeTest = current && current.state === "running" ? current : null;
+      // Drives the poll cadence: fast while anything is live, slow when the system is idle.
+      state.activityActive = activeBuilds.length > 0 || !!activeTest;
+
+      if (!builds.length && !tests.length && !deploys.length) return activityEmptyState();
+
+      // ---- NOW: everything currently running, freshest first (updated_at = heartbeat-ish for a run).
+      const ts = (r) => (r.updated_at || r.created_at || r.started_at || "");
+      const nowCards = [];
+      if (activeTest)
+        nowCards.push(
+          `<div class="card" style="margin-bottom:8px">${stateBadge(activeTest.state)} <strong>TEST</strong> ${esc(activeTest.name)} —
+           <span class="mono">${esc(activeTest.step || "(no step)")}</span>
+           <span class="muted">· ${human(activeTest.elapsed_sec)} · host ${
+             activeTest.host_id ? link(["hosts", activeTest.host_id], activeTest.host_id) : "—"
+           }${activeTest.project_id ? ` · ${esc(activeTest.project_id)}` : ""}</span></div>`,
+        );
+      activeBuilds
+        .slice()
+        .sort((a, b) => (ts(a) < ts(b) ? 1 : -1))
+        .forEach((b) =>
+          nowCards.push(
+            `<div class="card" style="margin-bottom:8px">${stateBadge(b.status)} <span class="mono">${esc(b.id)}</span> on ${link(
+              ["hosts", b.host_id],
+              b.host_id,
+            )} <span class="muted">· ${esc(b.kind)} · up ${human(runElapsed(b))}</span>${materialWarning(b)}${
+              runPhase(b) ? `<div class="muted mono">${esc(runPhase(b))}</div>` : `<div class="muted mono">${esc(b.command)}</div>`
+            }</div>`,
+          ),
+        );
+      const newest = [builds, tests, deploys]
+        .flat()
+        .map(ts)
+        .filter(Boolean)
+        .sort()
+        .pop();
+      const idleNote = newest ? ` Last activity ${human(secsAgo(newest))} ago.` : "";
+      const now = nowCards.length ? nowCards.join("") : `<p class="muted">Nothing is running right now.${idleNote}</p>`;
+
+      // ---- BY HOST: everything recent, grouped under the host it ran on (unassigned last).
+      const groups = new Map();
+      const bucket = (id) => (groups.has(id) ? groups.get(id) : (groups.set(id, { builds: [], tests: [], deploys: [] }), groups.get(id)));
+      builds.forEach((b) => bucket(b.host_id || "(unassigned)").builds.push(b));
+      tests.forEach((t) => bucket(t.host_id || "(unassigned)").tests.push(t));
+      deploys.forEach((d) => bucket(d.host_id || "(unassigned)").deploys.push(d));
+      const hostBlocks = [...groups.entries()]
+        .map(([hid, g]) => {
+          const active = g.builds.filter(isActiveBuild).length + g.tests.filter((t) => t.state === "running").length;
+          const label = hid === "(unassigned)" ? `<strong>${esc(hid)}</strong>` : link(["hosts", hid], hid);
+          return `<h3>${label} <span class="muted">${active ? `${active} active · ` : ""}${g.builds.length} build${g.builds.length === 1 ? "" : "s"} · ${
+            g.tests.length
+          } test${g.tests.length === 1 ? "" : "s"} · ${g.deploys.length} deploy${g.deploys.length === 1 ? "" : "s"}</span></h3>
+            ${g.builds.length ? buildRows(g.builds.slice(0, 8)) : ""}
+            ${g.tests.length ? `<div class="muted" style="margin:6px 0 2px">test runs</div>${testRows(g.tests.slice(0, 6))}` : ""}
+            ${g.deploys.length ? `<div class="muted" style="margin:6px 0 2px">deployments</div>${deployRows(g.deploys.slice(0, 6))}` : ""}`;
+        })
+        .join("");
+
+      return `<h2>Now${state.activityActive ? ` ${badge("live", "kind")}` : ""}</h2>${now}
+        <h2>By host</h2>${hostBlocks}
+        <h2>Full history</h2>
+        <details><summary class="muted">Build runs (${builds.length})</summary>${buildRows(builds.slice(0, 30))}</details>
+        <details><summary class="muted">Test runs (${tests.length})</summary>${testRows(tests.slice(0, 30))}</details>
+        <details><summary class="muted">Deployments (${deploys.length})</summary>${deployRows(deploys.slice(0, 30))}</details>`;
     };
-    liveBody("#live", body);
-    return `<h1>Activity</h1><p class="muted">Live view of build runs, test runs and deployments across all hosts — what is running right now, without SSHing anywhere. Test-run rows show the same fields as the in-game HUD strip (name / step / state / elapsed). Auto-refreshes every 5 s.</p><div id="live">${await body()}</div>`;
+    // Fast (5 s) while a run is active; slow (15 s) when idle so an idle install isn't hammered.
+    liveBody("#live", body, () => (state.activityActive ? 5000 : 15000));
+    return `<h1>Activity</h1><p class="muted">What is running right now across all hosts — build runs, test runs and deployments, without SSHing anywhere.
+      This view is <strong>service-fed</strong>: rows appear when work goes through the s2docs build/test/deploy services
+      (MCP <code>build_start</code>/<code>test_start</code>/<code>deploy_push</code>, or the CLI), <em>not</em> from any CS2 running anywhere.
+      Test-run rows mirror the in-game HUD strip (name / step / state / elapsed). Auto-refreshes every 5 s while a run is active, 15 s when idle.</p><div id="live">${await body()}</div>`;
   },
 
   async validate() {
@@ -645,6 +799,9 @@ const ROUTES = {
         <div class="grid">${Object.entries(s.counts[g.id] || {}).map(([k, n]) => `<div class="card"><div class="n">${n.toLocaleString()}</div><div class="muted">${esc(k)}</div></div>`).join("")}</div>`).join("")}`;
   },
 };
+
+// `#/<game>/orchestration` is an alias for the projects route (the page was renamed, not the data).
+ROUTES.orchestration = ROUTES.projects;
 
 async function home() {
   const s = await api("/stats");

@@ -3,7 +3,7 @@
 One searchable place for the undocumented surface of Valve's **Source 2** games (Counter-Strike 2, Deadlock).
 Everything is extracted from each game build, then served three ways:
 
-- **Web UI**: a light vanilla-JS SPA for browsing and searching, plus operations pages (**Hosts**, **Activity**) for watching tests on remote hosts without SSHing anywhere.
+- **Web UI**: a light vanilla-JS SPA for browsing and searching, plus operations pages (**Hosts**, **Activity**) for watching tests on remote hosts without SSHing anywhere, and an **Orchestration** page for the server's multi-step plans.
 - **JSON API**: FastAPI, with OpenAPI docs at `/docs`.
 - **MCP server**: tools, prompts and resources so coding agents can write cs_script, Hammer logic, configs and mods using verified names.
 
@@ -53,12 +53,13 @@ Environment variables: `S2DOCS_DATA_DIR` (default `./data`) and `S2DOCS_DB` (def
 
 ## Web UI
 
-`s2docs serve` mounts a small vanilla-JS SPA at `/` (hash routes, no framework, no build step). Besides the browse/search sections (`#/<game>/…`) it has two install-wide operations pages for watching work on remote hosts:
+`s2docs serve` mounts a small vanilla-JS SPA at `/` (hash routes, no framework, no build step). Besides the browse/search sections (`#/<game>/…`) it has install-wide operations pages for watching work on remote hosts, and a page for the server's orchestration plans:
 
 - **Hosts** (`#/hosts`) — the registry plus live lock state: shell, GPU (from the last probe), how long ago it was probed, and the current lock owner with fresh/stale + heartbeat age, its **phase** (what the owner is doing) and a **STUCK** badge. A lock is STUCK when its heartbeat is fresh but its phase has not moved for longer than the server's threshold — liveness is not progress, so a worker that heartbeats faithfully while its compile hangs still shows up. Clicking a host opens `#/hosts/<id>` with its facts JSON, **lock history** (claim / takeover / release / phase-change events) and its recent builds, deployments and test runs. Read-only; auto-refreshes every 5 s while open.
-- **Activity** (`#/activity`) — the page to watch instead of tailing logs: the current test run (the same `name / step / state / elapsed` fields as the in-game TEST STATUS HUD strip), active and recent build runs (status, host, elapsed, summary counts) and recent deployments (host, verified/total). Auto-refreshes every 5 s.
+- **Activity** (`#/activity`) — the page to watch instead of tailing logs: a **Now** section (the running test run — the same `name / step / state / elapsed` fields as the in-game TEST STATUS HUD strip — and active/queued build runs, freshest first), a **By host** section grouping every recent build run, test run and deployment under the host it ran on, and a collapsed full history. Auto-refreshes every 5 s while a run is active, 15 s when idle.
+- **Orchestration** (`#/<game>/projects`) — the multi-step **orchestration DAGs** (distinct from runs): each project opens to a step-level view with a dependency graph, and per step its state, gate, evidence counts, updated time and notes. For the build/test/deploy runs those steps drive, use Activity.
 
-Both pages read the existing JSON API (`/api/hosts`, `/api/hosts/{id}/locks`, `/api/builds`, `/api/deploys`, `/api/test-runs`); nothing there can mutate a host or a run.
+**Activity is service-fed.** A row appears on that page only when work goes through the s2docs build / test / deploy services (`build_start` / `test_start` / `deploy_push` over MCP, or the equivalent `s2docs` CLI) — it is *not* a view of any CS2 that happens to be running anywhere, so an empty page means nothing has been recorded yet, not that the page is broken; the empty state says so and points at the commands to start something. All these pages read the existing JSON API (`/api/hosts`, `/api/hosts/{id}/locks`, `/api/builds`, `/api/deploys`, `/api/test-runs`, `/api/projects`, `/api/projects/{id}`, `/api/evidence`); nothing there can mutate a host or a run.
 
 ## MCP
 
@@ -164,7 +165,7 @@ start_project ─▶ brief (ready steps + tools + rendered prompt) ─▶ agent 
 
 - **Gates** are checked on the server, not taken on trust: `scripts_typecheck` re-runs `tsc` on every `.js` file in the addon, `cfgs_valid` validates every `.cfg`, `addon_exists`, and `evidence` — which requires at least one stored non-note evidence row for the step (via `add_evidence`); notes and artifacts alone no longer pass. `cs2_live_test` adds `host_claimed` (the project really holds the host lease, owner `project:<id>`) and `deploy_verified` (a deployment to the host is recorded as `verified` in the deploy registry). A failed gate returns the exact errors (HTTP 409 / MCP tool error).
 - **Steps form a DAG.** Independent steps (e.g. camera script and test cfg) become ready together, so a client can run them in parallel or hand them to subagents.
-- **Projects persist.** Any session can pick one up with `next_step <id>`, and the web UI's **Projects** page shows progress and can start projects or move steps.
+- **Projects persist.** Any session can pick one up with `next_step <id>`, and the web UI's **Orchestration** page shows the step-level DAG, gates and evidence, and can start projects or move steps.
 - Steps are snapshotted when a project starts, so editing `orchestration/workflows.py` never changes a project in flight.
 
 **Prompts:** `orchestrate`, `cs2_script`, `hammer_io_logic`, `server_config`, `deadlock_mod`, `cs2_map_rebuild`, `explain_symbol`. Each is a Markdown template in `src/s2docs/prompts/templates/`, filled at render time with live data from the database (e.g. the current `Instance` method index). Edit the `.md` files to tune them. The same prompts are available at `GET /api/prompts` and `POST /api/prompts/{name}/render`.

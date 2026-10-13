@@ -101,6 +101,59 @@ def test_api_test_runs_host_filter(client):
     assert client.get("/api/test-runs", params={"host_id": "mini"}).json() == []
 
 
+# ------------------------------------------------- Activity page's data surface
+def test_activity_api_surface(client):
+    """The three feeds the Activity page reads, plus the 'now' test-run probe (404 when idle)."""
+    assert client.get("/api/test-runs/current").status_code == 404  # no active run yet
+    assert client.get("/api/builds", params={"active": "true"}).json() == []
+    for path in ("/api/builds", "/api/test-runs", "/api/deploys"):
+        assert isinstance(client.get(path).json(), list)
+    # a running test session becomes the page's 'Now' card
+    started = client.post("/api/test-runs", json={"name": "iso_tunnel", "host_id": "desktop-pc"}).json()
+    assert client.get("/api/test-runs/current").json()["id"] == started["id"]
+    assert started["state"] == "running"
+
+
+# ------------------------------------------ Orchestration page's step-level surface
+def test_orchestration_step_view_shape(client):
+    """GET /api/projects/{id} carries the per-step fields the step graph/table render, and the
+    evidence rows the view counts per step come from /api/evidence?project_id."""
+    start = client.post("/api/projects", json={"workflow": "cs2_camera_addon", "goal": "iso viewer", "game": "cs2"})
+    pid = start.json()["project_id"]
+    p = client.get(f"/api/projects/{pid}").json()
+    assert p["steps"], "a project always exposes its steps"
+    fields = {"id", "title", "kind", "status", "gate", "updated_at", "depends_on", "artifacts"}
+    assert all(fields <= set(s) for s in p["steps"])
+    # evidence is listed per project and tagged with its step (the view groups it by step_id)
+    step_id = p["steps"][0]["id"]
+    client.post("/api/evidence", json={"project_id": pid, "step_id": step_id, "kind": "console_transcript"})
+    client.post("/api/evidence", json={"project_id": pid, "step_id": step_id, "kind": "note"})
+    evs = client.get("/api/evidence", params={"project_id": pid}).json()
+    assert all(e["project_id"] == pid for e in evs)
+    kinds = [e["kind"] for e in evs if e["step_id"] == step_id]
+    assert kinds.count("console_transcript") == 1 and kinds.count("note") == 1  # gate counts non-note only
+
+
+# ----------------------------------------------- frontend contract (no JS test runner)
+def test_frontend_activity_and_orchestration_markers(client):
+    """Guard the UI wiring a headless test can't execute: the Activity page must explain itself and
+    group by host, poll fast only while active; Projects must be framed as Orchestration with a step DAG."""
+    js = client.get("/app.js").text
+    # Activity: honest empty state + the service-fed framing + host grouping
+    assert "service-fed" in js
+    assert "No activity yet" in js and "build_start" in js and "test_start" in js and "deploy_push" in js
+    assert "By host" in js
+    # adaptive live refresh: 5 s while a run is active, slower (15 s) when idle
+    assert "state.activityActive" in js and "? 5000 : 15000" in js and "setTimeout(tick" in js
+    # Projects reframed as Orchestration with a step-level DAG view
+    assert '["projects", "Orchestration"]' in js
+    assert "Step graph" in js and "function stepDag" in js and "ROUTES.orchestration = ROUTES.projects" in js
+    # lock.stuck badge is rendered when present and tolerated when absent
+    assert "STUCK" in js
+    # the DAG needs its layout rules
+    assert ".dag-node" in client.get("/style.css").text
+
+
 # ------------------------------------------------------------------- MCP surface
 def test_mcp_lock_history_via_list_hosts(wdb):
     """The lock state the Hosts page renders is the same object list_hosts returns over MCP."""
