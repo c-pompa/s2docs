@@ -9,7 +9,8 @@ from fastapi import APIRouter, Body, Depends, HTTPException, Path, Query, Reques
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, Field
 
-from s2docs import hosts
+from s2docs import builds as build_svc
+from s2docs import deploys, hosts
 from s2docs import models as m
 from s2docs.build.validate_cfg import validate_cfg
 from s2docs.build.validate_script import validate_cs_script
@@ -382,6 +383,90 @@ def heartbeat_host(host_id: str, db: Db, owner: Annotated[str, Body(embed=True)]
 @router.delete("/hosts/{host_id}/lock")
 def release_host(host_id: str, db: Db, owner: Annotated[str, Query()], force: Annotated[bool, Query()] = False):
     return {"result": hosts.release_host(db, host_id, owner, force=force)}
+
+
+# ---------------------------------------------------------------- build runs
+class BuildIn(BaseModel):
+    command: str = Field(min_length=1, max_length=10000)
+    kind: str = "build"
+    log_path: str | None = None
+    notes: str | None = None
+
+
+class BuildWaitIn(BaseModel):
+    timeout_sec: int = Field(default=3600, ge=1)
+
+
+@router.post("/hosts/{host_id}/builds", response_model=m.BuildRun, status_code=201)
+def start_build(host_id: str, body: BuildIn, db: Db):
+    return build_svc.start(db, host_id, body.command, kind=body.kind, log_path=body.log_path, notes=body.notes)
+
+
+@router.get("/builds", response_model=list[m.BuildRun])
+def list_builds(db: Db, host_id: str | None = None, active: bool = False):
+    return build_svc.list_runs(db, host_id=host_id, active=active)
+
+
+@router.get("/builds/{run_id}", response_model=m.BuildRun)
+def get_build(run_id: str, db: Db):
+    return build_svc.get_run(db, run_id)
+
+
+@router.get("/builds/{run_id}/log", response_model=m.BuildLogTail)
+def build_log(run_id: str, db: Db, lines: Annotated[int, Query(ge=1, le=5000)] = 200):
+    return build_svc.log_tail(db, run_id, lines=lines)
+
+
+@router.post("/builds/{run_id}/wait", response_model=m.BuildRun)
+def build_wait(run_id: str, body: BuildWaitIn, db: Db):
+    return build_svc.wait(db, run_id, timeout_sec=body.timeout_sec)
+
+
+@router.post("/builds/{run_id}/cancel", response_model=m.BuildRun)
+def build_cancel(run_id: str, db: Db):
+    return build_svc.cancel(db, run_id)
+
+
+# --------------------------------------------------------------- deployments
+class DeployIn(BaseModel):
+    host_id: str
+    dest_root: str = Field(min_length=1)
+    files: list[m.DeployFile]
+    addon: str | None = None
+    parallel: int = Field(default=1, ge=1, le=16)
+    dry_run: bool = False
+    verify: bool = True
+    notes: str | None = None
+
+
+@router.post("/deploys", response_model=m.Deployment, status_code=201)
+def push_deploy(body: DeployIn, db: Db):
+    return deploys.push(
+        db,
+        body.host_id,
+        body.dest_root,
+        body.files,
+        addon=body.addon,
+        parallel=body.parallel,
+        dry_run=body.dry_run,
+        verify=body.verify,
+        notes=body.notes,
+    )
+
+
+@router.get("/deploys", response_model=list[m.Deployment])
+def list_deploys(db: Db, host_id: str | None = None):
+    return deploys.list_deployments(db, host_id=host_id)
+
+
+@router.get("/deploys/{deploy_id}", response_model=m.Deployment)
+def get_deploy(deploy_id: str, db: Db):
+    return deploys.get_deployment(db, deploy_id)
+
+
+@router.post("/deploys/{deploy_id}/verify", response_model=m.Deployment)
+def verify_deploy(deploy_id: str, db: Db):
+    return deploys.verify(db, deploy_id)
 
 
 # ------------------------------------------------------------- prompts

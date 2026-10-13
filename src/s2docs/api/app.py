@@ -13,6 +13,7 @@ from fastapi.staticfiles import StaticFiles
 
 from s2docs.api.routes import router
 from s2docs.build.validate_script import ToolchainMissing
+from s2docs.builds import BuildTimeout
 from s2docs.config import get_settings
 from s2docs.db.connection import Database, DatabaseNotInitialized
 from s2docs.db.repository import NotFound
@@ -70,6 +71,10 @@ def create_app(db_path: Path | None = None, *, mount_mcp: bool = True, workspace
     @app.exception_handler(HostLocked)
     async def _host_locked(_: Request, exc: HostLocked) -> JSONResponse:
         return JSONResponse({"detail": str(exc), "host_locked": True}, status_code=409)
+
+    @app.exception_handler(BuildTimeout)
+    async def _build_timeout(_: Request, exc: BuildTimeout) -> JSONResponse:
+        return JSONResponse({"detail": str(exc), "timeout": True}, status_code=408)
 
     @app.exception_handler(PromptError)
     @app.exception_handler(ValueError)

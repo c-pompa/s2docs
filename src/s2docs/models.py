@@ -389,3 +389,69 @@ class Host(BaseModel):
     probed_at: str | None = None
     notes: str | None = None
     lock: HostLock | None = None
+
+
+# -------------------------------------------------------------------- builds
+BuildStatus = Literal["queued", "running", "succeeded", "failed", "cancelled"]
+TERMINAL_BUILD_STATUSES: tuple[str, ...] = ("succeeded", "failed", "cancelled")
+
+
+class BuildArtifact(BaseModel):
+    path: str
+    md5: str | None = None
+    size: int | None = None
+
+
+class BuildRun(BaseModel):
+    id: str
+    host_id: str
+    kind: str = "build"
+    command: str
+    status: BuildStatus
+    owner: str = Field(description="Host-lock owner holding this run's lease, 'build:<id>'")
+    handle: str | None = Field(default=None, description="Process handle (pid) when known")
+    notes: str | None = None
+    log_path: str | None = None
+    exit_code: int | None = None
+    summary: dict = Field(default_factory=dict, description="Parsed counts from the log summary line")
+    artifacts: list[BuildArtifact] = []
+    created_at: str
+    updated_at: str
+
+
+class BuildLogTail(BaseModel):
+    run_id: str
+    lines: list[str]
+    encoding: str = Field(description="Log text encoding detected on read (utf-16 or utf-8)")
+    size: int = Field(description="Log file size in bytes")
+    truncated: bool = Field(default=False, description="True when only the tail was returned")
+
+
+# --------------------------------------------------------------- deployments
+DeployStatus = Literal["pushed", "verified", "failed"]
+
+
+class DeployFile(BaseModel):
+    path: str = Field(description="Destination path relative to the deployment root")
+    local: str | None = Field(default=None, description="Local source file (hashed/sized on push)")
+    md5: str | None = Field(default=None, description="Expected MD5 when no local file is available")
+    size: int | None = None
+
+
+class DeployEntry(BaseModel):
+    path: str = Field(description="Path relative to the deployment root")
+    size: int | None = None
+    md5: str | None = Field(default=None, description="MD5 recorded at push time")
+    verified: bool = Field(default=False, description="Last verify matched the recorded MD5")
+
+
+class Deployment(BaseModel):
+    id: str
+    host_id: str
+    addon: str | None = None
+    dest_root: str
+    entries: list[DeployEntry] = []
+    status: DeployStatus
+    notes: str | None = None
+    created_at: str
+    updated_at: str

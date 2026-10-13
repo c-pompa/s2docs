@@ -5,11 +5,49 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import re
 import sys
+import time
 from pathlib import Path
 
 from s2docs.config import GAMES, get_game, get_settings
 from s2docs.db.connection import Database
+
+# Stable exit-code contract (docs/CLI_PLAN.md §2). 2 = locked matches the Phase 1 host commands.
+EXIT_OK = 0
+EXIT_ERROR = 1
+EXIT_LOCKED = 2
+EXIT_NOT_FOUND = 3
+EXIT_CONFLICT = 4
+EXIT_TOOLCHAIN = 5
+EXIT_PARTIAL = 6
+EXIT_TIMEOUT = 7
+
+_DURATION_RE = re.compile(r"^(\d+)([smhd]?)$")
+_DURATION_UNITS = {"": 1, "s": 1, "m": 60, "h": 3600, "d": 86400}
+
+
+def _parse_duration(value: str) -> int:
+    """Parse '1h', '90m', '300s' or a bare number of seconds into seconds."""
+    match = _DURATION_RE.match(str(value).strip().lower())
+    if not match:
+        raise argparse.ArgumentTypeError(f"invalid duration {value!r}; use e.g. 1h, 90m, 300s")
+    return int(match.group(1)) * _DURATION_UNITS[match.group(2)]
+
+
+def _fail(message: str, code: int) -> int:
+    print(f"error: {message}", file=sys.stderr)
+    return code
+
+
+def _emit(args: argparse.Namespace, payload: dict, human: list[str]) -> int:
+    """--json → one object on stdout (schema s2docs/v1); otherwise the human lines. Logs go to stderr."""
+    if getattr(args, "json", False):
+        print(json.dumps({"schema": "s2docs/v1", **payload}))
+    else:
+        for line in human:
+            print(line)
+    return EXIT_OK
 
 
 def _cmd_sync(args: argparse.Namespace) -> int:
@@ -187,9 +225,180 @@ def _cmd_host(args: argparse.Namespace) -> int:
     return 0
 
 
+def _human_run(run) -> list[str]:
+    line = f"{run.id}  {run.host_id}  {run.status}  {run.kind}  exit={run.exit_code}"
+    out = [line]
+    if run.summary:
+        out.append("  summary: " + ", ".join(f"{k}={v}" for k, v in run.summary.items()))
+    if run.handle:
+        out.append(f"  handle: {run.handle}")
+    if run.log_path:
+        out.append(f"  log: {run.log_path}")
+    if run.notes:
+        out.append(f"  notes: {run.notes}")
+    return out
+
+
+def _cmd_build(args: argparse.Namespace) -> int:
+    from s2docs import builds, hosts
+    from s2docs.db.repository import NotFound
+
+    db = Database(get_settings().db_path)
+    try:
+        if args.build_cmd == "start":
+            note_parts = [f"target={args.target}"]
+            if args.map:
+                note_parts.append(f"map={args.map}")
+            run = builds.start(
+                db,
+                args.host,
+                args.command,
+                kind=args.kind,
+                log_path=args.log,
+                timeout_sec=args.timeout,
+                notes=" ".join(note_parts),
+            )
+            if args.wait:
+                run = builds.wait(db, run.id, timeout_sec=args.timeout)
+            return _emit(args, {"run": run.model_dump()}, _human_run(run))
+        if args.build_cmd == "status":
+            run = builds.get_run(db, args.run_id)
+            return _emit(args, {"run": run.model_dump()}, _human_run(run))
+        if args.build_cmd == "log":
+            if args.follow:
+                return _follow_log(db, args.run_id)
+            tail = builds.log_tail(db, args.run_id, lines=args.lines)
+            if args.json:
+                print(json.dumps({"schema": "s2docs/v1", "log": tail.model_dump()}))
+                return EXIT_OK
+            for line in tail.lines:
+                print(line)
+            print(f"# encoding={tail.encoding} size={tail.size} truncated={tail.truncated}", file=sys.stderr)
+            return EXIT_OK
+        if args.build_cmd == "wait":
+            run = builds.wait(db, args.run_id, timeout_sec=args.timeout)
+            return _emit(args, {"run": run.model_dump()}, _human_run(run))
+        if args.build_cmd == "cancel":
+            run = builds.cancel(db, args.run_id)
+            return _emit(args, {"run": run.model_dump()}, _human_run(run))
+        if args.build_cmd == "list":
+            runs = builds.list_runs(db, host_id=args.host, active=args.active)
+            human = [f"{r.id}  {r.host_id}  {r.status:9}  {r.kind}  {r.summary}" for r in runs] or ["no runs"]
+            return _emit(args, {"runs": [r.model_dump() for r in runs]}, human)
+    except hosts.HostLocked as exc:
+        return _fail(f"LOCKED: {exc}", EXIT_LOCKED)
+    except NotFound as exc:
+        return _fail(str(exc), EXIT_NOT_FOUND)
+    except builds.BuildTimeout as exc:
+        return _fail(str(exc), EXIT_TIMEOUT)
+    except (builds.BuildError, hosts.HostError) as exc:
+        return _fail(str(exc), EXIT_ERROR)
+    return _fail(f"unknown build command {args.build_cmd!r}", EXIT_ERROR)
+
+
+def _follow_log(db, run_id: str) -> int:
+    """Stream new log lines until the run reaches a terminal status."""
+    from s2docs import builds
+
+    seen = 0
+    while True:
+        run = builds.get_run(db, run_id)
+        tail = builds.log_tail(db, run_id, lines=1_000_000)
+        for line in tail.lines[seen:]:
+            print(line, flush=True)
+        seen = len(tail.lines)
+        if run.status in ("succeeded", "failed", "cancelled"):
+            return EXIT_OK if run.status == "succeeded" else EXIT_ERROR
+        time.sleep(1.0)
+
+
+def _manifest_files(path: str) -> list:
+    from s2docs import models as m
+
+    data = json.loads(Path(path).read_text(encoding="utf-8"))
+    base = Path(path).parent
+    raw = data.get("files", data.get("entries", []))
+    files = []
+    for item in raw:
+        spec = m.DeployFile(**item)
+        if spec.local and not Path(spec.local).is_absolute():
+            spec.local = str((base / spec.local).resolve())
+        files.append(spec)
+    return files
+
+
+def _addon_manifest(args: argparse.Namespace) -> list:
+    from s2docs import models as m
+    from s2docs.build.workspace import describe
+
+    addon = describe(get_settings().workspace_dir, args.game, args.addon)
+    root = Path(addon.root)
+    return [m.DeployFile(path=f.path, local=str(root / f.path)) for f in addon.files]
+
+
+def _human_deploy(deploy) -> list[str]:
+    out = [f"{deploy.id}  {deploy.host_id}  {deploy.status}  {len(deploy.entries)} file(s)"]
+    for entry in deploy.entries:
+        out.append(f"  {'ok ' if entry.verified else '   '}{entry.path}  {entry.md5 or ''}")
+    if deploy.notes:
+        out.append(f"  notes: {deploy.notes}")
+    return out
+
+
+def _cmd_deploy(args: argparse.Namespace) -> int:
+    from s2docs import deploys, hosts
+    from s2docs.db.repository import NotFound
+
+    db = Database(get_settings().db_path)
+    try:
+        if args.deploy_cmd == "push":
+            if bool(args.addon) == bool(args.manifest):
+                return _fail("pass exactly one of <addon> or --manifest", EXIT_ERROR)
+            if not args.dest:
+                return _fail("--dest (remote root) is required", EXIT_ERROR)
+            files = _manifest_files(args.manifest) if args.manifest else _addon_manifest(args)
+            deploy = deploys.push(
+                db,
+                args.host,
+                args.dest,
+                files,
+                addon=args.addon,
+                parallel=args.parallel,
+                dry_run=args.dry_run,
+                verify=not args.no_verify,
+            )
+            _emit(args, {"deployment": deploy.model_dump()}, _human_deploy(deploy))
+            return EXIT_PARTIAL if deploy.status == "failed" else EXIT_OK
+        if args.deploy_cmd == "verify":
+            if args.deploy_id:
+                deploy = deploys.verify(db, args.deploy_id)
+            elif args.host:
+                deploy = deploys.verify(db, deploys.latest_for_host(db, args.host).id)
+            else:
+                return _fail("pass a <deploy-id> or --host", EXIT_ERROR)
+            _emit(args, {"deployment": deploy.model_dump()}, _human_deploy(deploy))
+            return EXIT_PARTIAL if deploy.status == "failed" else EXIT_OK
+        if args.deploy_cmd == "list":
+            deploys_list = deploys.list_deployments(db, host_id=args.host)
+            human = [f"{d.id}  {d.host_id}  {d.status:8}  {len(d.entries)} file(s)" for d in deploys_list]
+            return _emit(args, {"deployments": [d.model_dump() for d in deploys_list]}, human or ["no deployments"])
+    except NotFound as exc:
+        return _fail(str(exc), EXIT_NOT_FOUND)
+    except hosts.HostError as exc:
+        return _fail(str(exc), EXIT_ERROR)
+    except deploys.DeployError as exc:
+        return _fail(str(exc), EXIT_PARTIAL)
+    return _fail(f"unknown deploy command {args.deploy_cmd!r}", EXIT_ERROR)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="s2docs", description="Source 2 docs index, API and MCP server")
     parser.add_argument("-v", "--verbose", action="store_true")
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Machine-readable output: one JSON object on stdout (schema s2docs/v1); logs stay on stderr",
+    )
     sub = parser.add_subparsers(dest="command", required=True)
 
     p = sub.add_parser("sync", help="Fetch GameTracking data and load it into SQLite")
@@ -264,6 +473,51 @@ def main(argv: list[str] | None = None) -> int:
         if name != "heartbeat":
             q.add_argument("--force", action="store_true")
     p.set_defaults(fn=_cmd_host)
+
+    p = sub.add_parser("build", help="Server-owned build runs on a host (JSON output, --json contract)")
+    bc = p.add_subparsers(dest="build_cmd", required=True)
+    q = bc.add_parser("start", help="Start a run: acquires the host lease and runs the command over SSH")
+    q.add_argument("target", help="Addon/target label recorded on the run")
+    q.add_argument("--host", required=True, help="Host id (see `host list`)")
+    q.add_argument("--command", required=True, help="Shell command to run on the host over SSH")
+    q.add_argument("--kind", default="build", help="Free label, e.g. 'resourcecompiler'")
+    q.add_argument("--log", help="Server-local path for the captured log")
+    q.add_argument("--map", help="Map name (recorded in the run notes)")
+    q.add_argument("--wait", action="store_true", help="Block until the run finishes")
+    q.add_argument("--timeout", type=_parse_duration, default=3600, help="Run/lease timeout, e.g. 1h (default)")
+    q = bc.add_parser("status", help="Show one run's record")
+    q.add_argument("run_id")
+    q = bc.add_parser("log", help="Tail a run's log (decodes UTF-16)")
+    q.add_argument("run_id")
+    q.add_argument("--lines", type=int, default=200)
+    q.add_argument("--follow", action="store_true", help="Stream new lines until the run finishes")
+    q = bc.add_parser("wait", help="Block until a run finishes (server-side; no sleep loop)")
+    q.add_argument("run_id")
+    q.add_argument("--timeout", type=_parse_duration, default=3600)
+    q = bc.add_parser("cancel", help="Cancel a run and release its host lease")
+    q.add_argument("run_id")
+    q = bc.add_parser("list", help="List runs (newest first)")
+    q.add_argument("--host")
+    q.add_argument("--active", action="store_true", help="Only queued/running runs")
+    p.set_defaults(fn=_cmd_build)
+
+    p = sub.add_parser("deploy", help="Deployment registry: push to a host and verify MD5s")
+    dc = p.add_subparsers(dest="deploy_cmd", required=True)
+    q = dc.add_parser("push", help="Copy files to a host per a manifest, then verify MD5s server-side")
+    q.add_argument("addon", nargs="?", help="Addon in the local workspace (or use --manifest)")
+    q.add_argument("--host", required=True)
+    q.add_argument("--manifest", help="Manifest JSON {dest_root, files:[{path, local}]}")
+    q.add_argument("--dest", help="Remote destination root")
+    q.add_argument("--game", default="cs2", choices=list(GAMES))
+    q.add_argument("--parallel", type=int, default=1, help="Concurrent transfers")
+    q.add_argument("--dry-run", action="store_true", help="Resolve entries without copying")
+    q.add_argument("--no-verify", action="store_true", help="Skip the post-copy MD5 check")
+    q = dc.add_parser("verify", help="Re-check a deployment's MD5s on the host")
+    q.add_argument("deploy_id", nargs="?", help="Deploy id (or use --host for the latest)")
+    q.add_argument("--host")
+    q = dc.add_parser("list", help="List deployments (newest first)")
+    q.add_argument("--host")
+    p.set_defaults(fn=_cmd_deploy)
 
     args = parser.parse_args(argv)
     # stdout is the MCP stdio channel: logs must go to stderr.

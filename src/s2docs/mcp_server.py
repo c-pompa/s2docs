@@ -16,7 +16,7 @@ from mcp.server.mcpserver.prompts.base import Prompt, PromptArgument
 from mcp_types import ToolAnnotations
 from pydantic import Field
 
-from s2docs import hosts
+from s2docs import builds, deploys, hosts
 from s2docs import models as m
 from s2docs.build import workspace as ws
 from s2docs.build.validate_cfg import validate_cfg as _validate_cfg
@@ -502,6 +502,103 @@ def create_mcp_server(db: Database, workspace: Path | None = None) -> MCPServer:
     ) -> str:
         """Release a host lock. Always call this when finished with a host."""
         return _hosts(lambda: hosts.release_host(db, host_id, owner, force=force))
+
+    # --------------------------------------------------------------- builds
+    def _runs(fn: Callable[[], T]) -> T:
+        try:
+            return fn()
+        except (builds.BuildError, deploys.DeployError, hosts.HostError, NotFound) as exc:
+            raise ToolError(str(exc)) from exc
+
+    @server.tool(annotations=HOSTS_WRITE)
+    def build_start(
+        host_id: HostId,
+        command: Annotated[
+            str, Field(description="Shell command to run on the host over SSH (detaching/hiding is its job)")
+        ],
+        kind: Annotated[str, Field(description="Label for the run, e.g. 'build', 'resourcecompiler'")] = "build",
+        log_path: Annotated[str | None, Field(description="Server-local path for the captured log")] = None,
+        notes: str | None = None,
+    ) -> m.BuildRun:
+        """Start a server-owned build run on a host: acquires the host lease, runs the command over SSH and
+        returns a run id immediately. Do NOT poll with sleeps — use build_wait(run_id) or build_status. The
+        host lease is released automatically when the run reaches a terminal status."""
+        return _runs(lambda: builds.start(db, host_id, command, kind=kind, log_path=log_path, notes=notes))
+
+    @server.tool(annotations=READ_ONLY)
+    def build_status(run_id: Annotated[str, Field(description="Run id from build_start, e.g. 'b-1a2b3c4d'")]):
+        """One build run's record: status, exit code, parsed summary counts and artifact list."""
+        return _runs(lambda: builds.get_run(db, run_id))
+
+    @server.tool(annotations=READ_ONLY)
+    def build_log(
+        run_id: str,
+        lines: Annotated[int, Field(ge=1, le=5000, description="Tail size in lines")] = 200,
+    ) -> m.BuildLogTail:
+        """Tail a build run's log. The log is UTF-16 (resourcecompiler) — this decodes it for you,
+        returning the detected `encoding` and whether the tail was truncated."""
+        return _runs(lambda: builds.log_tail(db, run_id, lines=lines))
+
+    @server.tool(annotations=READ_ONLY)
+    def build_wait(
+        run_id: str,
+        timeout_sec: Annotated[int, Field(ge=1, description="Give up after this many seconds (exit 7)")] = 3600,
+    ) -> m.BuildRun:
+        """Block (server-side, no client sleep loop) until the run finishes, then return its record.
+        Raises if it is still running after timeout_sec."""
+        return _runs(lambda: builds.wait(db, run_id, timeout_sec=timeout_sec))
+
+    @server.tool(annotations=HOSTS_WRITE)
+    def build_cancel(run_id: str) -> m.BuildRun:
+        """Cancel a run: mark it cancelled and release its host lease (terminates the process when this
+        server owns it)."""
+        return _runs(lambda: builds.cancel(db, run_id))
+
+    @server.tool(annotations=READ_ONLY)
+    def build_list(
+        host_id: Annotated[str | None, Field(description="Restrict to one host")] = None,
+        active: Annotated[bool, Field(description="Only queued/running runs")] = False,
+    ) -> list[m.BuildRun]:
+        """Recent build runs (newest first), optionally one host and/or active only."""
+        return _runs(lambda: builds.list_runs(db, host_id=host_id, active=active))
+
+    # -------------------------------------------------------------- deploys
+    @server.tool(annotations=HOSTS_WRITE)
+    def deploy_push(
+        host_id: HostId,
+        dest_root: Annotated[str, Field(description="Remote destination root, e.g. 'C:/iso_build/addons'")],
+        files: Annotated[list[m.DeployFile], Field(description="Manifest: {path, local} entries to copy")],
+        addon: str | None = None,
+        parallel: Annotated[int, Field(ge=1, le=16)] = 1,
+        dry_run: bool = False,
+        verify: Annotated[bool, Field(description="Re-check MD5s on the host after copying")] = True,
+    ) -> m.Deployment:
+        """Copy files to a host and verify what landed (Get-FileHash over SSH). Returns a deploy id whose
+        entries carry the server-checked md5 + verified flags. Call deploy_verify later to re-check."""
+        return _runs(
+            lambda: deploys.push(
+                db,
+                host_id,
+                dest_root,
+                files,
+                addon=addon,
+                parallel=parallel,
+                dry_run=dry_run,
+                verify=verify,
+            )
+        )
+
+    @server.tool(annotations=HOSTS_WRITE)
+    def deploy_verify(deploy_id: Annotated[str, Field(description="Deploy id from deploy_push")]) -> m.Deployment:
+        """Re-check a recorded deployment's MD5s on the host and update its status."""
+        return _runs(lambda: deploys.verify(db, deploy_id))
+
+    @server.tool(annotations=READ_ONLY)
+    def deploy_list(
+        host_id: Annotated[str | None, Field(description="Restrict to one host")] = None,
+    ) -> list[m.Deployment]:
+        """Recent deployments (newest first), optionally one host."""
+        return _runs(lambda: deploys.list_deployments(db, host_id=host_id))
 
     # -------------------------------------------------------------- resources
     @server.resource(

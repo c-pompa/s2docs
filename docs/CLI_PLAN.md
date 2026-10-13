@@ -1,8 +1,27 @@
 # s2docs CLI & agent-interaction plan
 
-Status: design. Scope: the `s2docs` command surface and how agents, scripts and CI should
-reach s2docs. No implementation here; the host-registry, build, deploy, evidence and test-run
-services are being designed in parallel — this plan defines the CLI shapes they must expose.
+Status: Phase 1 (host registry + locks), Phase 2 (native MCP registration) and **Phase 3 (build
+runs + deploy registry) implemented**; Phases 4 (evidence) and 5 (test-run) are design. Scope: the
+`s2docs` command surface and how agents, scripts and CI should reach s2docs. This plan defines the
+CLI/MCP/HTTP shapes the services must expose.
+
+### Phase 3 implementation notes (where this plan was ambiguous)
+- **`build start` needs a command.** The plan lists `build start <addon> [--map M]`, but a plain
+  "start a build" cannot invent a resourcecompiler invocation. Shipped as `build start <target>
+  --host <id> --command "<shell command>"`; `<target>` is recorded on the run (notes) for humans,
+  the command is what runs. "Hidden-launch" stays a host concern — the service issues one documented
+  `ssh <host> <command>` and captures its output to a server-local log.
+- **The run is server-owned.** `build start` acquires the host lease (`build:<run-id>`) *server-side*
+  and owns the process where it runs (the long-lived `s2docs serve`, or a CLI kept alive by
+  `--wait`). `status/log/wait/cancel/list` only touch the record, so any process can re-attach; a
+  `cancel` from another process flips the record and the owner's watcher acts on it.
+- **`deploy` transport.** §7 left the mechanism open; shipped as `scp` per file + one
+  `Get-FileHash -Algorithm MD5` PowerShell pass over SSH for verification. A `deploy push` is only
+  `verified` when the server re-reads matching MD5s.
+- **`host add|rm` → `host register`.** Shipped as `register` (upsert) in Phase 1; the CLI, MCP and
+  HTTP surfaces all use `register`, not `add`/`rm`.
+- **Exit codes.** 2 = locked (matching Phase 1) rather than the table's "usage error"; 7 =
+  timeout/cancelled; 6 = partial (a batch with some failures, detail in `--json`).
 
 ## 0. Principle: one service layer, three thin facades
 
@@ -227,9 +246,10 @@ Matches the parallel service work; each phase ships service → MCP tool → CLI
    `host probe` backend. Server-side lease with ttl + auto-expiry. Exit 4 on contention.
 2. **Native MCP registration.** Register s2docs (`stdio: s2docs mcp` and `http: /mcp`) as a Hermes
    MCP server; verify subagents inherit the toolset. Harden + deprecate the HTTP client (§5).
-3. **Build + deploy tools.** `BuildRunner` / `DeployService` writing run records; `build
-   start|status|log|wait|cancel|list`; `deploy push|verify|list` incl. `--manifest`/`--parallel`;
-   both acquire the host lock. Retire `sleep`-poll babysitting.
+3. **Build + deploy tools.** *(implemented)* `builds.py` / `deploys.py` writing run records
+   (migration `0005`); `build start|status|log|wait|cancel|list`; `deploy push|verify|list` incl.
+   `--manifest`/`--parallel`; build runs acquire the host lease server-side, deploys verify MD5s
+   server-side. Retired `sleep`-poll babysitting.
 4. **Evidence records.** `Evidence` model + store; `evidence add|list|show`; rewire the `evidence`
    gate to read structured records (linked to project/step/run, with artifact hashes) instead of
    transcription notes.

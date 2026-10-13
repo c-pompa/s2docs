@@ -80,6 +80,20 @@ def _load(conn: sqlite3.Connection, host_id: str) -> m.Host:
     return _row_to_host(row, lock)
 
 
+def ssh_argv(host: m.Host) -> list[str]:
+    """Base ssh argv for a host (connection timeout + identity file when set).
+
+    Start with this and append the remote command; the build and deploy services use it so a
+    single place owns the ssh flags. The remote command is passed as one argv element — ssh
+    joins the remaining arguments and hands them to the remote shell.
+    """
+    argv = ["ssh", "-o", "ConnectTimeout=15"]
+    if host.ssh_key:
+        argv += ["-i", host.ssh_key, "-o", "IdentitiesOnly=yes"]
+    argv.append(host.ssh_target)
+    return argv
+
+
 def list_hosts(db: Database) -> list[m.Host]:
     with db.writer() as conn:
         rows = conn.execute("SELECT * FROM hosts ORDER BY id").fetchall()

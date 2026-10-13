@@ -105,6 +105,22 @@ claude mcp add --transport http s2docs http://127.0.0.1:8000/mcp
 
 The same operations exist on the CLI (`s2docs host list|show|register|probe|lock|heartbeat|unlock`, JSON out, exit 2 = locked) and the HTTP API (`/api/hosts`, `/api/hosts/{id}/lock`, …; 409 = locked).
 
+| Build tools | |
+|---|---|
+| `build_start` | Start a **server-owned** run on a host: acquires the host lease (`build:<run-id>`), runs the caller's command over SSH, returns a run id immediately. No client sleep-polling — use `build_wait`/`build_status` |
+| `build_status`, `build_list` | A run's record (status, exit code, parsed summary counts, artifacts) and recent runs |
+| `build_log` | Tail the run's log — the log is UTF-16 (resourcecompiler), so this decodes it and reports the detected `encoding` |
+| `build_wait` | Block server-side until the run finishes (bounded), or fail on timeout |
+| `build_cancel` | Mark the run cancelled and release its host lease |
+
+| Deploy tools | |
+|---|---|
+| `deploy_push` | Copy files to a host per a manifest (`{path, local}`), then verify what landed by re-reading MD5s over SSH (`Get-FileHash`). Returns a deploy id with per-file `md5`/`verified` |
+| `deploy_verify` | Re-check a recorded deployment's MD5s and update its status |
+| `deploy_list` | Recent deployments, optionally per host |
+
+CLI: `s2docs build start|status|log|wait|cancel|list` and `s2docs deploy push|verify|list` (global `--json` → one `{"schema": "s2docs/v1", …}` object on stdout, logs to stderr; exit codes 0 ok, 1 error, 2 locked, 3 not found, 6 partial, 7 timeout/cancelled). HTTP: `/api/hosts/{id}/builds`, `/api/builds/…`, `/api/deploys`.
+
 | Orchestration tools | |
 |---|---|
 | `list_workflows` | Multi-step recipes: `cs2_script_feature`, `cs2_camera_addon`, `cs2_game_template`, `server_config`, or `custom` |
@@ -150,6 +166,9 @@ src/s2docs/
   api/                    FastAPI app + routes (MCP mounted at /mcp, SPA at /)
   build/                  validate_script (tsc), validate_cfg, workspace (addon files)
   orchestration/          workflows.py (registry) + engine.py (projects, DAG, gates)
+  hosts.py                host registry + server-side leases (claim/heartbeat/release, TTL expiry)
+  builds.py               server-owned build runs (SSH launch, UTF-16 log tail, host lease)
+  deploys.py              deployment registry (scp push + Get-FileHash MD5 verification)
   mcp_server.py           MCP tools/prompts/resources (mcp SDK 2.x MCPServer)
   web/                    index.html, app.js, style.css (no build step)
 ```
@@ -164,7 +183,7 @@ src/s2docs/
 ## Development
 
 ```bash
-uv run pytest -q                     # 60 tests: parsers, repository, API, MCP, build tools, orchestration
+uv run pytest -q                     # 86 tests: parsers, repository, API, MCP, build tools, orchestration, hosts, builds/deploys
 uv run ruff check src tests && uv run ruff format src tests
 uv run python scripts/check_frontend.py   # renders every SPA route in headless Chrome (server on :8765; extra routes as args)
 ```
