@@ -13,6 +13,12 @@ from pathlib import Path
 # long compile run before it is flagged).
 DEFAULT_STUCK_SEC = 1800
 
+# Built-in per-phase thresholds (code default, not env-only: an env override is lost on every server
+# restart). 'compile:lighting' bakes silently for most of a ~38 min compile, so the global 1800 s would
+# read a healthy bake as STUCK; 7200 s matches the driver's own hang threshold in tools/build/compile_map.py
+# (3 x 2400 s). S2DOCS_STUCK_PHASES merges over these per key — it does not replace the dict.
+DEFAULT_STUCK_PHASES: dict[str, int] = {"compile:lighting": 7200}
+
 
 @dataclass(frozen=True, slots=True)
 class Game:
@@ -82,24 +88,24 @@ class Settings:
     sources_dir: Path
     workspace_dir: Path  # local addon sources (scaffolded/written by the build tools)
     stuck_sec: int = DEFAULT_STUCK_SEC  # phase age (s) after which a fresh lock reads STUCK
-    stuck_phases: dict[str, int] = field(default_factory=dict)  # per-phase threshold overrides
+    stuck_phases: dict[str, int] = field(default_factory=dict)  # per-phase overrides, merged over DEFAULT_STUCK_PHASES
 
 
 def _stuck_phases() -> dict[str, int]:
-    """Parse S2DOCS_STUCK_PHASES (a JSON object of phase -> seconds); ignore anything malformed.
+    """Per-phase stuck thresholds: the built-in defaults merged with S2DOCS_STUCK_PHASES (env wins per key).
 
     Fail-soft on purpose: a bad env value must never take down the read paths that compute stuck-ness.
     """
     raw = (os.environ.get("S2DOCS_STUCK_PHASES") or "").strip()
     if not raw:
-        return {}
+        return dict(DEFAULT_STUCK_PHASES)
     try:
         data = json.loads(raw)
     except json.JSONDecodeError:
-        return {}
+        return dict(DEFAULT_STUCK_PHASES)
     if not isinstance(data, dict):
-        return {}
-    out: dict[str, int] = {}
+        return dict(DEFAULT_STUCK_PHASES)
+    out: dict[str, int] = dict(DEFAULT_STUCK_PHASES)
     for key, value in data.items():
         try:
             out[str(key)] = int(value)
