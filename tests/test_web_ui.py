@@ -4,6 +4,11 @@ pages read. No real host/network: locks are DB-only and the ssh layer is never t
 
 from __future__ import annotations
 
+import json
+import shutil
+import subprocess
+from datetime import datetime
+
 import anyio
 import pytest
 from fastapi.testclient import TestClient
@@ -168,3 +173,179 @@ def test_mcp_lock_history_via_list_hosts(wdb):
     listed = anyio.run(main)
     host = next(h for h in listed.structured_content["result"] if h["id"] == "desktop-pc")
     assert host["lock"]["owner"] == "project:p-1a2b3c4d" and host["lock"]["fresh"]
+
+
+# ------------------------------------------------------- run time (elapsed) display
+# The user ask: every row on Activity / Orchestration / Hosts must answer "how long has this been
+# going / how long did it take". The one humanizer lives in app.js; these tests pin the timestamps
+# each row needs (with known values, so the duration is exact) and then execute that humanizer.
+def _secs(iso: str) -> int:
+    """Epoch seconds of an API timestamp ('...Z'), for exact duration arithmetic in a test."""
+    return int(datetime.fromisoformat(iso.replace("Z", "+00:00")).timestamp())
+
+
+@pytest.fixture
+def timed_rows(wdb, client):
+    """Known-timestamp rows across the services the pages render: a running and a finished build, a
+    verified deploy plus a dry-run one (no timestamps), and a running and a finished test session."""
+    with wdb.writer() as conn, conn:
+        conn.execute(
+            "INSERT INTO build_runs (id, host_id, kind, command, status, owner, created_at, updated_at) "
+            "VALUES ('b-live', 'desktop-pc', 'compile', 'x', 'running', 'build:b-live', "
+            "'2026-10-13T10:00:00Z', '2026-10-13T10:00:00Z')"
+        )
+        conn.execute(
+            "INSERT INTO build_runs (id, host_id, kind, command, status, owner, created_at, updated_at) "
+            "VALUES ('b-done', 'desktop-pc', 'compile', 'x', 'succeeded', 'build:b-done', "
+            "'2026-10-13T10:00:00Z', '2026-10-13T10:02:05Z')"
+        )
+        conn.execute(
+            "INSERT INTO deployments (id, host_id, dest_root, entries, status, created_at, updated_at) "
+            "VALUES ('d-1a2b3c4d', 'desktop-pc', 'C:/dst', '[]', 'verified', "
+            "'2026-10-13T10:00:00Z', '2026-10-13T10:00:30Z')"
+        )
+        conn.execute(
+            "INSERT INTO deployments (id, host_id, dest_root, entries, status, notes, created_at, updated_at) "
+            "VALUES ('d-dry', 'desktop-pc', 'C:/dst', '[]', 'pushed', 'dry-run: nothing copied', "
+            "'dry-run', 'dry-run')"
+        )
+    live_test = test_runs.start(wdb, "iso_live")  # no host: no lock to claim
+    done_test = test_runs.start(wdb, "iso_tunnel", host_id="desktop-pc")
+    test_runs.finish(wdb, done_test.id, "pass")
+    with wdb.writer() as conn, conn:
+        conn.execute(
+            "UPDATE test_runs SET started_at = ?, finished_at = ? WHERE id = ?",
+            ("2026-10-13T10:00:00Z", "2026-10-13T10:02:05Z", done_test.id),
+        )
+        conn.execute(
+            "UPDATE test_runs SET started_at = ?, updated_at = ? WHERE id = ?",
+            ("2026-10-13T10:00:00Z", "2026-10-13T10:00:00Z", live_test.id),
+        )
+    builds = {r["id"]: r for r in client.get("/api/builds").json()}
+    deploys = {d["id"]: d for d in client.get("/api/deploys").json()}
+    return {
+        "build_live": builds["b-live"],
+        "build_done": builds["b-done"],
+        "deploy": deploys["d-1a2b3c4d"],
+        "deploy_dry": deploys["d-dry"],
+        "test_live": client.get(f"/api/test-runs/{live_test.id}").json(),
+        "test_done": client.get(f"/api/test-runs/{done_test.id}").json(),
+    }
+
+
+def test_run_rows_carry_exact_duration_timestamps(timed_rows):
+    """Finished rows: duration is exactly updated_at - created_at (build 125 s, deploy 30 s) and a
+    finished test run's server-computed elapsed_sec is frozen at the same 125 s."""
+    done = timed_rows["build_done"]
+    assert done["status"] == "succeeded"
+    assert _secs(done["updated_at"]) - _secs(done["created_at"]) == 125
+    dep = timed_rows["deploy"]
+    assert dep["status"] == "verified"
+    assert _secs(dep["updated_at"]) - _secs(dep["created_at"]) == 30
+    assert timed_rows["test_done"]["state"] == "pass"
+    assert timed_rows["test_done"]["elapsed_sec"] == 125
+    # Running rows: created_at is the start (the renderer ticks to now), and the live test run's
+    # elapsed_sec comes back server-computed rather than frozen.
+    live = timed_rows["build_live"]
+    assert live["status"] == "running" and live["created_at"] == "2026-10-13T10:00:00Z"
+    assert timed_rows["test_live"]["state"] == "running"
+    assert timed_rows["test_live"]["elapsed_sec"] >= 0
+    # A dry-run deploy has no real timestamps — the row must degrade, not throw.
+    assert timed_rows["deploy_dry"]["created_at"] == "dry-run"
+
+
+def test_project_runtime_and_step_duration_fields(wdb, client):
+    """Project list rows carry created_at (total runtime) and each step carries started_at (its first
+    event), so the step view can show per-step durations without a schema change."""
+    pid = client.post(
+        "/api/projects", json={"workflow": "cs2_camera_addon", "goal": "iso viewer", "game": "cs2"}
+    ).json()["project_id"]
+    step = client.get(f"/api/projects/{pid}").json()["steps"][0]["id"]
+    assert client.post(f"/api/projects/{pid}/steps/{step}", json={"status": "in_progress"}).status_code == 200
+    with wdb.writer() as conn, conn:
+        conn.execute(
+            "UPDATE projects SET created_at = ?, updated_at = ? WHERE id = ?",
+            ("2026-10-13T10:00:00Z", "2026-10-13T10:05:00Z", pid),
+        )
+        conn.execute(
+            "UPDATE project_steps SET updated_at = ? WHERE project_id = ? AND step_id = ?",
+            ("2026-10-13T10:04:05Z", pid, step),
+        )
+        conn.execute(
+            "UPDATE project_events SET ts = ? WHERE project_id = ? AND step_id = ?",
+            ("2026-10-13T10:02:00Z", pid, step),
+        )
+    summary = next(p for p in client.get("/api/projects").json() if p["id"] == pid)
+    assert _secs(summary["updated_at"]) - _secs(summary["created_at"]) == 300  # total runtime
+    project = client.get(f"/api/projects/{pid}").json()
+    touched = next(s for s in project["steps"] if s["id"] == step)
+    assert touched["started_at"] == "2026-10-13T10:02:00Z" and touched["updated_at"] == "2026-10-13T10:04:05Z"
+    assert _secs(touched["updated_at"]) - _secs(touched["started_at"]) == 125  # per-step duration
+    untouched = [s for s in project["steps"] if s["id"] != step]
+    assert untouched and all(s["started_at"] is None for s in untouched)  # renders '—', no invented time
+
+
+def test_frontend_duration_columns(client):
+    """Every run table renders a duration from the one humanizer: build/test/deploy rows, the
+    projects list, and the step table + DAG nodes."""
+    js = client.get("/app.js").text
+    # one contiguous helper block: parseTs + human + live/settled switch + the renderer
+    assert "duration-helpers:start" in js and "duration-helpers:end" in js
+    assert "const human" in js and "const runSeconds" in js and "const runTime" in js
+    assert 'LIVE_STATES = new Set(["queued", "running", "active", "in_progress"])' in js
+    # build / deploy / test rows each get an Elapsed column
+    assert js.count("<th>Elapsed</th>") == 3
+    assert "runTime(d)" in js and "human(t.elapsed_sec)" in js and "runTime(r)" in js
+    # orchestration: project list total runtime + per-step duration (table and DAG)
+    assert "<th>Runtime</th>" in js and "<th>Duration</th>" in js
+    assert "runTime(p)" in js and "stepTime(s)" in js
+
+
+NODE = shutil.which("node")
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_duration_rendering_executes_in_node(client, timed_rows):
+    """Lift the shipped humanizer out of app.js and run it against the fixture rows, so 'live while
+    running, frozen once finished' is checked as behaviour, not just as a string in the file."""
+    assert NODE is not None  # skipif above
+    js = client.get("/app.js").text
+    block = js.split("// duration-helpers:start", 1)[1].split("// duration-helpers:end", 1)[0]
+    script = (
+        'const NOW = Date.parse("2026-10-13T10:05:00Z");\n'
+        "Date.now = () => NOW;\n"
+        f"{block}\n"
+        f"const ROWS = {json.dumps(timed_rows)};\n"
+        "console.log(JSON.stringify({\n"
+        "  buildLive: runTime(ROWS.build_live),\n"
+        "  buildDone: runTime(ROWS.build_done),\n"
+        "  deploy: runTime(ROWS.deploy),\n"
+        "  deployDry: runTime(ROWS.deploy_dry),\n"
+        "  testDone: human(ROWS.test_done.elapsed_sec),\n"
+        "  testLiveRunning: ROWS.test_live.state === 'running' && ROWS.test_live.elapsed_sec >= 0,\n"
+        "  projectActive: runTime({status: 'active', created_at: '2026-10-13T10:00:00Z',"
+        " updated_at: '2026-10-13T10:00:00Z'}),\n"
+        "  projectDone: runTime({status: 'done', created_at: '2026-10-13T10:00:00Z',"
+        " updated_at: '2026-10-13T10:01:00Z'}),\n"
+        "  stepLive: runTime({status: 'in_progress', started_at: '2026-10-13T10:04:00Z',"
+        " updated_at: '2026-10-13T10:04:00Z'}),\n"
+        "  stepDone: runTime({status: 'done', started_at: '2026-10-13T10:02:00Z',"
+        " updated_at: '2026-10-13T10:04:05Z'}),\n"
+        "  stepUntouched: runTime({status: 'pending'}),\n"
+        "}));\n"
+    )
+    proc = subprocess.run([NODE, "-e", script], capture_output=True, text=True, encoding="utf-8", timeout=60)
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads(proc.stdout) == {
+        "buildLive": "5m00s",  # running: ticks from created_at to now (NOW - 10:00:00 = 300 s)
+        "buildDone": "2m05s",  # finished: frozen at updated_at - created_at (125 s)
+        "deploy": "30s",
+        "deployDry": "—",  # 'dry-run' placeholder timestamps degrade instead of throwing
+        "testDone": "2m05s",  # test rows render the server's own elapsed_sec
+        "testLiveRunning": True,
+        "projectActive": "5m00s",
+        "projectDone": "1m00s",
+        "stepLive": "1m00s",  # in_progress: started_at -> now
+        "stepDone": "2m05s",  # done: started_at -> updated_at
+        "stepUntouched": "—",  # no start recorded: the view shows '—', never a made-up duration
+    }

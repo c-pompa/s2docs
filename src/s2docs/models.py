@@ -303,6 +303,11 @@ class ProjectStep(BaseModel):
     gate: str | None = None
     notes: str | None = None
     artifacts: list[str] = []
+    started_at: str | None = Field(
+        default=None,
+        description="When the step was first touched (earliest project event for it); NULL while pending. "
+        "updated_at - started_at is the step's duration.",
+    )
     updated_at: str
 
 
@@ -322,6 +327,7 @@ class ProjectSummary(BaseModel):
     addon: str | None = None
     status: Literal["active", "done", "abandoned"]
     progress: str
+    created_at: str
     updated_at: str
 
 
