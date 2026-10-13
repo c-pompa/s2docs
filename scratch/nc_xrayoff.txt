@@ -1,0 +1,6 @@
+spec_show_xray 0
+mp_warmup_pausetimer 1
+bot_stop 1
+spec_mode 6
+spec_goto -2713 -742 883 55 45
+spec_pos

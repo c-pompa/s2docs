@@ -365,3 +365,27 @@ class ProjectBrief(BaseModel):
     next_steps: list[StepBrief] = []
     blocked_steps: list[str] = []
     guidance: str
+
+
+# --------------------------------------------------------------------- hosts
+class HostLock(BaseModel):
+    host_id: str
+    owner: str
+    acquired_at: str
+    heartbeat_at: str
+    ttl_sec: int
+    fresh: bool = Field(description="heartbeat within ttl (False = stale, can be taken over)")
+    age_sec: int = Field(description="seconds since the last heartbeat")
+
+
+class Host(BaseModel):
+    id: str
+    hostname: str | None = None
+    ssh_target: str
+    ssh_key: str | None = None
+    shell: Literal["cmd", "powershell"] | None = None
+    os: str | None = None
+    facts: dict = Field(default_factory=dict, description="Probed facts (gpu, ram, node_path, cs2_path, ...)")
+    probed_at: str | None = None
+    notes: str | None = None
+    lock: HostLock | None = None

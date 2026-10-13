@@ -1,0 +1,7 @@
+mp_warmup_pausetimer 1
+bot_stop 1
+spec_mode 6
+iso_occ_show iso_occ_btunnel_00
+spec_goto -2713 -742 883 55 45
+spec_pos
+iso_occ_status

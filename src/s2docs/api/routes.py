@@ -9,6 +9,7 @@ from fastapi import APIRouter, Body, Depends, HTTPException, Path, Query, Reques
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, Field
 
+from s2docs import hosts
 from s2docs import models as m
 from s2docs.build.validate_cfg import validate_cfg
 from s2docs.build.validate_script import validate_cs_script
@@ -323,6 +324,64 @@ def project_brief(project_id: str, orch: Orch):
 @router.post("/projects/{project_id}/steps/{step_id}", response_model=m.ProjectBrief)
 def update_step(project_id: str, step_id: str, body: UpdateStepIn, orch: Orch):
     return orch.update(project_id, step_id, body.status, notes=body.notes, artifacts=body.artifacts)
+
+
+# --------------------------------------------------------------- hosts
+def get_db_only(request: Request) -> Database:
+    return request.app.state.db
+
+
+Db = Annotated[Database, Depends(get_db_only)]
+
+
+class HostIn(BaseModel):
+    ssh_target: str
+    hostname: str | None = None
+    ssh_key: str | None = None
+    shell: Literal["cmd", "powershell"] | None = None
+    os: str | None = None
+    notes: str | None = None
+
+
+class LockIn(BaseModel):
+    owner: str = Field(min_length=1, max_length=200)
+    ttl_sec: int = Field(default=1800, ge=60)
+    force: bool = False
+
+
+@router.get("/hosts", response_model=list[m.Host])
+def list_hosts(db: Db):
+    return hosts.list_hosts(db)
+
+
+@router.get("/hosts/{host_id}", response_model=m.Host)
+def get_host(host_id: str, db: Db):
+    return hosts.get_host(db, host_id)
+
+
+@router.put("/hosts/{host_id}", response_model=m.Host)
+def register_host(host_id: str, body: HostIn, db: Db):
+    return hosts.register_host(db, host_id, **body.model_dump())
+
+
+@router.post("/hosts/{host_id}/probe", response_model=m.Host)
+def probe_host(host_id: str, db: Db):
+    return hosts.probe_host(db, host_id)
+
+
+@router.post("/hosts/{host_id}/lock", response_model=m.HostLock)
+def claim_host(host_id: str, body: LockIn, db: Db):
+    return hosts.claim_host(db, host_id, body.owner, ttl_sec=body.ttl_sec, force=body.force)
+
+
+@router.post("/hosts/{host_id}/heartbeat", response_model=m.HostLock)
+def heartbeat_host(host_id: str, db: Db, owner: Annotated[str, Body(embed=True)]):
+    return hosts.heartbeat_host(db, host_id, owner)
+
+
+@router.delete("/hosts/{host_id}/lock")
+def release_host(host_id: str, db: Db, owner: Annotated[str, Query()], force: Annotated[bool, Query()] = False):
+    return {"result": hosts.release_host(db, host_id, owner, force=force)}
 
 
 # ------------------------------------------------------------- prompts

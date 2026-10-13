@@ -16,6 +16,7 @@ from mcp.server.mcpserver.prompts.base import Prompt, PromptArgument
 from mcp_types import ToolAnnotations
 from pydantic import Field
 
+from s2docs import hosts
 from s2docs import models as m
 from s2docs.build import workspace as ws
 from s2docs.build.validate_cfg import validate_cfg as _validate_cfg
@@ -35,6 +36,11 @@ Side = Literal["server", "client"]
 AddonName = Annotated[str, Field(description="Addon name: lowercase [a-z0-9_], e.g. 'jump_arena'")]
 ProjectId = Annotated[str, Field(description="Project id from start_project, e.g. 'p-1a2b3c4d'")]
 RelPath = Annotated[str, Field(description="Path inside the addon, e.g. 'scripts/jump_arena.js'")]
+HostId = Annotated[str, Field(description="Host id from list_hosts, e.g. 'desktop-pc'")]
+Owner = Annotated[
+    str,
+    Field(description="Who is asking: workstream/session id, e.g. 'ws/occluder-wire', 'p-1a2b3c4d', 'coord-session'"),
+]
 
 INSTRUCTIONS = """\
 Reference data for Valve's Source 2 engine games (Counter-Strike 2 = `cs2`, Deadlock = `deadlock`),
@@ -422,6 +428,80 @@ def create_mcp_server(db: Database, workspace: Path | None = None) -> MCPServer:
     ) -> str:
         """Render one of this server's prompts as text, for clients that can't fetch MCP prompts mid-task."""
         return _orch(lambda: orch.prompt_text(name, arguments or {}))
+
+    # ------------------------------------------------------------------ hosts
+    HOSTS_WRITE = ToolAnnotations(read_only_hint=False, destructive_hint=False, idempotent_hint=True)
+    HOST_PROBE = ToolAnnotations(read_only_hint=False, destructive_hint=False, open_world_hint=True)
+
+    def _hosts(fn: Callable[[], T]) -> T:
+        try:
+            return fn()
+        except hosts.HostError as exc:
+            raise ToolError(str(exc)) from exc
+
+    @server.tool(annotations=READ_ONLY)
+    def list_hosts() -> list[m.Host]:
+        """List registered test/build hosts with their facts (shell, GPU, paths) and current lock state.
+        CHECK THIS before driving any host: a fresh lock means another session/workstream owns it."""
+        return _hosts(lambda: hosts.list_hosts(db))
+
+    @server.tool(annotations=READ_ONLY)
+    def get_host(host_id: HostId) -> m.Host:
+        """One host's registry entry: ssh target, shell flavor, probed facts, and lock."""
+        return _hosts(lambda: hosts.get_host(db, host_id))
+
+    @server.tool(annotations=HOSTS_WRITE)
+    def register_host(
+        host_id: Annotated[str, Field(description="Short id: lowercase [a-z0-9-], e.g. 'desktop-pc'")],
+        ssh_target: Annotated[
+            str, Field(description="ssh alias or user@host, e.g. 'pomps-pc' or 'pompa@100.64.130.72'")
+        ],
+        hostname: Annotated[str | None, Field(description="Machine name, e.g. 'DESKTOP-39NF657'")] = None,
+        ssh_key: Annotated[str | None, Field(description="Identity file path if not the ssh default")] = None,
+        shell: Annotated[
+            Literal["cmd", "powershell"] | None, Field(description="Login shell flavor on the host")
+        ] = None,
+        os: Annotated[str | None, Field(description="e.g. 'windows'")] = None,
+        notes: str | None = None,
+    ) -> m.Host:
+        """Register (or update) a test/build host. Upsert: omitted fields keep their previous values."""
+        return _hosts(
+            lambda: hosts.register_host(
+                db, host_id, ssh_target, hostname=hostname, ssh_key=ssh_key, shell=shell, os=os, notes=notes
+            )
+        )
+
+    @server.tool(annotations=HOST_PROBE)
+    def probe_host(host_id: HostId) -> m.Host:
+        """SSH to the host, run the probe script (GPU, RAM, processes, CS2 path/build) and store the facts.
+        Use before planning work on a host — e.g. to see if a game or a heavy GPU process is running."""
+        return _hosts(lambda: hosts.probe_host(db, host_id))
+
+    @server.tool(annotations=HOSTS_WRITE)
+    def claim_host(
+        host_id: HostId,
+        owner: Owner,
+        ttl_sec: Annotated[int, Field(description="Lock lifetime without heartbeat, seconds (min 60)")] = 1800,
+        force: Annotated[bool, Field(description="Take over even if another owner's lock is still fresh")] = False,
+    ) -> m.HostLock:
+        """Claim exclusive use of a host. Fails if another owner holds a fresh lock — a stale lock
+        (heartbeat older than its TTL, e.g. from a crashed worker) is taken over automatically.
+        Heartbeat with heartbeat_host while you work; release with release_host when done."""
+        return _hosts(lambda: hosts.claim_host(db, host_id, owner, ttl_sec=ttl_sec, force=force))
+
+    @server.tool(annotations=HOSTS_WRITE)
+    def heartbeat_host(host_id: HostId, owner: Owner) -> m.HostLock:
+        """Refresh your lock's heartbeat so it doesn't go stale mid-task."""
+        return _hosts(lambda: hosts.heartbeat_host(db, host_id, owner))
+
+    @server.tool(annotations=HOSTS_WRITE)
+    def release_host(
+        host_id: HostId,
+        owner: Owner,
+        force: Annotated[bool, Field(description="Release another owner's lock (cleanup of dead owners)")] = False,
+    ) -> str:
+        """Release a host lock. Always call this when finished with a host."""
+        return _hosts(lambda: hosts.release_host(db, host_id, owner, force=force))
 
     # -------------------------------------------------------------- resources
     @server.resource(

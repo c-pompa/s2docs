@@ -147,6 +147,46 @@ def _cmd_scaffold(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_host(args: argparse.Namespace) -> int:
+    from s2docs import hosts
+
+    db = Database(get_settings().db_path)
+    try:
+        if args.host_cmd == "list":
+            out = [h.model_dump() for h in hosts.list_hosts(db)]
+        elif args.host_cmd == "show":
+            out = hosts.get_host(db, args.host_id).model_dump()
+        elif args.host_cmd == "register":
+            out = hosts.register_host(
+                db,
+                args.host_id,
+                args.ssh_target,
+                hostname=args.hostname,
+                ssh_key=args.ssh_key,
+                shell=args.shell,
+                os=args.os,
+                notes=args.notes,
+            ).model_dump()
+        elif args.host_cmd == "probe":
+            out = hosts.probe_host(db, args.host_id).model_dump()
+        elif args.host_cmd == "lock":
+            out = hosts.claim_host(db, args.host_id, args.owner, ttl_sec=args.ttl, force=args.force).model_dump()
+        elif args.host_cmd == "heartbeat":
+            out = hosts.heartbeat_host(db, args.host_id, args.owner).model_dump()
+        elif args.host_cmd == "unlock":
+            out = {"result": hosts.release_host(db, args.host_id, args.owner, force=args.force)}
+        else:  # pragma: no cover - argparse enforces the subcommand
+            raise hosts.HostError(f"unknown host command {args.host_cmd!r}")
+    except hosts.HostLocked as exc:
+        print(f"LOCKED: {exc}", file=sys.stderr)
+        return 2
+    except hosts.HostError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    print(json.dumps(out, indent=2))
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="s2docs", description="Source 2 docs index, API and MCP server")
     parser.add_argument("-v", "--verbose", action="store_true")
@@ -199,6 +239,31 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("name")
     p.add_argument("arg", nargs="*", help="key=value")
     p.set_defaults(fn=_cmd_prompt)
+
+    p = sub.add_parser("host", help="Test/build host registry and locks (JSON output)")
+    hc = p.add_subparsers(dest="host_cmd", required=True)
+    hc.add_parser("list", help="List hosts with lock state")
+    q = hc.add_parser("show", help="Show one host")
+    q.add_argument("host_id")
+    q = hc.add_parser("register", help="Register/update a host")
+    q.add_argument("host_id")
+    q.add_argument("ssh_target")
+    q.add_argument("--hostname")
+    q.add_argument("--ssh-key")
+    q.add_argument("--shell", choices=["cmd", "powershell"])
+    q.add_argument("--os")
+    q.add_argument("--notes")
+    q = hc.add_parser("probe", help="SSH-probe a host (GPU, RAM, processes, CS2) and store the facts")
+    q.add_argument("host_id")
+    for name, helptext in (("lock", "Claim a host"), ("heartbeat", "Refresh your lock"), ("unlock", "Release a lock")):
+        q = hc.add_parser(name, help=helptext)
+        q.add_argument("host_id")
+        q.add_argument("owner", help="Workstream/session id, e.g. ws/occluder-wire")
+        if name == "lock":
+            q.add_argument("--ttl", type=int, default=1800)
+        if name != "heartbeat":
+            q.add_argument("--force", action="store_true")
+    p.set_defaults(fn=_cmd_host)
 
     args = parser.parse_args(argv)
     # stdout is the MCP stdio channel: logs must go to stderr.

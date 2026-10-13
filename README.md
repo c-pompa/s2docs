@@ -53,6 +53,12 @@ Environment variables: `S2DOCS_DATA_DIR` (default `./data`) and `S2DOCS_DB` (def
 
 ## MCP
 
+**Hermes Agent** (native tools as `mcp_s2docs_*`; stdio, no server process needed)
+```bash
+hermes config set mcp_servers.s2docs.command /Volumes/SSD_2/XCode_Repos/myprojects/valve-mcp-api-project/.venv/bin/s2docs
+hermes config set mcp_servers.s2docs.args '["mcp"]'
+```
+
 **Claude Code**
 ```bash
 claude mcp add s2docs -- uv --directory /Volumes/SSD_2/XCode_Repos/myprojects/valve-mcp-api-project run s2docs mcp
@@ -90,6 +96,14 @@ claude mcp add --transport http s2docs http://127.0.0.1:8000/mcp
 | `validate_cs_script` | Type-checks a script with `tsc` against this build's `point_script.d.ts`. Diagnostics are categorized (`unknown_api`, `needs_type_narrowing` with the cast to use, `deprecated_api`, …) |
 | `validate_cfg` | Checks every cfg line against the indexed convars: unknown names (with suggestions), out-of-range values, cheat flags, client vs server |
 | `scaffold_addon`, `list_addons`, `get_addon`, `read_addon_file`, `write_addon_file` | Local addon workspace (`$S2DOCS_WORKSPACE`, default `data/workspace`). Writes text sources only, with no path escapes and no overwrites unless asked |
+
+| Host tools | |
+|---|---|
+| `list_hosts`, `get_host`, `register_host` | Registry of test/build hosts (ssh target, shell flavor, probed facts: GPU/RAM/processes/CS2 build) |
+| `probe_host` | SSH-probe a host and store its facts (`scripts/windows/probe_host.ps1`) |
+| `claim_host`, `heartbeat_host`, `release_host` | Server-side host locks with owner + TTL + heartbeat. A fresh lock blocks other owners; a stale lock (crashed worker) is taken over automatically. Check `list_hosts` before driving any host |
+
+The same operations exist on the CLI (`s2docs host list|show|register|probe|lock|heartbeat|unlock`, JSON out, exit 2 = locked) and the HTTP API (`/api/hosts`, `/api/hosts/{id}/lock`, …; 409 = locked).
 
 | Orchestration tools | |
 |---|---|
