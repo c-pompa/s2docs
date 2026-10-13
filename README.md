@@ -117,9 +117,10 @@ The same operations exist on the CLI (`s2docs host list|show|register|probe|lock
 | Build tools | |
 |---|---|
 | `build_start` | Start a **server-owned** run on a host: acquires the host lease (`build:<run-id>`), runs the caller's command over SSH, returns a run id immediately. No client sleep-polling — use `build_wait`/`build_status` |
-| `build_status`, `build_list` | A run's record (status, exit code, parsed summary counts, artifacts) and recent runs |
-| `build_log` | Tail the run's log — the log is UTF-16 (resourcecompiler), so this decodes it and reports the detected `encoding` |
-| `build_wait` | Block server-side until the run finishes (bounded), or fail on timeout |
+| `build_status`, `build_list` | A run's record (status, exit code, parsed summary counts, material guard, artifacts) and recent runs |
+| `build_log` | Tail the run's log — the log is UTF-16 (resourcecompiler), so this decodes it and reports the detected `encoding` plus any material-guard warnings |
+| `build_wait` | Block server-side until the run finishes (bounded), or fail on timeout. `strict_materials=true` fails a 'succeeded' run whose log flagged missing/reserved materials |
+| **Material guard** | Scans the decoded log for `referencing missing material`, `Failed to compile` and reserved-path references (Valve's `_vrf/` subtree, another map's `maps/<other>/` subtree). Findings land in the run's `summary.material_guard` / `warnings` field (counts + first paths). A warned run still finishes **`succeeded`** — the resourcecompiler exits 0 — unless strict mode is on |
 | `build_cancel` | Mark the run cancelled and release its host lease |
 
 | Deploy tools | |
@@ -128,7 +129,7 @@ The same operations exist on the CLI (`s2docs host list|show|register|probe|lock
 | `deploy_verify` | Re-check a recorded deployment's MD5s and update its status |
 | `deploy_list` | Recent deployments, optionally per host |
 
-CLI: `s2docs build start|status|log|wait|cancel|list` and `s2docs deploy push|verify|list` (global `--json` → one `{"schema": "s2docs/v1", …}` object on stdout, logs to stderr; exit codes 0 ok, 1 error, 2 locked, 3 not found, 6 partial, 7 timeout/cancelled). HTTP: `/api/hosts/{id}/builds`, `/api/builds/…`, `/api/deploys`.
+CLI: `s2docs build start|status|log|wait|cancel|list` and `s2docs deploy push|verify|list` (global `--json` → one `{"schema": "s2docs/v1", …}` object on stdout, logs to stderr; exit codes 0 ok, 1 error, 2 locked, 3 not found, 6 partial, 7 timeout/cancelled, 8 material warnings under `--strict-materials`). HTTP: `/api/hosts/{id}/builds`, `/api/builds/…`, `/api/deploys`.
 
 | Evidence tools | | 
 |---|---|
@@ -165,7 +166,7 @@ start_project ─▶ brief (ready steps + tools + rendered prompt) ─▶ agent 
 - **Projects persist.** Any session can pick one up with `next_step <id>`, and the web UI's **Projects** page shows progress and can start projects or move steps.
 - Steps are snapshotted when a project starts, so editing `orchestration/workflows.py` never changes a project in flight.
 
-**Prompts:** `orchestrate`, `cs2_script`, `hammer_io_logic`, `server_config`, `deadlock_mod`, `explain_symbol`. Each is a Markdown template in `src/s2docs/prompts/templates/`, filled at render time with live data from the database (e.g. the current `Instance` method index). Edit the `.md` files to tune them. The same prompts are available at `GET /api/prompts` and `POST /api/prompts/{name}/render`.
+**Prompts:** `orchestrate`, `cs2_script`, `hammer_io_logic`, `server_config`, `deadlock_mod`, `cs2_map_rebuild`, `explain_symbol`. Each is a Markdown template in `src/s2docs/prompts/templates/`, filled at render time with live data from the database (e.g. the current `Instance` method index). Edit the `.md` files to tune them. The same prompts are available at `GET /api/prompts` and `POST /api/prompts/{name}/render`.
 
 **Resources:** `s2docs://cs2/cs_script/point_script.d.ts` and `tsconfig.json` (put them next to your scripts for editor IntelliSense), plus `s2docs://cs2/cs_script/examples/{name}`.
 
@@ -207,7 +208,7 @@ src/s2docs/
 ## Development
 
 ```bash
-uv run pytest -q                     # 111 tests: parsers, repository, API, MCP, build tools, orchestration, hosts, builds/deploys, evidence, test runs, web-UI visibility
+uv run pytest -q                     # 115 tests: parsers, repository, API, MCP, build tools, orchestration, hosts, builds/deploys (incl. material guard), evidence, test runs, web-UI visibility
 uv run ruff check src tests && uv run ruff format src tests
 uv run python scripts/check_frontend.py   # renders every SPA route in headless Chrome (server on :8765; extra routes as args)
 ```

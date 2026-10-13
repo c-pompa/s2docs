@@ -53,6 +53,27 @@ DEFAULT_TAIL_LINES = 200
 # '<count> <word>' pairs, e.g. "4123 compiled, 2 failed" — last occurrence per word wins.
 _SUMMARY_RE = re.compile(r"(\d[\d,]*)\s+(compiled|failed|errors?|warnings?)\b", re.IGNORECASE)
 
+# ------------------------------------------------------------- material guard
+# The 2026-10-12 de_dust2_iso incident: a decompiled+rebuilt map error-rendered (red/black
+# checkerboard) because its meshes referenced the map's own nodraw physics-surface materials at
+# RESERVED, content-illegal paths (maps/<map>/_vrf/...), which never compile into a rebuilt vpk.
+# The resourcecompiler reported 'referencing missing material' but still exited 0, and the lines
+# were buried in an 8 MB UTF-16 log. These patterns surface them instead of leaving a pixel scan
+# as the only detector.
+_MISSING_MATERIAL_RE = re.compile(r"referencing missing material", re.IGNORECASE)
+_FAILED_COMPILE_RE = re.compile(r"\bfailed to compile\b", re.IGNORECASE)
+# Valve's own reserved subtree; assets under it are never packed into a rebuilt map.
+_RESERVED_VRF_RE = re.compile(r"[A-Za-z0-9_./\\-]*_vrf/[A-Za-z0-9_./\\-]+", re.IGNORECASE)
+# maps/<name>/<...>: legal only when <name> is the build's own map; another map's subtree is reserved.
+_MAPS_SUBTREE_RE = re.compile(r"maps/(?P<name>[A-Za-z0-9_]+)/[A-Za-z0-9_./\\-]+", re.IGNORECASE)
+# A path-like token ending in an asset extension, used to pull the offender out of a message line.
+_ASSET_PATH_RE = re.compile(r"[A-Za-z0-9_./\\-]+\.[A-Za-z0-9]{2,5}")
+# 'map=<name>' as recorded in the CLI run notes (build start --map ...).
+_MAP_NOTE_RE = re.compile(r"\bmap=(?P<name>[A-Za-z0-9_-]+)", re.IGNORECASE)
+# Keep the warning payload small: counts are exact, but only the first few paths are listed.
+MAX_GUARD_PATHS = 5
+_MATERIAL_KINDS = ("missing_material", "failed_compile", "reserved_path")
+
 # run id → live process + its open log handle, for cancels issued in this process.
 _RUNNERS: dict[str, tuple[subprocess.Popen, IO[bytes]]] = {}
 _RUNNERS_LOCK = threading.Lock()
@@ -95,7 +116,67 @@ def _read_log(path: Path) -> tuple[str, str]:
         return data.decode("utf-16-le", errors="replace"), "utf-16"
 
 
+def map_name_from_notes(notes: str | None, command: str | None = None) -> str | None:
+    """Best-effort own-map name for a run: the 'map=<name>' note first, then the command text."""
+    for text in (notes, command):
+        if text:
+            match = _MAP_NOTE_RE.search(text)
+            if match:
+                return match.group("name")
+    return None
+
+
+def scan_materials(text: str, *, map_name: str | None = None) -> dict:
+    """Scan a (decoded) build log for the material-failure class; empty-clean dict when none found.
+
+    Returns ``{"clean": True, "map": <name>}`` when the log is clean, else a dict with per-kind
+    ``counts`` and the first few offending ``paths``. ``map_name`` is the build's own map: a
+    ``maps/<name>/`` reference to a *different* map is reserved, as is anything under ``_vrf/``.
+    """
+    counts: dict[str, int] = {kind: 0 for kind in _MATERIAL_KINDS}
+    paths: dict[str, list[str]] = {kind: [] for kind in _MATERIAL_KINDS}
+    own = map_name.lower() if map_name else None
+
+    def _add(kind: str, path: str | None) -> None:
+        counts[kind] += 1
+        if path and path not in paths[kind] and len(paths[kind]) < MAX_GUARD_PATHS:
+            paths[kind].append(path)
+
+    for line in text.splitlines():
+        if _MISSING_MATERIAL_RE.search(line):
+            found = _ASSET_PATH_RE.search(line)
+            _add("missing_material", found.group(0) if found else None)
+        if _FAILED_COMPILE_RE.search(line):
+            found = _ASSET_PATH_RE.search(line)
+            _add("failed_compile", found.group(0) if found else None)
+        reserved: set[str] = {match.group(0) for match in _RESERVED_VRF_RE.finditer(line)}
+        for match in _MAPS_SUBTREE_RE.finditer(line):
+            if own is None or match.group("name").lower() != own:
+                reserved.add(match.group(0))
+        for token in sorted(reserved):
+            _add("reserved_path", token)
+
+    if not any(counts.values()):
+        return {"clean": True, "map": map_name}
+    return {"clean": False, "map": map_name, "counts": counts, "paths": paths}
+
+
+def _guard_from_summary(summary: dict) -> m.MaterialGuard | None:
+    data = summary.get("material_guard")
+    return m.MaterialGuard(**data) if data else None
+
+
+def has_material_warnings(run: m.BuildRun) -> bool:
+    """True when the run's log recorded material warnings (missing/reserved materials).
+
+    A run can be 'succeeded' and still carry these; callers that must not ship such an artifact
+    (CI, `--strict-materials`) gate on this instead of the run status.
+    """
+    return run.warnings is not None and not run.warnings.clean
+
+
 def _row_to_run(row: sqlite3.Row) -> m.BuildRun:
+    summary = json.loads(row["summary"])
     return m.BuildRun(
         id=row["id"],
         host_id=row["host_id"],
@@ -107,7 +188,8 @@ def _row_to_run(row: sqlite3.Row) -> m.BuildRun:
         notes=row["notes"],
         log_path=row["log_path"],
         exit_code=row["exit_code"],
-        summary=json.loads(row["summary"]),
+        summary=summary,
+        warnings=_guard_from_summary(summary),
         artifacts=[m.BuildArtifact(**a) for a in json.loads(row["artifacts"])],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
@@ -243,6 +325,11 @@ def _finalize(
     if run.log_path and Path(run.log_path).exists():
         text, _ = _read_log(Path(run.log_path))
         summary = parse_summary(text)
+        guard = scan_materials(text, map_name=map_name_from_notes(run.notes, run.command))
+        if not guard["clean"]:
+            # A material warning is not a failed run (the resourcecompiler exits 0), so status stays
+            # 'succeeded' — but the summary now carries the warnings for build_status/build_log/CLI.
+            summary["material_guard"] = guard
     merged_notes = "\n".join(x for x in (run.notes, notes) if x) or None
     with db.writer() as conn, conn:
         conn.execute(
@@ -272,10 +359,18 @@ def log_tail(db: Database, run_id: str, *, lines: int = DEFAULT_TAIL_LINES) -> m
         return m.BuildLogTail(run_id=run_id, lines=[], encoding="utf-8", size=0, truncated=False)
     path = Path(run.log_path)
     text, encoding = _read_log(path)
+    guard = scan_materials(text, map_name=map_name_from_notes(run.notes, run.command))
     all_lines = text.splitlines()
     truncated = len(all_lines) > lines
     tail = all_lines[-lines:] if lines > 0 else all_lines
-    return m.BuildLogTail(run_id=run_id, lines=tail, encoding=encoding, size=path.stat().st_size, truncated=truncated)
+    return m.BuildLogTail(
+        run_id=run_id,
+        lines=tail,
+        encoding=encoding,
+        size=path.stat().st_size,
+        truncated=truncated,
+        warnings=None if guard["clean"] else m.MaterialGuard(**guard),
+    )
 
 
 def wait(db: Database, run_id: str, *, timeout_sec: float = DEFAULT_TIMEOUT_SEC, poll_sec: float = DEFAULT_POLL_SEC):

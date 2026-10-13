@@ -78,6 +78,7 @@ def test_prompts_and_resources(server):
         "hammer_io_logic",
         "server_config",
         "deadlock_mod",
+        "cs2_map_rebuild",
         "explain_symbol",
         "orchestrate",
     }

@@ -52,7 +52,7 @@ Valve's cs_script sample scripts, and community docs from source2.wiki (CC BY-SA
 Workflow: start with `search_docs`, then fetch exact details with the matching get_* tool. Treat these
 results as the source of truth for names and signatures. Do not invent convars, entity I/O or API
 methods that the tools do not return. The prompts (`cs2_script`, `hammer_io_logic`, `server_config`,
-`deadlock_mod`, `explain_symbol`) are guided workflows for common tasks.
+`deadlock_mod`, `cs2_map_rebuild`, `explain_symbol`) are guided workflows for common tasks.
 """
 
 READ_ONLY = ToolAnnotations(read_only_hint=True, idempotent_hint=True, open_world_hint=False)
@@ -526,8 +526,15 @@ def create_mcp_server(db: Database, workspace: Path | None = None) -> MCPServer:
         return _runs(lambda: builds.start(db, host_id, command, kind=kind, log_path=log_path, notes=notes))
 
     @server.tool(annotations=READ_ONLY)
-    def build_status(run_id: Annotated[str, Field(description="Run id from build_start, e.g. 'b-1a2b3c4d'")]):
-        """One build run's record: status, exit code, parsed summary counts and artifact list."""
+    def build_status(
+        run_id: Annotated[str, Field(description="Run id from build_start, e.g. 'b-1a2b3c4d'")],
+    ) -> m.BuildRun:
+        """One build run's record: status, exit code, parsed summary counts, material guard and artifacts.
+
+        `warnings` carries the MATERIAL GUARD findings when the log referenced missing/reserved materials
+        (Valve's `_vrf/` subtree, or another map's `maps/<other>/` subtree): counts per kind plus the first
+        few offending paths. Such a run can still be 'succeeded' — the resourcecompiler exits 0 and the map
+        then error-renders as a red/black checkerboard, so treat a non-None `warnings` as NOT clean."""
         return _runs(lambda: builds.get_run(db, run_id))
 
     @server.tool(annotations=READ_ONLY)
@@ -536,17 +543,27 @@ def create_mcp_server(db: Database, workspace: Path | None = None) -> MCPServer:
         lines: Annotated[int, Field(ge=1, le=5000, description="Tail size in lines")] = 200,
     ) -> m.BuildLogTail:
         """Tail a build run's log. The log is UTF-16 (resourcecompiler) — this decodes it for you,
-        returning the detected `encoding` and whether the tail was truncated."""
+        returning the detected `encoding`, whether the tail was truncated, and any MATERIAL GUARD
+        `warnings` found in the full log (see build_status)."""
         return _runs(lambda: builds.log_tail(db, run_id, lines=lines))
 
     @server.tool(annotations=READ_ONLY)
     def build_wait(
         run_id: str,
         timeout_sec: Annotated[int, Field(ge=1, description="Give up after this many seconds (exit 7)")] = 3600,
+        strict_materials: Annotated[
+            bool, Field(description="When true, fail the call if the material guard flagged warnings")
+        ] = False,
     ) -> m.BuildRun:
         """Block (server-side, no client sleep loop) until the run finishes, then return its record.
-        Raises if it is still running after timeout_sec."""
-        return _runs(lambda: builds.wait(db, run_id, timeout_sec=timeout_sec))
+        Raises if it is still running after timeout_sec. With strict_materials, a run whose log has
+        material-guard warnings is an error even though its status is 'succeeded'."""
+        run = builds.wait(db, run_id, timeout_sec=timeout_sec)
+        guard = run.warnings
+        if strict_materials and guard is not None and not guard.clean:
+            counts = ", ".join(f"{k}={v}" for k, v in guard.counts.items() if v)
+            raise ToolError(f"material guard: {counts} — rebuild is not clean (missing/reserved materials)")
+        return run
 
     @server.tool(annotations=HOSTS_WRITE)
     def build_cancel(run_id: str) -> m.BuildRun:

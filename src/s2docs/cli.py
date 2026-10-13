@@ -22,6 +22,7 @@ EXIT_CONFLICT = 4
 EXIT_TOOLCHAIN = 5
 EXIT_PARTIAL = 6
 EXIT_TIMEOUT = 7
+EXIT_MATERIALS = 8  # build finished but the material guard flagged warnings (strict mode)
 
 _DURATION_RE = re.compile(r"^(\d+)([smhd]?)$")
 _DURATION_UNITS = {"": 1, "s": 1, "m": 60, "h": 3600, "d": 86400}
@@ -230,10 +231,19 @@ def _cmd_host(args: argparse.Namespace) -> int:
 
 
 def _human_run(run) -> list[str]:
+    from s2docs import builds
+
     line = f"{run.id}  {run.host_id}  {run.status}  {run.kind}  exit={run.exit_code}"
     out = [line]
     if run.summary:
-        out.append("  summary: " + ", ".join(f"{k}={v}" for k, v in run.summary.items()))
+        shown = {k: v for k, v in run.summary.items() if k != "material_guard"}
+        out.append("  summary: " + ", ".join(f"{k}={v}" for k, v in shown.items()))
+    if builds.has_material_warnings(run):
+        counts = run.warnings.counts
+        out.append("  MATERIAL WARNINGS: " + ", ".join(f"{k}={v}" for k, v in counts.items() if v))
+        for kind, offenders in run.warnings.paths.items():
+            for path in offenders:
+                out.append(f"    {kind}: {path}")
     if run.handle:
         out.append(f"  handle: {run.handle}")
     if run.log_path:
@@ -241,6 +251,21 @@ def _human_run(run) -> list[str]:
     if run.notes:
         out.append(f"  notes: {run.notes}")
     return out
+
+
+def _emit_run(args: argparse.Namespace, run) -> int:
+    """Emit a run, then apply the --strict-materials gate: a 'succeeded'-but-warned run exits non-zero.
+
+    The resourcecompiler's own semantics keep such a run 'succeeded'; strict mode is the CI opt-in
+    that refuses to treat it as clean (the red/black-checkerboard incident class).
+    """
+    from s2docs import builds
+
+    rc = _emit(args, {"run": run.model_dump()}, _human_run(run))
+    if getattr(args, "strict_materials", False) and builds.has_material_warnings(run):
+        counts = ", ".join(f"{k}={v}" for k, v in run.warnings.counts.items() if v)
+        return _fail(f"material guard: {counts} (a clean rebuild needs 0 missing/reserved materials)", EXIT_MATERIALS)
+    return rc
 
 
 def _cmd_build(args: argparse.Namespace) -> int:
@@ -264,10 +289,10 @@ def _cmd_build(args: argparse.Namespace) -> int:
             )
             if args.wait:
                 run = builds.wait(db, run.id, timeout_sec=args.timeout)
-            return _emit(args, {"run": run.model_dump()}, _human_run(run))
+            return _emit_run(args, run)
         if args.build_cmd == "status":
             run = builds.get_run(db, args.run_id)
-            return _emit(args, {"run": run.model_dump()}, _human_run(run))
+            return _emit_run(args, run)
         if args.build_cmd == "log":
             if args.follow:
                 return _follow_log(db, args.run_id)
@@ -278,10 +303,16 @@ def _cmd_build(args: argparse.Namespace) -> int:
             for line in tail.lines:
                 print(line)
             print(f"# encoding={tail.encoding} size={tail.size} truncated={tail.truncated}", file=sys.stderr)
+            if tail.warnings is not None:
+                counts = ", ".join(f"{k}={v}" for k, v in tail.warnings.counts.items() if v)
+                print(f"# MATERIAL WARNINGS: {counts}", file=sys.stderr)
+                for kind, offenders in tail.warnings.paths.items():
+                    for path in offenders:
+                        print(f"#   {kind}: {path}", file=sys.stderr)
             return EXIT_OK
         if args.build_cmd == "wait":
             run = builds.wait(db, args.run_id, timeout_sec=args.timeout)
-            return _emit(args, {"run": run.model_dump()}, _human_run(run))
+            return _emit_run(args, run)
         if args.build_cmd == "cancel":
             run = builds.cancel(db, args.run_id)
             return _emit(args, {"run": run.model_dump()}, _human_run(run))
@@ -575,8 +606,14 @@ def main(argv: list[str] | None = None) -> int:
     q.add_argument("--map", help="Map name (recorded in the run notes)")
     q.add_argument("--wait", action="store_true", help="Block until the run finishes")
     q.add_argument("--timeout", type=_parse_duration, default=3600, help="Run/lease timeout, e.g. 1h (default)")
+    q.add_argument(
+        "--strict-materials",
+        action="store_true",
+        help="Exit 8 when the material guard flags missing/reserved materials (a 'succeeded' run is not clean)",
+    )
     q = bc.add_parser("status", help="Show one run's record")
     q.add_argument("run_id")
+    q.add_argument("--strict-materials", action="store_true", help="Exit 8 when the material guard flagged warnings")
     q = bc.add_parser("log", help="Tail a run's log (decodes UTF-16)")
     q.add_argument("run_id")
     q.add_argument("--lines", type=int, default=200)
@@ -584,6 +621,7 @@ def main(argv: list[str] | None = None) -> int:
     q = bc.add_parser("wait", help="Block until a run finishes (server-side; no sleep loop)")
     q.add_argument("run_id")
     q.add_argument("--timeout", type=_parse_duration, default=3600)
+    q.add_argument("--strict-materials", action="store_true", help="Exit 8 when the material guard flagged warnings")
     q = bc.add_parser("cancel", help="Cancel a run and release its host lease")
     q.add_argument("run_id")
     q = bc.add_parser("list", help="List runs (newest first)")

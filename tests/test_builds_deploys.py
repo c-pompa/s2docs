@@ -413,3 +413,129 @@ def test_cli_not_found_exit_code(tmp_path, monkeypatch, capsys):
         pass  # create + migrate the db so the read path finds the build_runs table
     rc = _run_cli(monkeypatch, tmp_path, ["build", "status", "b-missing"])
     assert rc == 3 and "no build run" in capsys.readouterr().err
+
+
+# -------------------------------------------------------- material guard
+# The 2026-10-12 de_dust2_iso incident: a rebuild finished (exit 0) but referenced missing/reserved
+# materials; the map then error-rendered as a red/black checkerboard. Logs are UTF-16 like the real
+# resourcecompiler log — no real compile is run.
+_INCIDENT_LINES = [
+    "Compiling addon iso_build...",
+    'ERROR: Material "maps/de_dust2/_vrf/physics_surfaces/tile_10_nodraw.vmat" referencing missing material',
+    'ERROR: Material "materials/custom/wall.vmat" referencing missing material',
+    "Failed to compile maps/de_dust2/_vrf/physics_surfaces/tile_10_nodraw.vmat",
+    "Compile Summary: 1164 compiled, 15 failed, 0 warnings",
+    "Done.",
+]
+
+
+def _utf16_log(lines: list[str]) -> bytes:
+    return ("\r\n".join(lines) + "\r\n").encode("utf-16")
+
+
+def test_scan_materials_incident_class_unit():
+    guard = builds.scan_materials("\n".join(_INCIDENT_LINES), map_name="de_dust2_iso")
+    assert guard["clean"] is False and guard["map"] == "de_dust2_iso"
+    assert guard["counts"]["missing_material"] == 2
+    assert guard["counts"]["failed_compile"] == 1
+    assert guard["counts"]["reserved_path"] >= 1
+    assert any("_vrf/" in p for p in guard["paths"]["reserved_path"])
+    assert any("wall.vmat" in p for p in guard["paths"]["missing_material"])
+    # a clean log reports nothing
+    clean = builds.scan_materials("2000 compiled, 0 failed", map_name="de_dust2_iso")
+    assert clean == {"clean": True, "map": "de_dust2_iso"}
+    # the runtime's *own* map subtree is legal; another map's is reserved
+    assert builds.scan_materials("ref maps/de_dust2_iso/models/rock.vmdl", map_name="de_dust2_iso")["clean"] is True
+    foreign = builds.scan_materials("ref maps/de_dust2/_vrf/x.vmat", map_name="de_dust2_iso")
+    assert foreign["clean"] is False
+    assert builds.map_name_from_notes("target=iso map=de_dust2_iso") == "de_dust2_iso"
+    assert builds.map_name_from_notes(None, "resourcecompiler map=aim_map addon") == "aim_map"
+
+
+def test_build_material_warnings_surface_in_summary(bdb, tmp_path, monkeypatch):
+    monkeypatch.setattr(builds.subprocess, "Popen", fake_popen(payload=_utf16_log(_INCIDENT_LINES), rc=0))
+    run = builds.start(
+        bdb,
+        "desktop-pc",
+        "resourcecompiler -game csgo addon",
+        log_path=tmp_path / "run.log",
+        notes="target=de_dust2_iso map=de_dust2_iso",
+    )
+    finished = builds.wait(bdb, run.id, timeout_sec=5, poll_sec=0.02)
+    # a material warning is NOT a failed run: the resourcecompiler exits 0 (its own semantics)
+    assert finished.status == "succeeded" and finished.exit_code == 0
+    assert finished.summary["compiled"] == 1164 and finished.summary["failed"] == 15
+    guard = finished.summary["material_guard"]
+    assert guard["counts"]["missing_material"] == 2 and guard["counts"]["failed_compile"] == 1
+    assert finished.warnings is not None and not finished.warnings.clean
+    assert builds.has_material_warnings(finished)
+    # build_log surfaces the same findings over the full log
+    tail = builds.log_tail(bdb, run.id, lines=2_000_000)
+    assert tail.warnings is not None and tail.warnings.counts["reserved_path"] >= 1
+    # a genuinely clean run has no warnings field at all (existing behavior preserved)
+    monkeypatch.setattr(builds.subprocess, "Popen", fake_popen(payload=_utf16_log(["7 compiled, 0 failed"]), rc=0))
+    clean_run = builds.wait(bdb, _start(bdb, tmp_path).id, timeout_sec=5, poll_sec=0.02)
+    assert clean_run.warnings is None and "material_guard" not in clean_run.summary
+
+
+def test_cli_strict_materials_exit_code(tmp_path, monkeypatch, capsys):
+    db = Database(tmp_path / "data" / "s2docs.db")
+    hosts.register_host(db, "desktop-pc", "pompa@x", shell="powershell")
+    monkeypatch.setattr(builds.subprocess, "Popen", fake_popen(payload=_utf16_log(_INCIDENT_LINES), rc=0))
+    base = [
+        "--json",
+        "build",
+        "start",
+        "iso",
+        "--host",
+        "desktop-pc",
+        "--command",
+        "compile",
+        "--map",
+        "de_dust2_iso",
+        "--wait",
+    ]
+
+    # default: finishes 'succeeded' but the warnings are surfaced in the JSON summary
+    rc = _run_cli(monkeypatch, tmp_path, base)
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert '"status": "succeeded"' in out and '"material_guard"' in out and '"reserved_path"' in out
+
+    # --strict-materials turns the same run into a non-zero exit (8 = material warnings)
+    rc = _run_cli(monkeypatch, tmp_path, [*base, "--strict-materials"])
+    assert rc == 8 and "material guard" in capsys.readouterr().err
+
+
+def test_api_build_material_guard_surfaces(bdb, client, tmp_path, monkeypatch):
+    monkeypatch.setattr(builds.subprocess, "Popen", fake_popen(payload=_utf16_log(_INCIDENT_LINES), rc=0))
+    started = client.post("/api/hosts/desktop-pc/builds", json={"command": "compile", "notes": "map=de_dust2_iso"})
+    assert started.status_code == 201
+    run_id = started.json()["id"]
+    assert client.post(f"/api/builds/{run_id}/wait", json={"timeout_sec": 5}).json()["status"] == "succeeded"
+    record = client.get(f"/api/builds/{run_id}").json()
+    assert record["summary"]["material_guard"]["counts"]["missing_material"] == 2
+    assert record["warnings"]["counts"]["reserved_path"] >= 1
+    log = client.get(f"/api/builds/{run_id}/log").json()
+    assert log["warnings"]["counts"]["failed_compile"] == 1
+
+
+def test_mcp_material_guard_surfaces_and_strict(bdb, tmp_path, monkeypatch):
+    monkeypatch.setattr(builds.subprocess, "Popen", fake_popen(payload=_utf16_log(_INCIDENT_LINES), rc=0))
+    server = create_mcp_server(bdb)
+
+    async def main():
+        async with Client(server) as c:
+            started = await c.call_tool("build_start", {"host_id": "desktop-pc", "command": "compile"})
+            rid = started.structured_content["id"]
+            waited = await c.call_tool("build_wait", {"run_id": rid, "timeout_sec": 5})
+            status = await c.call_tool("build_status", {"run_id": rid})
+            log = await c.call_tool("build_log", {"run_id": rid})
+            strict = await c.call_tool("build_wait", {"run_id": rid, "timeout_sec": 5, "strict_materials": True})
+            return waited, status, log, strict
+
+    waited, status, log, strict = anyio.run(main)
+    assert waited.structured_content["status"] == "succeeded"  # still 'succeeded' without strict
+    assert status.structured_content["warnings"]["counts"]["missing_material"] == 2
+    assert log.structured_content["warnings"]["counts"]["failed_compile"] == 1
+    assert strict.is_error and "material guard" in strict.content[0].text

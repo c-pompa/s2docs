@@ -103,6 +103,12 @@ def _orchestrate_ctx(repo: Repository, args: dict[str, str]) -> dict[str, str]:
     return ctx
 
 
+def _cs_map_rebuild_ctx(repo: Repository, args: dict[str, str]) -> dict[str, str]:
+    ctx = _game_ctx(repo, {**args, "game": "cs2"})
+    ctx["map"] = args.get("map") or "(the addon's own map)"
+    return ctx
+
+
 # ------------------------------------------------------------------ registry
 PROMPTS: dict[str, PromptSpec] = {
     p.name: p
@@ -158,6 +164,18 @@ PROMPTS: dict[str, PromptSpec] = {
                 PromptArg("game", "cs2 or deadlock", required=False),
             ],
             context=_orchestrate_ctx,
+        ),
+        PromptSpec(
+            name="cs2_map_rebuild",
+            title="Decompile + rebuild a CS2 map",
+            description="A pre-flight checklist for decompile/rebuild work, baking in reserved paths, "
+            "nodraw physics-surface materials and the material guard.",
+            template="cs2_map_rebuild.md",
+            arguments=[
+                PromptArg("task", "What the rebuild should achieve, e.g. 'fix the missing materials on my iso view'"),
+                PromptArg("map", "The target map name, e.g. 'de_dust2_iso'", required=False),
+            ],
+            context=_cs_map_rebuild_ctx,
         ),
         PromptSpec(
             name="explain_symbol",

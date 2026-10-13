@@ -57,6 +57,16 @@ def test_prompts(client):
     assert "OnReload" not in text  # deprecated members are excluded from the index
     assert client.post("/api/prompts/cs2_script/render", json={"arguments": {}}).status_code == 400
     assert client.post("/api/prompts/nope/render", json={"arguments": {}}).status_code == 404
+    # the rebuild checklist prompt is registered and bakes in the material pitfalls
+    assert "cs2_map_rebuild" in names
+    rebuild = client.post(
+        "/api/prompts/cs2_map_rebuild/render",
+        json={"arguments": {"task": "fix the iso view materials", "map": "de_dust2_iso"}},
+    )
+    text = rebuild.json()["text"]
+    assert rebuild.status_code == 200
+    assert "de_dust2_iso" in text and "_vrf/" in text and "checkerboard" in text
+    assert "strict_materials" in text and "pixel-scan" in text
 
 
 def test_frontend_served(client):

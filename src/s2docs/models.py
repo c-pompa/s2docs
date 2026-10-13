@@ -413,6 +413,20 @@ class BuildArtifact(BaseModel):
     size: int | None = None
 
 
+class MaterialGuard(BaseModel):
+    """Structured material warnings from a build log (the 'referencing missing material' class).
+
+    A rebuild whose meshes point at reserved/invalid material paths still *finishes* — the
+    resourcecompiler reports 'referencing missing material' but exit code 0 — and the map error-renders
+    as a red/black checkerboard. This makes those buried lines a first-class field.
+    """
+
+    clean: bool = True
+    map_name: str | None = None
+    counts: dict[str, int] = Field(default_factory=dict, description="Warnings per kind")
+    paths: dict[str, list[str]] = Field(default_factory=dict, description="First few offending paths per kind")
+
+
 class BuildRun(BaseModel):
     id: str
     host_id: str
@@ -425,6 +439,9 @@ class BuildRun(BaseModel):
     log_path: str | None = None
     exit_code: int | None = None
     summary: dict = Field(default_factory=dict, description="Parsed counts from the log summary line")
+    warnings: MaterialGuard | None = Field(
+        default=None, description="Material-guard findings; None when the log was clean or unscanned"
+    )
     artifacts: list[BuildArtifact] = []
     created_at: str
     updated_at: str
@@ -436,6 +453,9 @@ class BuildLogTail(BaseModel):
     encoding: str = Field(description="Log text encoding detected on read (utf-16 or utf-8)")
     size: int = Field(description="Log file size in bytes")
     truncated: bool = Field(default=False, description="True when only the tail was returned")
+    warnings: MaterialGuard | None = Field(
+        default=None, description="Material-guard findings over the whole log; None when clean"
+    )
 
 
 # --------------------------------------------------------------- deployments
