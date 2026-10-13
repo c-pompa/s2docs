@@ -10,6 +10,7 @@ import base64
 import hashlib
 import re
 import threading
+import time
 
 import anyio
 import pytest
@@ -96,7 +97,11 @@ def test_build_start_success(bdb, tmp_path, monkeypatch):
     finished = builds.wait(bdb, run.id, timeout_sec=5, poll_sec=0.02)
     assert finished.status == "succeeded" and finished.exit_code == 0
     assert finished.summary == {"compiled": 1234, "failed": 2, "warnings": 0}
-    # the server released the host lease on the terminal status
+    # the server released the host lease on the terminal status (finalize commits the status
+    # first and releases right after — poll briefly instead of racing that window)
+    deadline = time.monotonic() + 5
+    while hosts.get_host(bdb, "desktop-pc").lock is not None and time.monotonic() < deadline:
+        time.sleep(0.02)
     assert hosts.get_host(bdb, "desktop-pc").lock is None
     # the UTF-16 log decodes (this is what broke the hand-rolled probes)
     tail = builds.log_tail(bdb, run.id)
