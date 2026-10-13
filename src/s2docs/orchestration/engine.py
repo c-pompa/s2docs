@@ -178,6 +178,16 @@ class Orchestrator:
                 "SELECT step_id, event, detail, ts FROM project_events WHERE project_id = ? ORDER BY id DESC LIMIT 20",
                 (pid,),
             ).fetchall()
+            # Per-step start = the step's earliest event: the row itself only carries updated_at, so the
+            # events table is where a step's duration (updated_at - started_at) comes from.
+            firsts = {
+                r["step_id"]: r["started"]
+                for r in conn.execute(
+                    "SELECT step_id, MIN(ts) AS started FROM project_events "
+                    "WHERE project_id = ? AND step_id IS NOT NULL GROUP BY step_id",
+                    (pid,),
+                ).fetchall()
+            }
         return m.Project(
             id=p["id"],
             workflow=p["workflow"],
@@ -199,6 +209,7 @@ class Orchestrator:
                     gate=s["gate"],
                     notes=s["notes"],
                     artifacts=json.loads(s["artifacts"]),
+                    started_at=firsts.get(s["step_id"]),
                     updated_at=s["updated_at"],
                 )
                 for s in steps
@@ -227,6 +238,7 @@ class Orchestrator:
                 addon=r["addon"],
                 status=r["status"],
                 progress=f"{r['settled'] or 0}/{r['total']}",
+                created_at=r["created_at"],
                 updated_at=r["updated_at"],
             )
             for r in rows

@@ -16,15 +16,14 @@ const rich = (s) => esc(s).replace(/&lt;br\s*\/?&gt;/gi, "<br>");
 const stripTags = (s) => String(s).replace(/<[^>]+>/g, " ");
 
 // ---- Hosts & Activity helpers (ops/visibility pages) ----------------------
+// Run-time helpers, kept in one contiguous block so a headless test can lift them and check the
+// rendered durations (tests/test_web_ui.py extracts between the two duration-helpers markers).
+// duration-helpers:start
 const parseTs = (iso) => {
   const s = String(iso);
   return Date.parse(/[Zz]|[+-]\d\d:?\d\d$/.test(s) ? s : s + "Z");
 };
-const secsAgo = (iso) => {
-  if (!iso) return null;
-  const t = parseTs(iso);
-  return Number.isNaN(t) ? null : Math.max(0, Math.floor((Date.now() - t) / 1000));
-};
+// The single humanizer every elapsed/duration value goes through.
 const human = (s) => {
   if (s == null) return "—";
   s = Math.max(0, Math.round(s));
@@ -32,11 +31,25 @@ const human = (s) => {
   if (s < 3600) return `${Math.floor(s / 60)}m${String(s % 60).padStart(2, "0")}s`;
   return `${Math.floor(s / 3600)}h${String(Math.floor((s % 3600) / 60)).padStart(2, "0")}m`;
 };
-const runElapsed = (r) => {
-  const start = parseTs(r.created_at);
-  const end = r.status === "running" || r.status === "queued" ? Date.now() : parseTs(r.updated_at);
-  const secs = Math.floor((end - start) / 1000);
-  return Number.isNaN(secs) ? null : Math.max(0, secs);
+// A record is 'live' while its work is still going: a run queued/running, a test session running, a
+// project still active, a step in progress. Only a live record ticks to now; a settled one is frozen.
+const LIVE_STATES = new Set(["queued", "running", "active", "in_progress"]);
+const isLive = (r) => LIVE_STATES.has(r.status) || LIVE_STATES.has(r.state);
+// Seconds a record has been going (live) or took (settled): started_at|created_at -> finished_at|updated_at.
+// null when the record carries no usable timestamps (e.g. a dry-run deploy's 'dry-run' placeholder).
+const runSeconds = (r) => {
+  const start = parseTs(r.started_at || r.created_at);
+  const end = isLive(r) ? Date.now() : parseTs(r.finished_at || r.updated_at);
+  if (Number.isNaN(start) || Number.isNaN(end)) return null;
+  return Math.max(0, Math.floor((end - start) / 1000));
+};
+// The one duration renderer every row uses: live while running, final once finished.
+const runTime = (r) => human(runSeconds(r));
+// duration-helpers:end
+const secsAgo = (iso) => {
+  if (!iso) return null;
+  const t = parseTs(iso);
+  return Number.isNaN(t) ? null : Math.max(0, Math.floor((Date.now() - t) / 1000));
 };
 // Shared status colours across build/test/deploy/lock states.
 const STATE_CLASS = {
@@ -91,22 +104,24 @@ const buildRows = (runs) =>
             `<tr><td class="mono">${esc(r.id)}<div class="muted">${esc(r.kind)}</div></td>` +
             `<td>${link(["hosts", r.host_id], r.host_id)}</td>` +
             `<td>${stateBadge(r.status)}${lockStuckBadge(r.lock)}${r.exit_code != null ? `<div class="muted mono">exit ${r.exit_code}</div>` : ""}</td>` +
-            `<td class="muted">${human(runElapsed(r))}</td><td class="muted">${esc(summaryText(r.summary))}${materialWarning(r)}${
+            `<td class="muted">${runTime(r)}${isLive(r) ? `<div class="muted">running</div>` : ""}</td><td class="muted">${esc(summaryText(r.summary))}${materialWarning(r)}${
               runPhase(r) ? `<div class="muted">${esc(runPhase(r))}</div>` : ""
             }</td></tr>`,
         )
         .join("")}</table>`
     : `<p class="muted">No build runs.</p>`;
 
+// Deployments: created_at -> updated_at (a push is synchronous, so the duration is the copy+verify time).
 const deployRows = (ds) =>
   ds.length
-    ? `<table><tr><th>Deploy</th><th>Host</th><th>Status</th><th>Files</th><th>When</th></tr>${ds
+    ? `<table><tr><th>Deploy</th><th>Host</th><th>Status</th><th>Elapsed</th><th>Files</th><th>When</th></tr>${ds
         .map((d) => {
           const total = d.entries.length;
           const verified = d.entries.filter((e) => e.verified).length;
           return (
             `<tr><td class="mono">${esc(d.id)}${d.addon ? `<div class="muted">${esc(d.addon)}</div>` : ""}</td>` +
             `<td>${link(["hosts", d.host_id], d.host_id)}</td><td>${stateBadge(d.status)}</td>` +
+            `<td class="muted">${runTime(d)}</td>` +
             `<td class="muted"><strong>${verified}</strong>/${total} verified</td>` +
             `<td class="muted">${human(secsAgo(d.created_at))} ago</td></tr>`
           );
@@ -115,13 +130,15 @@ const deployRows = (ds) =>
     : `<p class="muted">No deployments.</p>`;
 
 // The test-run fields mirror the in-game TEST STATUS HUD strip: name / step / state / elapsed.
+// elapsed_sec is the server's own value (started_at -> finished_at, or now while running), so a
+// running session's row ticks with the poll and a finished one stays frozen.
 const testRows = (ts) =>
   ts.length
     ? `<table><tr><th>Name</th><th>Step</th><th>State</th><th>Elapsed</th><th>Host</th></tr>${ts
         .map(
           (t) =>
             `<tr><td class="mono">${esc(t.name)}</td><td>${esc(t.step || "—")}</td><td>${stateBadge(t.state)}</td>` +
-            `<td class="mono">${human(t.elapsed_sec)}</td><td>${t.host_id ? link(["hosts", t.host_id], t.host_id) : "—"}</td></tr>`,
+            `<td class="mono">${human(t.elapsed_sec)}${t.state === "running" ? `<div class="muted">running</div>` : ""}</td><td>${t.host_id ? link(["hosts", t.host_id], t.host_id) : "—"}</td></tr>`,
         )
         .join("")}</table>`
     : `<p class="muted">No test runs.</p>`;
@@ -324,12 +341,16 @@ function stepDag(steps) {
           .map(
             (s) =>
               `<div class="dag-node ${esc(s.status)}"><strong>${esc(s.title)}</strong>` +
-              `<div class="muted mono">${esc(s.id)} · ${esc(s.kind)} · ${esc(s.status)}${s.gate ? " · gate:" + esc(s.gate) : ""}</div></div>`,
+              `<div class="muted mono">${esc(s.id)} · ${esc(s.kind)} · ${esc(s.status)}${s.gate ? " · gate:" + esc(s.gate) : ""}</div>` +
+              `<div class="muted">${stepTime(s)}</div></div>`,
           )
           .join("")}</div>` + (i < cols.length - 1 ? `<div class="dag-arrow">→</div>` : ""),
     )
     .join("")}</div>`;
 }
+
+// A step's duration: updated_at - started_at (both from the API); '—' until the step has been touched.
+const stepTime = (s) => (runSeconds(s) == null ? `<span class="muted">—</span>` : `${runTime(s)}${isLive(s) ? " (running)" : ""}`);
 
 // --------------------------------------------------------------------- Activity
 // Shown when nothing has flowed through the build/test/deploy services yet — the failure mode that
@@ -598,6 +619,7 @@ const ROUTES = {
             `<td>${s.gate ? badge(s.gate, gateOk(s) ? "kind" : "warn") : `<span class="muted">—</span>`}</td>` +
             `<td>${evCell(s.id)}</td>` +
             `<td class="muted">${s.updated_at ? `${esc(human(secsAgo(s.updated_at)))} ago` : "—"}</td>` +
+            `<td class="muted">${stepTime(s)}</td>` +
             `<td class="mono muted">${s.depends_on.map(esc).join(", ") || "—"}</td>` +
             `<td>${esc((s.notes || "").slice(0, 300))}${s.artifacts.length ? `<div class="muted mono">${s.artifacts.map(esc).join("<br>")}</div>` : ""}</td></tr>`,
         )
@@ -619,7 +641,7 @@ const ROUTES = {
         <p class="muted">Agent hand-off: <code>continue project ${esc(p.id)}</code> (MCP tool <code>next_step</code>)</p>
         <h2>Step graph</h2>${stepDag(p.steps)}
         <h2>Steps (${esc(b.progress)})</h2>
-        <table><tr><th>Step</th><th>State</th><th>Gate</th><th>Evidence</th><th>Updated</th><th>Depends on</th><th>Notes / artifacts</th></tr>${stepRowsHtml}</table>
+        <table><tr><th>Step</th><th>State</th><th>Gate</th><th>Evidence</th><th>Updated</th><th>Duration</th><th>Depends on</th><th>Notes / artifacts</th></tr>${stepRowsHtml}</table>
         ${ready ? `<h2>Ready now</h2>${ready}` : ""}`;
     }
     const [projects, workflows] = await Promise.all([api("/projects"), api("/workflows")]);
@@ -636,9 +658,11 @@ const ROUTES = {
         <button type="submit">Start project</button><div class="result"></div></form>
       <h2>Workflows</h2>${workflows.map((w) => `<details><summary><strong>${esc(w.title)}</strong> <span class="mono muted">${esc(w.id)}</span> ${w.games.map((g) => badge(g)).join("")}</summary>
         <p>${esc(w.description)}</p><ol>${w.steps.map((s) => `<li class="mono">${esc(s)}</li>`).join("")}</ol></details>`).join("")}
-      <h2>All projects</h2>${projects.length ? `<table><tr><th>Project</th><th>Workflow</th><th>Status</th><th>Progress</th><th>Updated</th></tr>
+      <h2>All projects</h2>${projects.length ? `<table><tr><th>Project</th><th>Workflow</th><th>Status</th><th>Progress</th><th>Runtime</th><th>Updated</th></tr>
       ${projects.map((p) => `<tr><td>${link([state.game, "projects", p.id], p.title)}<div class="muted">${esc(p.goal.slice(0, 90))}</div></td>
-        <td class="mono">${esc(p.workflow)}</td><td>${statusBadge(p.status)}</td><td>${esc(p.progress)}</td><td class="muted">${esc(p.updated_at)}</td></tr>`).join("")}</table>`
+        <td class="mono">${esc(p.workflow)}</td><td>${statusBadge(p.status)}</td><td>${esc(p.progress)}</td>
+        <td class="muted">${runTime(p)}${isLive(p) ? `<div class="muted">running</div>` : ""}</td>
+        <td class="muted">${esc(p.updated_at)}</td></tr>`).join("")}</table>`
         : `<p class="muted">No projects yet.</p>`}`;
   },
 
@@ -720,7 +744,7 @@ const ROUTES = {
             `<div class="card" style="margin-bottom:8px">${stateBadge(b.status)} <span class="mono">${esc(b.id)}</span> on ${link(
               ["hosts", b.host_id],
               b.host_id,
-            )} <span class="muted">· ${esc(b.kind)} · up ${human(runElapsed(b))}</span>${materialWarning(b)}${
+            )} <span class="muted">· ${esc(b.kind)} · up ${runTime(b)}</span>${materialWarning(b)}${
               runPhase(b) ? `<div class="muted mono">${esc(runPhase(b))}</div>` : `<div class="muted mono">${esc(b.command)}</div>`
             }</div>`,
           ),
@@ -765,7 +789,8 @@ const ROUTES = {
     return `<h1>Activity</h1><p class="muted">What is running right now across all hosts — build runs, test runs and deployments, without SSHing anywhere.
       This view is <strong>service-fed</strong>: rows appear when work goes through the s2docs build/test/deploy services
       (MCP <code>build_start</code>/<code>test_start</code>/<code>deploy_push</code>, or the CLI), <em>not</em> from any CS2 running anywhere.
-      Test-run rows mirror the in-game HUD strip (name / step / state / elapsed). Auto-refreshes every 5 s while a run is active, 15 s when idle.</p><div id="live">${await body()}</div>`;
+      Test-run rows mirror the in-game HUD strip (name / step / state / elapsed). Every row also carries its
+      <strong>run time</strong>: live while a run is going, the final duration once it finishes. Auto-refreshes every 5 s while a run is active, 15 s when idle.</p><div id="live">${await body()}</div>`;
   },
 
   async validate() {
