@@ -15,6 +15,99 @@ const firstLine = (s) => (s || "").split("\n")[0];
 const rich = (s) => esc(s).replace(/&lt;br\s*\/?&gt;/gi, "<br>");
 const stripTags = (s) => String(s).replace(/<[^>]+>/g, " ");
 
+// ---- Hosts & Activity helpers (ops/visibility pages) ----------------------
+const parseTs = (iso) => {
+  const s = String(iso);
+  return Date.parse(/[Zz]|[+-]\d\d:?\d\d$/.test(s) ? s : s + "Z");
+};
+const secsAgo = (iso) => {
+  if (!iso) return null;
+  const t = parseTs(iso);
+  return Number.isNaN(t) ? null : Math.max(0, Math.floor((Date.now() - t) / 1000));
+};
+const human = (s) => {
+  if (s == null) return "—";
+  s = Math.max(0, Math.round(s));
+  if (s < 60) return `${s}s`;
+  if (s < 3600) return `${Math.floor(s / 60)}m${String(s % 60).padStart(2, "0")}s`;
+  return `${Math.floor(s / 3600)}h${String(Math.floor((s % 3600) / 60)).padStart(2, "0")}m`;
+};
+const runElapsed = (r) => {
+  const start = parseTs(r.created_at);
+  const end = r.status === "running" || r.status === "queued" ? Date.now() : parseTs(r.updated_at);
+  const secs = Math.floor((end - start) / 1000);
+  return Number.isNaN(secs) ? null : Math.max(0, secs);
+};
+// Shared status colours across build/test/deploy/lock states.
+const STATE_CLASS = {
+  succeeded: "kind", verified: "kind", pass: "kind", running: "kind", claimed: "kind",
+  queued: "", idle: "", pushed: "", released: "", failed: "warn", cancelled: "warn", fail: "warn", stale: "warn",
+};
+const stateBadge = (s) => badge(s, STATE_CLASS[s] ?? "");
+const summaryText = (s) => Object.entries(s || {}).map(([k, v]) => `${v} ${k}`).join(", ") || "—";
+const gpuOf = (h) => {
+  const gpus = h.facts?.probe?.gpu || h.facts?.gpu || [];
+  return gpus.map((g) => `${g.name || "gpu"}${g.util_pct != null ? ` (${g.util_pct}%)` : ""}`).join(", ") || "—";
+};
+const lockCell = (lock) =>
+  !lock
+    ? `<span class="muted">free</span>`
+    : `${badge(lock.owner, lock.fresh ? "kind" : "warn")}<div class="muted">${lock.fresh ? "fresh" : "STALE"} · heartbeat ${human(
+        lock.age_sec,
+      )} ago · ttl ${human(lock.ttl_sec)}</div>`;
+
+const lockRows = (evs) =>
+  evs.length
+    ? `<table><tr><th>When</th><th>Event</th><th>Owner</th><th>Detail</th></tr>${evs
+        .map(
+          (e) =>
+            `<tr><td class="muted">${esc(e.ts)}</td><td>${stateBadge(e.event)}</td><td class="mono">${esc(e.owner)}</td>` +
+            `<td class="muted">${esc(e.detail || "")}</td></tr>`,
+        )
+        .join("")}</table>`
+    : `<p class="muted">No lock history.</p>`;
+
+const buildRows = (runs) =>
+  runs.length
+    ? `<table><tr><th>Run</th><th>Host</th><th>Status</th><th>Elapsed</th><th>Summary</th></tr>${runs
+        .map(
+          (r) =>
+            `<tr><td class="mono">${esc(r.id)}<div class="muted">${esc(r.kind)}</div></td>` +
+            `<td>${link(["hosts", r.host_id], r.host_id)}</td>` +
+            `<td>${stateBadge(r.status)}${r.exit_code != null ? `<div class="muted mono">exit ${r.exit_code}</div>` : ""}</td>` +
+            `<td class="muted">${human(runElapsed(r))}</td><td class="muted">${esc(summaryText(r.summary))}</td></tr>`,
+        )
+        .join("")}</table>`
+    : `<p class="muted">No build runs.</p>`;
+
+const deployRows = (ds) =>
+  ds.length
+    ? `<table><tr><th>Deploy</th><th>Host</th><th>Status</th><th>Files</th><th>When</th></tr>${ds
+        .map((d) => {
+          const total = d.entries.length;
+          const verified = d.entries.filter((e) => e.verified).length;
+          return (
+            `<tr><td class="mono">${esc(d.id)}${d.addon ? `<div class="muted">${esc(d.addon)}</div>` : ""}</td>` +
+            `<td>${link(["hosts", d.host_id], d.host_id)}</td><td>${stateBadge(d.status)}</td>` +
+            `<td class="muted"><strong>${verified}</strong>/${total} verified</td>` +
+            `<td class="muted">${human(secsAgo(d.created_at))} ago</td></tr>`
+          );
+        })
+        .join("")}</table>`
+    : `<p class="muted">No deployments.</p>`;
+
+// The test-run fields mirror the in-game TEST STATUS HUD strip: name / step / state / elapsed.
+const testRows = (ts) =>
+  ts.length
+    ? `<table><tr><th>Name</th><th>Step</th><th>State</th><th>Elapsed</th><th>Host</th></tr>${ts
+        .map(
+          (t) =>
+            `<tr><td class="mono">${esc(t.name)}</td><td>${esc(t.step || "—")}</td><td>${stateBadge(t.state)}</td>` +
+            `<td class="mono">${human(t.elapsed_sec)}</td><td>${t.host_id ? link(["hosts", t.host_id], t.host_id) : "—"}</td></tr>`,
+        )
+        .join("")}</table>`
+    : `<p class="muted">No test runs.</p>`;
+
 // Minimal Markdown renderer for docs: escape first, then add a small safe subset of formatting.
 function markdown(src) {
   const blocks = [];
@@ -56,8 +149,11 @@ async function api(path, params = {}) {
 const SECTIONS = [
   ["search", "Search"], ["convars", "ConVars & Commands"], ["entities", "Entities (Hammer)"],
   ["schema", "Schema"], ["events", "Game Events"], ["script", "cs_script API"], ["examples", "Examples"],
-  ["pulse", "Pulse"], ["docs", "Docs (source2.wiki)"], ["validate", "Validate"], ["projects", "Projects"], ["diff", "Build Diff"], ["prompts", "Prompts"], ["stats", "Stats"],
+  ["pulse", "Pulse"], ["docs", "Docs (source2.wiki)"], ["validate", "Validate"], ["projects", "Projects"],
+  ["hosts", "Hosts"], ["activity", "Activity"], ["diff", "Build Diff"], ["prompts", "Prompts"], ["stats", "Stats"],
 ];
+// Pages that are about the whole install (hosts/runs), not one game — routed as #/<section>, no game prefix.
+const GLOBAL_SECTIONS = new Set(["hosts", "activity"]);
 
 function parseHash() {
   const [path, query = ""] = location.hash.replace(/^#\/?/, "").split("?");
@@ -77,7 +173,8 @@ function renderNav(active) {
   const g = state.games.find((x) => x.id === state.game);
   $("#nav").innerHTML = SECTIONS.map(([id, label]) => {
     const disabled = (id === "script" || id === "examples") && !g?.script_api;
-    return `<a href="#/${enc(state.game)}/${id}" class="${id === active ? "active" : ""} ${disabled ? "disabled" : ""}">${esc(label)}</a>`;
+    const href = GLOBAL_SECTIONS.has(id) ? `#/${id}` : `#/${enc(state.game)}/${id}`;
+    return `<a href="${href}" class="${id === active ? "active" : ""} ${disabled ? "disabled" : ""}">${esc(label)}</a>`;
   }).join("");
   $("#build").textContent = g?.current_build ? `build ${g.current_build} · ${g.patch_version || ""}` : "not indexed";
 }
@@ -91,17 +188,35 @@ async function route() {
   }
   const [section = "search", ...rest] = parts;
   renderNav(section);
+  clearInterval(liveTimer); // any auto-refresh from the previous page stops now
+  liveTimer = null;
   if (section === "search" && params.q !== undefined) $("#q").value = params.q;
   view.innerHTML = `<p class="muted">Loading…</p>`;
   try {
     const handler = ROUTES[section] || ROUTES.search;
     view.innerHTML = await handler(rest, params);
     bindFilters(section, rest, params);
+    // A live page (Hosts/Activity) parked a render fn in pendingLive; refill its #live region on a timer
+    // so the strip updates without re-rendering the header or jumping the scroll position.
+    if (pendingLive) {
+      const { selector, render, ms } = pendingLive;
+      pendingLive = null;
+      liveTimer = setInterval(async () => {
+        const el = view.querySelector(selector);
+        if (!el) { clearInterval(liveTimer); return; }
+        try { el.innerHTML = await render(); } catch { /* keep the last good view */ }
+      }, ms);
+    }
   } catch (e) {
     view.innerHTML = `<h1>Error</h1><p class="err">${esc(e.message)}</p>`;
   }
   window.scrollTo(0, 0);
 }
+
+// Auto-refresh plumbing for the Hosts and Activity pages (a live render fn for a #live region).
+let liveTimer = null;
+let pendingLive = null;
+const liveBody = (selector, render, ms = 5000) => { pendingLive = { selector, render, ms }; };
 
 // Filters: <form class="filters"> whose inputs map 1:1 to hash params.
 function bindFilters(section, rest, params) {
@@ -411,6 +526,87 @@ const ROUTES = {
         : `<p class="muted">No projects yet.</p>`}`;
   },
 
+  // Game-independent: the host registry + live lock state. Read-only (visibility while tests run).
+  async hosts([hostId]) {
+    if (hostId) {
+      const body = async () => {
+        const [h, locks, builds, deploys, tests] = await Promise.all([
+          api(`/hosts/${enc(hostId)}`),
+          api(`/hosts/${enc(hostId)}/locks`, { limit: 20 }),
+          api("/builds", { host_id: hostId }),
+          api("/deploys", { host_id: hostId }),
+          api("/test-runs", { host_id: hostId }),
+        ]);
+        const facts = h.facts && Object.keys(h.facts).length ? `<details><summary>Facts (${Object.keys(h.facts).length} top-level keys)</summary><pre>${esc(JSON.stringify(h.facts, null, 2))}</pre></details>` : "";
+        return `<p>${h.shell ? badge(h.shell) : ""}${h.os ? badge(h.os) : ""}${h.hostname ? badge(h.hostname) : ""}<span class="mono muted"> ${esc(h.ssh_target)}</span></p>
+          <p>${lockCell(h.lock)}<span class="muted"> · probed ${h.probed_at ? esc(human(secsAgo(h.probed_at))) + " ago" : "never"}</span></p>
+          ${h.notes ? `<p class="muted">${esc(h.notes)}</p>` : ""}
+          ${facts}
+          <h2>Lock history</h2>${lockRows(locks)}
+          <h2>Recent builds (${builds.length})</h2>${buildRows(builds.slice(0, 15))}
+          <h2>Recent deployments (${deploys.length})</h2>${deployRows(deploys.slice(0, 15))}
+          <h2>Recent test runs (${tests.length})</h2>${testRows(tests.slice(0, 15))}`;
+      };
+      liveBody("#live", body);
+      return `<p>${link(["hosts"], "← Hosts")}</p><h1 class="mono">${esc(hostId)}</h1><div id="live">${await body()}</div>`;
+    }
+    const body = async () => {
+      const hosts = await api("/hosts");
+      if (!hosts.length)
+        return `<p class="muted">No hosts registered. Register one over MCP (<code>register_host</code>) or the CLI (<code>s2docs host register …</code>).</p>`;
+      return `<table><tr><th>Host</th><th>Shell</th><th>GPU</th><th>Probed</th><th>Lock</th></tr>${hosts
+        .map(
+          (h) =>
+            `<tr><td>${link(["hosts", h.id], h.id)}<div class="muted mono">${esc(h.hostname || h.ssh_target || "")}</div></td>` +
+            `<td>${h.shell ? badge(h.shell) : "—"}${h.os ? badge(h.os) : ""}</td><td>${esc(gpuOf(h))}</td>` +
+            `<td class="muted">${h.probed_at ? esc(human(secsAgo(h.probed_at))) + " ago" : "never"}</td>` +
+            `<td>${lockCell(h.lock)}</td></tr>`,
+        )
+        .join("")}</table>`;
+    };
+    liveBody("#live", body);
+    return `<h1>Hosts</h1><p class="muted">Test/build hosts and who is driving each right now (owner, fresh vs stale, heartbeat age). Auto-refreshes every 5 s. Click a host for its facts, lock history and recent activity.</p><div id="live">${await body()}</div>`;
+  },
+
+  // Game-independent: the live view a person watches to answer "what is running right now".
+  async activity() {
+    const body = async () => {
+      const [builds, tests, deploys, current] = await Promise.all([
+        api("/builds"),
+        api("/test-runs"),
+        api("/deploys"),
+        api("/test-runs/current").catch(() => null),
+      ]);
+      const activeBuilds = builds.filter((b) => b.status === "running" || b.status === "queued");
+      const now = current
+        ? `<div class="card"><strong>TEST</strong> ${stateBadge(current.state)} ${esc(current.name)} — <span class="mono">${esc(
+            current.step || "(no step)",
+          )}</span> <span class="muted">· ${human(current.elapsed_sec)} · host ${esc(current.host_id || "—")}${
+            current.project_id ? ` · ${esc(current.project_id)}` : ""
+          }</span></div>`
+        : `<p class="muted">No active test run.</p>`;
+      const activeList = activeBuilds.length
+        ? activeBuilds
+            .map(
+              (b) =>
+                `<div class="card" style="margin-bottom:8px">${stateBadge(b.status)} <span class="mono">${esc(b.id)}</span> on ${link(
+                  ["hosts", b.host_id],
+                  b.host_id,
+                )} <span class="muted">· ${esc(b.kind)} · ${human(runElapsed(b))}</span><div class="muted mono">${esc(
+                  b.command,
+                )}</div></div>`,
+            )
+            .join("")
+        : `<p class="muted">No active build runs.</p>`;
+      return `<h2>Now</h2>${now}<h3 class="muted">Active builds</h3>${activeList}
+        <h2>Test runs (${tests.length})</h2>${testRows(tests.slice(0, 20))}
+        <h2>Build runs (${builds.length})</h2>${buildRows(builds.slice(0, 20))}
+        <h2>Deployments (${deploys.length})</h2>${deployRows(deploys.slice(0, 20))}`;
+    };
+    liveBody("#live", body);
+    return `<h1>Activity</h1><p class="muted">Live view of build runs, test runs and deployments across all hosts — what is running right now, without SSHing anywhere. Test-run rows show the same fields as the in-game HUD strip (name / step / state / elapsed). Auto-refreshes every 5 s.</p><div id="live">${await body()}</div>`;
+  },
+
   async validate() {
     const g = state.games.find((x) => x.id === state.game);
     const scriptForm = g?.script_api ? `<h2>cs_script</h2>
@@ -542,6 +738,8 @@ async function boot() {
     const { parts, params } = parseHash();
     if (state.games.some((g) => g.id === parts[0])) parts.shift();
     state.game = e.target.value;
+    // Hosts/Activity are install-wide, not per game — stay on them when the game changes.
+    if (GLOBAL_SECTIONS.has(parts[0])) { go(parts); return; }
     // Keep the section (and search query) but drop detail paths that may not exist in the other game.
     go([state.game, parts[0] || "search"], parts[0] === "search" || !parts[0] ? params : {});
   });

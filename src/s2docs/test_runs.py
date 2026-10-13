@@ -75,13 +75,15 @@ def current(db: Database) -> m.TestRun | None:
     return _row(row) if row else None
 
 
-def list_runs(db: Database, *, state: str | None = None) -> list[m.TestRun]:
+def list_runs(db: Database, *, state: str | None = None, host_id: str | None = None) -> list[m.TestRun]:
     if state is not None and state not in STATES:
         raise TestRunError(f"state must be one of {STATES}")
     with db.reader() as conn:
         rows = conn.execute(
-            _SELECT + " WHERE (? IS NULL OR state = ?) ORDER BY updated_at DESC, created_at DESC",
-            (state, state),
+            _SELECT
+            + " WHERE (? IS NULL OR state = ?) AND (? IS NULL OR host_id = ?)"
+            + " ORDER BY updated_at DESC, created_at DESC",
+            (state, state, host_id, host_id),
         ).fetchall()
     return [_row(r) for r in rows]
 

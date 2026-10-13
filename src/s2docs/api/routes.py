@@ -360,6 +360,13 @@ def get_host(host_id: str, db: Db):
     return hosts.get_host(db, host_id)
 
 
+@router.get("/hosts/{host_id}/locks", response_model=list[m.HostLockEvent])
+def host_locks(host_id: str, db: Db, limit: Annotated[int, Query(ge=1, le=200)] = 20):
+    """Recent claim/takeover/release events for a host (newest first) — the Hosts page's lock history."""
+    hosts.get_host(db, host_id)  # 404 on an unknown host
+    return hosts.lock_history(db, host_id, limit=limit)
+
+
 @router.put("/hosts/{host_id}", response_model=m.Host)
 def register_host(host_id: str, body: HostIn, db: Db):
     return hosts.register_host(db, host_id, **body.model_dump())
@@ -517,8 +524,8 @@ def start_test_run(body: TestRunIn, db: Db):
 
 
 @router.get("/test-runs", response_model=list[m.TestRun])
-def list_test_runs(db: Db, state: m.TestRunState | None = None):
-    return test_runs.list_runs(db, state=state)
+def list_test_runs(db: Db, state: m.TestRunState | None = None, host_id: str | None = None):
+    return test_runs.list_runs(db, state=state, host_id=host_id)
 
 
 @router.get("/test-runs/current", response_model=m.TestRun)

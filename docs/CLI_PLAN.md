@@ -1,9 +1,9 @@
 # s2docs CLI & agent-interaction plan
 
 Status: Phases 1 (host registry + locks), 2 (native MCP registration), 3 (build runs + deploy
-registry), **4 (evidence store) and 5 (test-run records) implemented**. Scope: the `s2docs` command
-surface and how agents, scripts and CI should reach s2docs. This plan defines the CLI/MCP/HTTP
-shapes the services must expose.
+registry), 4 (evidence store), **5 (test-run records) and 6 (web-UI visibility pages + `cs2_live_test`)
+implemented**. Scope: the `s2docs` command surface and how agents, scripts and CI should reach s2docs.
+This plan defines the CLI/MCP/HTTP shapes the services must expose.
 
 ### Phase 3 implementation notes (where this plan was ambiguous)
 - **`build start` needs a command.** The plan lists `build start <addon> [--map M]`, but a plain
@@ -38,6 +38,29 @@ shapes the services must expose.
   from `started_at` (`finished_at` once terminal). The CLI is `evidence add|list|show` and
   `test start|step|finish|clear|status|list`; MCP/HTTP mirror it. `test step`'s text is positional
   on the CLI, `--note`/`--data` carry prose and structured detail.
+
+### Phase 6 implementation notes (visibility + a live-test workflow)
+- **The visibility layer is the SPA, not the CLI.** The Hosts and Activity pages are hash routes
+  (`#/hosts`, `#/activity`) in the existing vanilla-JS app — no new daemon, no framework. They are
+  read-only and auto-refresh every 5 s: a `#live` region is refilled on a timer so the header and
+  scroll position don't move. This answers "what is running right now" without an SSH session, which
+  is what the in-game HUD strip does on the machine itself.
+- **Lock history needed a table, not a CLI command.** `host_locks` is one row per host, deleted on
+  release, so it can't answer "who held this host and when". Migration `0007` adds
+  `host_lock_events`; `claim_host`/`release_host` append a `claimed`/`released` row (with a detail on
+  a stale or forced takeover), exposed at `GET /api/hosts/{id}/locks`. Events are lock mutations, not
+  heartbeats, so the volume is low.
+- **Additive API changes only.** `/api/test-runs` gained an optional `host_id` filter (the Hosts
+  detail page needs runs per host); everything else the pages read already existed.
+- **`cs2_live_test` reuses the existing gates and adds two.** The workflow is `claim → probe →
+  deploy → test → release` (`needs_addon=False`, generic inputs `host_id` / `deploy_manifest` /
+  `test_description`). New server-side gates: `host_claimed` (the host lock is held by this
+  project's owner, `project:<pid>`) and `deploy_verified` (the deployment named in the step's
+  artifacts, else the host's latest, is `verified` in the deploy registry) — both re-checked by
+  `engine._check_gate`, never trusted from the caller. The `test` step's gate is the existing
+  `evidence` gate. `start()` now also renders `$project_id` into step instructions so the workflow
+  can name its own lock owner. Since the project holds the lease for the whole run, `test_start` is
+  called *without* `host_id` (a second claim would conflict).
 
 ## 0. Principle: one service layer, three thin facades
 
@@ -272,6 +295,10 @@ Matches the parallel service work; each phase ships service → MCP tool → CLI
 5. **Test-run tool.** *(implemented)* `TestRun` service; `test start|step|finish` (+ `clear`,
    `status`, `list`); holds the host lock for the whole session, writes an evidence record on
    `finish`. MCP front door for in-game testing; fields mirror the TEST STATUS HUD strip.
+6. **Visibility pages + live-test workflow.** *(implemented)* Hosts (`#/hosts`) and Activity
+   (`#/activity`) pages in the SPA; `host_lock_events` (migration `0007`) + `GET
+   /api/hosts/{id}/locks` for lock history; the `cs2_live_test` workflow with the `host_claimed` and
+   `deploy_verified` gates. No new CLI verb — this phase is the read side the CLI already feeds.
 
 ## 7. Non-goals / open questions
 

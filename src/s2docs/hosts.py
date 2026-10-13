@@ -94,10 +94,30 @@ def ssh_argv(host: m.Host) -> list[str]:
     return argv
 
 
+def _record_lock_event(
+    conn: sqlite3.Connection, host_id: str, owner: str, event: str, detail: str | None = None
+) -> None:
+    conn.execute(
+        "INSERT INTO host_lock_events (host_id, owner, event, detail) VALUES (?, ?, ?, ?)",
+        (host_id, owner, event, detail),
+    )
+
+
 def list_hosts(db: Database) -> list[m.Host]:
     with db.writer() as conn:
         rows = conn.execute("SELECT * FROM hosts ORDER BY id").fetchall()
         return [_load(conn, r["id"]) for r in rows]
+
+
+def lock_history(db: Database, host_id: str, *, limit: int = 20) -> list[m.HostLockEvent]:
+    """Recent lock mutations for a host (newest first) — the Hosts page's lock history."""
+    _check_id(host_id)
+    with db.reader() as conn:
+        rows = conn.execute(
+            "SELECT * FROM host_lock_events WHERE host_id = ? ORDER BY ts DESC, id DESC LIMIT ?",
+            (host_id, limit),
+        ).fetchall()
+    return [m.HostLockEvent(**dict(r)) for r in rows]
 
 
 def get_host(db: Database, host_id: str) -> m.Host:
@@ -156,6 +176,10 @@ def claim_host(
                 f"(heartbeat {lock['age']}s ago, ttl {lock['ttl_sec']}s); "
                 "heartbeat it, wait for expiry, or pass force=true to take over"
             )
+        detail = None
+        if lock is not None and lock["owner"] != owner:
+            how = "forced takeover" if lock["age"] <= lock["ttl_sec"] else "took over stale lock"
+            detail = f"{how} from {lock['owner']!r} (heartbeat {lock['age']}s ago)"
         conn.execute(
             """
             INSERT INTO host_locks (host_id, owner, ttl_sec) VALUES (?, ?, ?)
@@ -167,6 +191,7 @@ def claim_host(
             """,
             (host_id, owner, ttl_sec),
         )
+        _record_lock_event(conn, host_id, owner, "claimed", detail)
         return _load(conn, host_id).lock  # type: ignore[return-value]
 
 
@@ -196,6 +221,8 @@ def release_host(db: Database, host_id: str, owner: str, *, force: bool = False)
                 f"host {host_id} is locked by {lock['owner']!r}, not {owner!r}; pass force=true to override"
             )
         conn.execute("DELETE FROM host_locks WHERE host_id = ?", (host_id,))
+        detail = f"released by {owner}" if owner != lock["owner"] else None
+        _record_lock_event(conn, host_id, lock["owner"], "released", detail)
         return f"released {host_id} (was held by {lock['owner']})"
 
 

@@ -15,7 +15,7 @@ import secrets
 from pathlib import Path
 from string import Template
 
-from s2docs import evidence
+from s2docs import deploys, evidence, hosts
 from s2docs import models as m
 from s2docs.build import workspace as ws
 from s2docs.build.validate_cfg import validate_cfg
@@ -28,6 +28,9 @@ from s2docs.prompts import PromptError, render_prompt
 
 STATUSES = ("pending", "in_progress", "done", "skipped", "blocked")
 _SETTLED = ("done", "skipped")
+# Deploy ids are 'd-' + 8 hex chars (deploys.push); artifacts carry them so the deploy_verified gate
+# knows which deployment to check.
+_DEPLOY_ID_RE = re.compile(r"^d-[0-9a-f]{8}$")
 
 
 class OrchestrationError(ValueError):
@@ -129,6 +132,9 @@ class Orchestrator:
         values.update(goal=goal, game=game, game_name=GAMES[game].name, addon=addon or "")
 
         pid = "p-" + secrets.token_hex(4)
+        # Available to step instructions as $project_id, so a workflow can tell the agent which owner
+        # to claim a host as (e.g. owner 'project:<id>') and gates can re-derive it.
+        values["project_id"] = pid
         with self.db.writer() as conn, conn:
             conn.execute(
                 "INSERT INTO projects (id, workflow, title, goal, game, addon, inputs) VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -362,6 +368,54 @@ class Orchestrator:
                     f"step {step_id} needs evidence: record at least one non-note evidence row for it with the "
                     "`add_evidence` tool (kinds: console_transcript, file_hash, pixel_diff, screenshot, other) "
                     "before marking it done — notes/artifacts alone no longer satisfy the evidence gate"
+                )
+            return
+        if gate == "host_claimed":
+            # The step is done only when this project actually holds the host lease. The owner
+            # convention ('project:<id>') is what build/test leases must not collide with.
+            host_id = (project.inputs or {}).get("host_id")
+            if not host_id:
+                raise GateFailed("gate host_claimed needs a `host_id` input on the project")
+            owner = f"project:{project.id}"
+            try:
+                host = hosts.get_host(self.db, host_id)
+            except hosts.HostError as exc:
+                raise GateFailed(str(exc)) from exc
+            lock = host.lock
+            if lock is None:
+                raise GateFailed(
+                    f"host {host_id} is not locked: claim it with claim_host(host_id='{host_id}', "
+                    f"owner='{owner}') before marking this step done"
+                )
+            if lock.owner != owner:
+                raise GateFailed(
+                    f"host {host_id} is locked by {lock.owner!r}, not this project ({owner!r}); "
+                    f"re-claim it as owner '{owner}'"
+                )
+            return
+        if gate == "deploy_verified":
+            # Wire the gate to the deploy registry: a deployment to the project's host must be `verified`
+            # (deploy_push re-checked the MD5s on the host). The deploy id is taken from the step's
+            # artifacts when present, else the host's latest deployment.
+            host_id = (project.inputs or {}).get("host_id")
+            if not host_id:
+                raise GateFailed("gate deploy_verified needs a `host_id` input on the project")
+            deploy_id = next((a for a in artifacts if _DEPLOY_ID_RE.match(a)), None)
+            try:
+                deployment = (
+                    deploys.get_deployment(self.db, deploy_id)
+                    if deploy_id
+                    else deploys.latest_for_host(self.db, host_id)
+                )
+            except NotFound as exc:
+                raise GateFailed(
+                    f"no deployment to verify for host {host_id}: push one with deploy_push and record its "
+                    "id as an artifact of this step"
+                ) from exc
+            if deployment.status != "verified":
+                raise GateFailed(
+                    f"deployment {deployment.id} on {host_id} is {deployment.status!r}, not 'verified' — "
+                    "re-run deploy_push (or deploy_verify) until the host MD5s match, then mark this done"
                 )
             return
         if not project.addon:

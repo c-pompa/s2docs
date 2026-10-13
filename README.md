@@ -3,7 +3,7 @@
 One searchable place for the undocumented surface of Valve's **Source 2** games (Counter-Strike 2, Deadlock).
 Everything is extracted from each game build, then served three ways:
 
-- **Web UI**: a light vanilla-JS SPA for browsing and searching.
+- **Web UI**: a light vanilla-JS SPA for browsing and searching, plus operations pages (**Hosts**, **Activity**) for watching tests on remote hosts without SSHing anywhere.
 - **JSON API**: FastAPI, with OpenAPI docs at `/docs`.
 - **MCP server**: tools, prompts and resources so coding agents can write cs_script, Hammer logic, configs and mods using verified names.
 
@@ -50,6 +50,15 @@ uv run s2docs mcp                     # MCP over stdio
 ```
 
 Environment variables: `S2DOCS_DATA_DIR` (default `./data`) and `S2DOCS_DB` (default `$S2DOCS_DATA_DIR/s2docs.db`).
+
+## Web UI
+
+`s2docs serve` mounts a small vanilla-JS SPA at `/` (hash routes, no framework, no build step). Besides the browse/search sections (`#/<game>/…`) it has two install-wide operations pages for watching work on remote hosts:
+
+- **Hosts** (`#/hosts`) — the registry plus live lock state: shell, GPU (from the last probe), how long ago it was probed, and the current lock owner with fresh/stale + heartbeat age. Clicking a host opens `#/hosts/<id>` with its facts JSON, **lock history** (claim / stale-takeover / release events) and its recent builds, deployments and test runs. Read-only; auto-refreshes every 5 s while open.
+- **Activity** (`#/activity`) — the page to watch instead of tailing logs: the current test run (the same `name / step / state / elapsed` fields as the in-game TEST STATUS HUD strip), active and recent build runs (status, host, elapsed, summary counts) and recent deployments (host, verified/total). Auto-refreshes every 5 s.
+
+Both pages read the existing JSON API (`/api/hosts`, `/api/hosts/{id}/locks`, `/api/builds`, `/api/deploys`, `/api/test-runs`); nothing there can mutate a host or a run.
 
 ## MCP
 
@@ -103,7 +112,7 @@ claude mcp add --transport http s2docs http://127.0.0.1:8000/mcp
 | `probe_host` | SSH-probe a host and store its facts (`scripts/windows/probe_host.ps1`) |
 | `claim_host`, `heartbeat_host`, `release_host` | Server-side host locks with owner + TTL + heartbeat. A fresh lock blocks other owners; a stale lock (crashed worker) is taken over automatically. Check `list_hosts` before driving any host |
 
-The same operations exist on the CLI (`s2docs host list|show|register|probe|lock|heartbeat|unlock`, JSON out, exit 2 = locked) and the HTTP API (`/api/hosts`, `/api/hosts/{id}/lock`, …; 409 = locked).
+The same operations exist on the CLI (`s2docs host list|show|register|probe|lock|heartbeat|unlock`, JSON out, exit 2 = locked) and the HTTP API (`/api/hosts`, `/api/hosts/{id}/lock`, …; 409 = locked; `/api/hosts/{id}/locks` returns the claim/release audit trail the Hosts page shows).
 
 | Build tools | |
 |---|---|
@@ -136,7 +145,7 @@ CLI: `s2docs evidence add|list|show` and `s2docs test start|step|finish|clear|st
 
 | Orchestration tools | |
 |---|---|
-| `list_workflows` | Multi-step recipes: `cs2_script_feature`, `cs2_camera_addon`, `cs2_game_template`, `server_config`, or `custom` |
+| `list_workflows` | Multi-step recipes: `cs2_script_feature`, `cs2_camera_addon`, `cs2_game_template`, `cs2_live_test`, `server_config`, or `custom` |
 | `start_project` | Creates a persistent project (stored in SQLite) and returns the first ready step(s) |
 | `next_step` | Ready steps, each with instructions, the tools to use, rendered prompt text, and its gate |
 | `update_step` | `in_progress` / `done` / `blocked` / `skipped`, with notes and artifacts. `done` runs the step's gate on the server |
@@ -151,7 +160,7 @@ start_project ─▶ brief (ready steps + tools + rendered prompt) ─▶ agent 
                      └──────────────── next ready steps (dependency DAG) ◀──────┘
 ```
 
-- **Gates** are checked on the server, not taken on trust: `scripts_typecheck` re-runs `tsc` on every `.js` file in the addon, `cfgs_valid` validates every `.cfg`, `addon_exists`, and `evidence` — which requires at least one stored non-note evidence row for the step (via `add_evidence`); notes and artifacts alone no longer pass. A failed gate returns the exact errors (HTTP 409 / MCP tool error).
+- **Gates** are checked on the server, not taken on trust: `scripts_typecheck` re-runs `tsc` on every `.js` file in the addon, `cfgs_valid` validates every `.cfg`, `addon_exists`, and `evidence` — which requires at least one stored non-note evidence row for the step (via `add_evidence`); notes and artifacts alone no longer pass. `cs2_live_test` adds `host_claimed` (the project really holds the host lease, owner `project:<id>`) and `deploy_verified` (a deployment to the host is recorded as `verified` in the deploy registry). A failed gate returns the exact errors (HTTP 409 / MCP tool error).
 - **Steps form a DAG.** Independent steps (e.g. camera script and test cfg) become ready together, so a client can run them in parallel or hand them to subagents.
 - **Projects persist.** Any session can pick one up with `next_step <id>`, and the web UI's **Projects** page shows progress and can start projects or move steps.
 - Steps are snapshotted when a project starts, so editing `orchestration/workflows.py` never changes a project in flight.
@@ -179,7 +188,7 @@ src/s2docs/
   api/                    FastAPI app + routes (MCP mounted at /mcp, SPA at /)
   build/                  validate_script (tsc), validate_cfg, workspace (addon files)
   orchestration/          workflows.py (registry) + engine.py (projects, DAG, gates)
-  hosts.py                host registry + server-side leases (claim/heartbeat/release, TTL expiry)
+  hosts.py                host registry + server-side leases (claim/heartbeat/release, TTL expiry) + lock-event audit (host_lock_events) for the Hosts page
   builds.py               server-owned build runs (SSH launch, UTF-16 log tail, host lease)
   deploys.py              deployment registry (scp push + Get-FileHash MD5 verification)
   evidence.py             structured evidence store — what the `evidence` gate checks (kind/ref/data)
@@ -198,7 +207,7 @@ src/s2docs/
 ## Development
 
 ```bash
-uv run pytest -q                     # 98 tests: parsers, repository, API, MCP, build tools, orchestration, hosts, builds/deploys, evidence, test runs
+uv run pytest -q                     # 111 tests: parsers, repository, API, MCP, build tools, orchestration, hosts, builds/deploys, evidence, test runs, web-UI visibility
 uv run ruff check src tests && uv run ruff format src tests
 uv run python scripts/check_frontend.py   # renders every SPA route in headless Chrome (server on :8765; extra routes as args)
 ```

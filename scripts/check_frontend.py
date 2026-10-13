@@ -33,7 +33,9 @@ ROUTES = [
     "cs2/validate",
     "deadlock/validate",
     "cs2/projects",
-    *sys.argv[2:],  # extra routes, e.g. cs2/projects/<id>
+    "hosts",
+    "activity",
+    *sys.argv[2:],  # extra routes, e.g. cs2/projects/<id>, hosts/<host-id>
 ]
 ROW = re.compile(r'<tr|class="hit"|class="card"')
 

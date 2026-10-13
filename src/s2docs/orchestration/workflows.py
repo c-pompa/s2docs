@@ -16,6 +16,10 @@ GATES = {
     "cfgs_valid": "every cfg/**/*.cfg file in the addon passes validate_cfg with 0 errors",
     "evidence": "at least one non-note evidence row for the step must be recorded via add_evidence "
     "(console_transcript / file_hash / pixel_diff / screenshot / other) — notes alone don't pass",
+    "host_claimed": "the project's `host_id` input is locked by this project's owner "
+    "('project:<id>') — claimed with claim_host, checked server-side",
+    "deploy_verified": "the deployment recorded for the project's `host_id` (the id in the step's "
+    "artifacts, else the host's latest deployment) is `verified` — MD5s re-checked on the host by deploy_push",
 }
 
 
@@ -463,6 +467,100 @@ _register(
                 tools=("validate_cfg", "add_evidence"),
                 depends_on=("draft",),
                 gate="evidence",
+            ),
+        ),
+    )
+)
+
+_register(
+    WorkflowSpec(
+        id="cs2_live_test",
+        title="CS2 live test on a host",
+        description=(
+            "Drive a live test of an existing build on a Windows host: claim the host, probe it, deploy the "
+            "build (verified on the host), run the test steps (mirroring the in-game TEST STATUS HUD strip) and "
+            "release the host. Generic — the caller supplies the host, the deploy manifest and the test."
+        ),
+        games=("cs2", "deadlock"),
+        needs_addon=False,
+        inputs=(
+            WorkflowInput("host_id", "Registered host id to run on (see list_hosts)", required=True),
+            WorkflowInput(
+                "deploy_manifest",
+                "What to deploy to the host: a manifest of {path, local} files (or a dest_root + files)",
+                required=True,
+            ),
+            WorkflowInput("test_description", "What the test checks and the steps to run", required=True),
+        ),
+        steps=(
+            StepSpec(
+                id="claim",
+                title="Claim the host",
+                kind="build",
+                instructions=(
+                    "Claim host `$host_id` for this project with `claim_host` (owner `project:$project_id`, "
+                    "ttl_sec long enough for the run). A fresh lock held by another owner means the host is busy — "
+                    "wait for it to expire or pick another host. The server verifies the lock is yours when you "
+                    "mark this step done. Inspect with `list_hosts` / `get_host` first."
+                ),
+                tools=("claim_host", "list_hosts", "get_host"),
+                gate="host_claimed",
+            ),
+            StepSpec(
+                id="probe",
+                title="Probe the host",
+                kind="research",
+                instructions=(
+                    "Run `probe_host` on `$host_id` and read the facts with `get_host`: GPU use and running "
+                    "processes say whether the host is free to run the game, and the CS2 path/build confirms the "
+                    "target. If the game or a heavy GPU job is already running, note it and decide whether to "
+                    "continue on this host."
+                ),
+                tools=("probe_host", "get_host", "add_evidence"),
+                depends_on=("claim",),
+            ),
+            StepSpec(
+                id="deploy",
+                title="Deploy the build to the host",
+                kind="build",
+                instructions=(
+                    "Deploy the build to `$host_id` with `deploy_push` (manifest: $deploy_manifest). Every file's "
+                    "MD5 is re-checked on the host, so `deploy_push` only succeeds when the bytes landed — and its "
+                    "returned deploy id is `verified`. Record that deploy id as an artifact of this step. The "
+                    "server checks the deployment is `verified` when you mark this done (`deploy_verify` re-checks "
+                    "a drifted copy)."
+                ),
+                tools=("deploy_push", "deploy_verify", "deploy_list", "add_evidence"),
+                depends_on=("probe",),
+                gate="deploy_verified",
+            ),
+            StepSpec(
+                id="test",
+                title="Run the test",
+                kind="test",
+                instructions=(
+                    "Run the test on `$host_id`: $test_description. Open a session with `test_start` — do NOT pass "
+                    "host_id, this project already holds the host lease. Mirror each step onto the in-game TEST "
+                    "STATUS HUD and the server with `test_step`, then finish with `test_finish` (pass/fail). The "
+                    "record's name/step/state/elapsed match the HUD strip, so the Activity page shows the live run "
+                    "while it happens. Attach the console transcript with `add_evidence` — the server requires a "
+                    "non-note evidence row before this step can be marked done."
+                ),
+                tools=("test_start", "test_step", "test_finish", "add_evidence"),
+                depends_on=("deploy",),
+                gate="evidence",
+                done_when="The test ran in game and its outcome (pass/fail + console transcript) is recorded.",
+            ),
+            StepSpec(
+                id="release",
+                title="Release the host",
+                kind="build",
+                instructions=(
+                    "Release the host lease so the next worker can use `$host_id`: `release_host` with owner "
+                    "`project:$project_id`. If a test session or a step is still running, finish it first."
+                ),
+                tools=("release_host", "list_hosts"),
+                depends_on=("test",),
             ),
         ),
     )

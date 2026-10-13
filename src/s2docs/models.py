@@ -378,6 +378,17 @@ class HostLock(BaseModel):
     age_sec: int = Field(description="seconds since the last heartbeat")
 
 
+class HostLockEvent(BaseModel):
+    """One host-lock mutation (claim/takeover/release), for the Hosts page's lock history."""
+
+    id: int
+    host_id: str
+    owner: str
+    event: Literal["claimed", "released"]
+    detail: str | None = None
+    ts: str
+
+
 class Host(BaseModel):
     id: str
     hostname: str | None = None
