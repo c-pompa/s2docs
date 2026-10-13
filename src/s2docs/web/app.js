@@ -51,6 +51,39 @@ const secsAgo = (iso) => {
   const t = parseTs(iso);
   return Number.isNaN(t) ? null : Math.max(0, Math.floor((Date.now() - t) / 1000));
 };
+// ---- Central (America/Chicago) absolute timestamps -------------------------
+// The default clock for every timestamp the UI renders. One user is in America/Chicago and wants
+// to read wall-clock time, not a relative age. Intl carries the DST rules, so the same formatter
+// prints the standard offset in winter and the daylight offset in summer; the label stays 'CT'
+// (the zone shifts, the label must not).
+// central-time-helpers:start
+const CT_ZONE = "America/Chicago";
+const CT_DAY = new Intl.DateTimeFormat("en-US", { timeZone: CT_ZONE, month: "short", day: "numeric" });
+const CT_CLOCK = new Intl.DateTimeFormat("en-US", {
+  timeZone: CT_ZONE, hour: "numeric", minute: "2-digit", second: "2-digit", hour12: true,
+});
+const CT_NOW = new Intl.DateTimeFormat("en-US", { timeZone: CT_ZONE, hour: "numeric", minute: "2-digit", hour12: true });
+// Absolute Central wall-clock for one instant: 'Oct 13, 4:37:21 PM CT'.
+const ctAbs = (d) => `${CT_DAY.format(d)}, ${CT_CLOCK.format(d)} CT`;
+// The single timestamp string: '<Central> (<relative>)', e.g. 'Oct 13, 4:37:21 PM CT (5m ago)'.
+// null when unparseable (the caller keeps its own fallback). The relative age is the shared secsAgo().
+const ctStamp = (iso) => {
+  const t = parseTs(iso);
+  if (Number.isNaN(t)) return null;
+  return `${ctAbs(new Date(t))} (${human(secsAgo(iso))} ago)`;
+};
+// The renderer every timestamp cell uses: absolute Central inline, the raw ISO in a tooltip.
+// A null/empty value reads '—'; an unparseable literal (e.g. a dry-run deploy's 'dry-run') is kept
+// escaped rather than swallowed, so the cell never throws and never invents a time.
+const fmtTime = (iso) => {
+  if (iso == null || iso === "") return "—";
+  const s = ctStamp(iso);
+  return s == null ? esc(String(iso)) : `<span title="${esc(String(iso))}">${esc(s)}</span>`;
+};
+// 'Server now: 4:37 PM CT' — the sanity check that makes a relative age trustworthy.
+const nowCT = () => `${CT_NOW.format(new Date())} CT`;
+const nowLine = () => `<p class="muted">Server now: <strong>${nowCT()}</strong> · all times shown in Central (America/Chicago).</p>`;
+// central-time-helpers:end
 // Shared status colours across build/test/deploy/lock states.
 const STATE_CLASS = {
   succeeded: "kind", verified: "kind", pass: "kind", running: "kind", claimed: "kind",
@@ -80,7 +113,7 @@ const lockCell = (lock) => {
     ? ` · phase ${esc(lock.phase)}${lock.phase_age_sec != null ? ` ${human(lock.phase_age_sec)}` : ""}`
     : " · no phase reported";
   const state = lock.stuck ? "STUCK" : lock.fresh ? "fresh" : "STALE";
-  return `${badge(lock.owner, lock.fresh && !lock.stuck ? "kind" : "warn")}${lockStuckBadge(lock)}<div class="muted">${state} · heartbeat ${human(lock.age_sec)} ago · ttl ${human(lock.ttl_sec)}${phase}${
+  return `${badge(lock.owner, lock.fresh && !lock.stuck ? "kind" : "warn")}${lockStuckBadge(lock)}<div class="muted">${state} · heartbeat ${fmtTime(lock.heartbeat_at)} · ttl ${human(lock.ttl_sec)}${phase}${
     lock.stuck && lock.stuck_reason ? `<br>${esc(lock.stuck_reason)}` : ""
   }</div>`;
 };
@@ -90,7 +123,7 @@ const lockRows = (evs) =>
     ? `<table><tr><th>When</th><th>Event</th><th>Owner</th><th>Detail</th></tr>${evs
         .map(
           (e) =>
-            `<tr><td class="muted">${esc(e.ts)}</td><td>${stateBadge(e.event)}</td><td class="mono">${esc(e.owner)}</td>` +
+            `<tr><td class="muted">${fmtTime(e.ts)}</td><td>${stateBadge(e.event)}</td><td class="mono">${esc(e.owner)}</td>` +
             `<td class="muted">${esc(e.detail || "")}</td></tr>`,
         )
         .join("")}</table>`
@@ -98,12 +131,13 @@ const lockRows = (evs) =>
 
 const buildRows = (runs) =>
   runs.length
-    ? `<table><tr><th>Run</th><th>Host</th><th>Status</th><th>Elapsed</th><th>Summary</th></tr>${runs
+    ? `<table><tr><th>Run</th><th>Host</th><th>Status</th><th>Started</th><th>Elapsed</th><th>Summary</th></tr>${runs
         .map(
           (r) =>
             `<tr><td class="mono">${esc(r.id)}<div class="muted">${esc(r.kind)}</div></td>` +
             `<td>${link(["hosts", r.host_id], r.host_id)}</td>` +
             `<td>${stateBadge(r.status)}${lockStuckBadge(r.lock)}${r.exit_code != null ? `<div class="muted mono">exit ${r.exit_code}</div>` : ""}</td>` +
+            `<td class="muted">${fmtTime(r.started_at || r.created_at)}</td>` +
             `<td class="muted">${runTime(r)}${isLive(r) ? `<div class="muted">running</div>` : ""}</td><td class="muted">${esc(summaryText(r.summary))}${materialWarning(r)}${
               runPhase(r) ? `<div class="muted">${esc(runPhase(r))}</div>` : ""
             }</td></tr>`,
@@ -123,7 +157,7 @@ const deployRows = (ds) =>
             `<td>${link(["hosts", d.host_id], d.host_id)}</td><td>${stateBadge(d.status)}</td>` +
             `<td class="muted">${runTime(d)}</td>` +
             `<td class="muted"><strong>${verified}</strong>/${total} verified</td>` +
-            `<td class="muted">${human(secsAgo(d.created_at))} ago</td></tr>`
+            `<td class="muted">${fmtTime(d.created_at)}</td></tr>`
           );
         })
         .join("")}</table>`
@@ -134,10 +168,11 @@ const deployRows = (ds) =>
 // running session's row ticks with the poll and a finished one stays frozen.
 const testRows = (ts) =>
   ts.length
-    ? `<table><tr><th>Name</th><th>Step</th><th>State</th><th>Elapsed</th><th>Host</th></tr>${ts
+    ? `<table><tr><th>Name</th><th>Step</th><th>State</th><th>Started</th><th>Elapsed</th><th>Host</th></tr>${ts
         .map(
           (t) =>
             `<tr><td class="mono">${esc(t.name)}</td><td>${esc(t.step || "—")}</td><td>${stateBadge(t.state)}</td>` +
+            `<td class="muted">${fmtTime(t.started_at || t.created_at)}</td>` +
             `<td class="mono">${human(t.elapsed_sec)}${t.state === "running" ? `<div class="muted">running</div>` : ""}</td><td>${t.host_id ? link(["hosts", t.host_id], t.host_id) : "—"}</td></tr>`,
         )
         .join("")}</table>`
@@ -618,7 +653,7 @@ const ROUTES = {
             `<td>${statusBadge(s.status)}</td>` +
             `<td>${s.gate ? badge(s.gate, gateOk(s) ? "kind" : "warn") : `<span class="muted">—</span>`}</td>` +
             `<td>${evCell(s.id)}</td>` +
-            `<td class="muted">${s.updated_at ? `${esc(human(secsAgo(s.updated_at)))} ago` : "—"}</td>` +
+            `<td class="muted">${fmtTime(s.updated_at)}</td>` +
             `<td class="muted">${stepTime(s)}</td>` +
             `<td class="mono muted">${s.depends_on.map(esc).join(", ") || "—"}</td>` +
             `<td>${esc((s.notes || "").slice(0, 300))}${s.artifacts.length ? `<div class="muted mono">${s.artifacts.map(esc).join("<br>")}</div>` : ""}</td></tr>`,
@@ -662,7 +697,7 @@ const ROUTES = {
       ${projects.map((p) => `<tr><td>${link([state.game, "projects", p.id], p.title)}<div class="muted">${esc(p.goal.slice(0, 90))}</div></td>
         <td class="mono">${esc(p.workflow)}</td><td>${statusBadge(p.status)}</td><td>${esc(p.progress)}</td>
         <td class="muted">${runTime(p)}${isLive(p) ? `<div class="muted">running</div>` : ""}</td>
-        <td class="muted">${esc(p.updated_at)}</td></tr>`).join("")}</table>`
+        <td class="muted">${fmtTime(p.updated_at)}</td></tr>`).join("")}</table>`
         : `<p class="muted">No projects yet.</p>`}`;
   },
 
@@ -678,8 +713,8 @@ const ROUTES = {
           api("/test-runs", { host_id: hostId }),
         ]);
         const facts = h.facts && Object.keys(h.facts).length ? `<details><summary>Facts (${Object.keys(h.facts).length} top-level keys)</summary><pre>${esc(JSON.stringify(h.facts, null, 2))}</pre></details>` : "";
-        return `<p>${h.shell ? badge(h.shell) : ""}${h.os ? badge(h.os) : ""}${h.hostname ? badge(h.hostname) : ""}<span class="mono muted"> ${esc(h.ssh_target)}</span></p>
-          <p>${lockCell(h.lock)}<span class="muted"> · probed ${h.probed_at ? esc(human(secsAgo(h.probed_at))) + " ago" : "never"}</span></p>
+        return `${nowLine()}<p>${h.shell ? badge(h.shell) : ""}${h.os ? badge(h.os) : ""}${h.hostname ? badge(h.hostname) : ""}<span class="mono muted"> ${esc(h.ssh_target)}</span></p>
+          <p>${lockCell(h.lock)}<span class="muted"> · probed ${h.probed_at ? fmtTime(h.probed_at) : "never"}</span></p>
           ${h.notes ? `<p class="muted">${esc(h.notes)}</p>` : ""}
           ${facts}
           <h2>Lock history</h2>${lockRows(locks)}
@@ -693,13 +728,13 @@ const ROUTES = {
     const body = async () => {
       const hosts = await api("/hosts");
       if (!hosts.length)
-        return `<p class="muted">No hosts registered. Register one over MCP (<code>register_host</code>) or the CLI (<code>s2docs host register …</code>).</p>`;
-      return `<table><tr><th>Host</th><th>Shell</th><th>GPU</th><th>Probed</th><th>Lock</th></tr>${hosts
+        return `${nowLine()}<p class="muted">No hosts registered. Register one over MCP (<code>register_host</code>) or the CLI (<code>s2docs host register …</code>).</p>`;
+      return `${nowLine()}<table><tr><th>Host</th><th>Shell</th><th>GPU</th><th>Probed</th><th>Lock</th></tr>${hosts
         .map(
           (h) =>
             `<tr><td>${link(["hosts", h.id], h.id)}<div class="muted mono">${esc(h.hostname || h.ssh_target || "")}</div></td>` +
             `<td>${h.shell ? badge(h.shell) : "—"}${h.os ? badge(h.os) : ""}</td><td>${esc(gpuOf(h))}</td>` +
-            `<td class="muted">${h.probed_at ? esc(human(secsAgo(h.probed_at))) + " ago" : "never"}</td>` +
+            `<td class="muted">${h.probed_at ? fmtTime(h.probed_at) : "never"}</td>` +
             `<td>${lockCell(h.lock)}</td></tr>`,
         )
         .join("")}</table>`;
@@ -723,7 +758,7 @@ const ROUTES = {
       // Drives the poll cadence: fast while anything is live, slow when the system is idle.
       state.activityActive = activeBuilds.length > 0 || !!activeTest;
 
-      if (!builds.length && !tests.length && !deploys.length) return activityEmptyState();
+      if (!builds.length && !tests.length && !deploys.length) return nowLine() + activityEmptyState();
 
       // ---- NOW: everything currently running, freshest first (updated_at = heartbeat-ish for a run).
       const ts = (r) => (r.updated_at || r.created_at || r.started_at || "");
@@ -755,7 +790,7 @@ const ROUTES = {
         .filter(Boolean)
         .sort()
         .pop();
-      const idleNote = newest ? ` Last activity ${human(secsAgo(newest))} ago.` : "";
+      const idleNote = newest ? ` Last activity ${fmtTime(newest)}.` : "";
       const now = nowCards.length ? nowCards.join("") : `<p class="muted">Nothing is running right now.${idleNote}</p>`;
 
       // ---- BY HOST: everything recent, grouped under the host it ran on (unassigned last).
@@ -777,7 +812,7 @@ const ROUTES = {
         })
         .join("");
 
-      return `<h2>Now${state.activityActive ? ` ${badge("live", "kind")}` : ""}</h2>${now}
+      return `${nowLine()}<h2>Now${state.activityActive ? ` ${badge("live", "kind")}` : ""}</h2>${now}
         <h2>By host</h2>${hostBlocks}
         <h2>Full history</h2>
         <details><summary class="muted">Build runs (${builds.length})</summary>${buildRows(builds.slice(0, 30))}</details>

@@ -5,6 +5,7 @@ pages read. No real host/network: locks are DB-only and the ssh layer is never t
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 from datetime import datetime
@@ -349,3 +350,76 @@ def test_duration_rendering_executes_in_node(client, timed_rows):
         "stepDone": "2m05s",  # done: started_at -> updated_at
         "stepUntouched": "—",  # no start recorded: the view shows '—', never a made-up duration
     }
+
+
+# ------------------------------------------------------- Central (America/Chicago) time display
+# The user ask: timestamps must read as actual local clock time in Central, not just '5m ago' or a
+# raw UTC ISO. Every timestamp renderer goes through one formatter: '<Central> (<relative>)'. The
+# zone label is 'CT' (the zone shifts CST/CDT with DST, the label must not) and Intl supplies the
+# DST rules, so these tests pin one winter (CST) and one summer (CDT) instant.
+def test_frontend_central_time_markers(client):
+    """The shared Central formatter exists next to human()/parseTs and every timestamp cell uses it."""
+    js = client.get("/app.js").text
+    # one helper block, sits with the other time helpers
+    assert "central-time-helpers:start" in js and "central-time-helpers:end" in js
+    assert 'CT_ZONE = "America/Chicago"' in js
+    assert "const ctAbs" in js and "const ctStamp" in js and "const fmtTime" in js and "const nowCT" in js
+    # 12-hour clock, short month, seconds; labelled 'CT' (never CST/CDT — the zone shifts with DST)
+    assert 'hour12: true' in js and 'month: "short"' in js and 'second: "2-digit"' in js
+    assert "} CT`" in js and "CST" not in js and "CDT" not in js
+    # every timestamp cell renders through the one formatter (lock cell, lock history, deploy, hosts
+    # probed x2, project list, step table, Activity idle note)
+    assert js.count("fmtTime(") >= 8
+    assert "heartbeat ${fmtTime(lock.heartbeat_at)}" in js
+    assert "fmtTime(e.ts)" in js  # lock history
+    assert "fmtTime(d.created_at)" in js  # deployments
+    assert "fmtTime(p.updated_at)" in js and "fmtTime(s.updated_at)" in js  # projects + step table
+    assert js.count("fmtTime(h.probed_at)") == 2  # hosts list + host detail
+    # the raw ISO stays reachable in a tooltip; a null reads '—', an unparseable value is kept escaped
+    assert 'title="${esc(String(iso))}"' in js
+    # 'server now' line so a relative age can be sanity-checked (Hosts + Activity)
+    assert "Server now:" in js and "nowLine()" in js
+    assert js.count("nowLine()") >= 4  # hosts list, host detail, activity (incl. empty state)
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_central_time_rendering_executes_in_node(client):
+    """Lift the shipped Central formatter out of app.js and run it: the exact absolute string, the
+    DST switch (one CST winter instant, one CDT summer instant), and the fallbacks."""
+    assert NODE is not None  # skipif above
+    js = client.get("/app.js").text
+    dur = js.split("// duration-helpers:start", 1)[1].split("// duration-helpers:end", 1)[0]
+    ct = js.split("// central-time-helpers:start", 1)[1].split("// central-time-helpers:end", 1)[0]
+    i = js.index("const secsAgo")
+    secs = js[i : js.index("};", i) + 2]  # ctStamp's relative age comes from secsAgo()
+    script = (
+        'const esc = (v) => String(v ?? "");\n'
+        f"{dur}\n{secs}\n{ct}\n"
+        # Winter: 2026-01-15 22:42:21Z is 4:42 PM CST (UTC-6); summer is one hour offset (CDT).
+        'const WINTER = Date.parse("2026-01-15T22:42:21Z");\n'
+        'const SUMMER = Date.parse("2026-07-15T21:42:21Z");\n'
+        "Date.now = () => WINTER;\n"
+        "const winter = ctStamp('2026-01-15T22:37:21Z');\n"
+        "const earlier = ctStamp('2026-01-15T22:12:21Z');\n"
+        "const winterHtml = fmtTime('2026-01-15T22:37:21Z');\n"
+        "const unparseableStamp = ctStamp('dry-run');\n"
+        "const unparseableHtml = fmtTime('dry-run');\n"
+        "const nullHtml = fmtTime(null);\n"
+        "Date.now = () => SUMMER;\n"
+        "const summer = ctStamp('2026-07-15T21:37:21Z');\n"
+        "const now = nowCT();\n"
+        "console.log(JSON.stringify({winter, earlier, winterHtml, summer, unparseableStamp,"
+        " unparseableHtml, nullHtml, now}));\n"
+    )
+    proc = subprocess.run([NODE, "-e", script], capture_output=True, text=True, encoding="utf-8", timeout=60)
+    assert proc.returncode == 0, proc.stderr
+    out = json.loads(proc.stdout)
+    assert out["winter"] == "Jan 15, 4:37:21 PM CT (5m00s ago)"  # CST: UTC-6
+    assert out["earlier"] == "Jan 15, 4:12:21 PM CT (30m00s ago)"
+    assert out["summer"] == "Jul 15, 4:37:21 PM CT (5m00s ago)"  # CDT: UTC-5, the same wall clock
+    assert out["winterHtml"] == (
+        '<span title="2026-01-15T22:37:21Z">Jan 15, 4:37:21 PM CT (5m00s ago)</span>'
+    )
+    assert out["unparseableStamp"] is None and out["unparseableHtml"] == "dry-run"  # kept, escaped
+    assert out["nullHtml"] == "—"
+    assert re.fullmatch(r"\d{1,2}:\d{2} [AP]M CT", out["now"]), out["now"]  # '4:42 PM CT'
