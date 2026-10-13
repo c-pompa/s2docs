@@ -58,6 +58,16 @@ button:disabled { opacity: .4; cursor: default; }
 .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 10px; }
 .card { border: 1px solid var(--border); border-radius: 8px; padding: 12px; background: var(--panel); }
 .card .n { font-size: 22px; font-weight: 700; color: var(--accent); }
+/* Orchestration step DAG: one column per dependency depth, connected left→right. */
+.dag { display: flex; align-items: stretch; gap: 6px; overflow-x: auto; padding: 6px 0 10px; }
+.dag-col { display: flex; flex-direction: column; gap: 8px; min-width: 170px; flex: 1; }
+.dag-arrow { display: flex; align-items: center; color: var(--muted); font-size: 18px; }
+.dag-node { border: 1px solid var(--border); border-left: 3px solid var(--border); border-radius: 8px;
+            padding: 8px 10px; background: var(--panel); font-size: 13px; }
+.dag-node.done { border-left-color: var(--accent); }
+.dag-node.blocked, .dag-node.failed { border-left-color: var(--bad); }
+.dag-node.in_progress, .dag-node.running { border-left-color: var(--ok); }
+.dag-node.skipped { opacity: .6; }
 .err { color: var(--bad); }
 .inherited td { opacity: .78; }
 @media (max-width: 760px) { .layout { grid-template-columns: 1fr; } nav { display: flex; overflow-x: auto; border: 0; } }
