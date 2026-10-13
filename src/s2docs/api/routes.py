@@ -348,6 +348,14 @@ class LockIn(BaseModel):
     owner: str = Field(min_length=1, max_length=200)
     ttl_sec: int = Field(default=1800, ge=60)
     force: bool = False
+    phase: str | None = Field(default=None, description="what the owner is doing, e.g. 'compile'")
+    note: str | None = None
+
+
+class HeartbeatIn(BaseModel):
+    owner: str = Field(min_length=1, max_length=200)
+    phase: str | None = Field(default=None, description="pass the same phase to keep it, a new one to reset the clock")
+    note: str | None = None
 
 
 @router.get("/hosts", response_model=list[m.Host])
@@ -379,12 +387,14 @@ def probe_host(host_id: str, db: Db):
 
 @router.post("/hosts/{host_id}/lock", response_model=m.HostLock)
 def claim_host(host_id: str, body: LockIn, db: Db):
-    return hosts.claim_host(db, host_id, body.owner, ttl_sec=body.ttl_sec, force=body.force)
+    return hosts.claim_host(
+        db, host_id, body.owner, ttl_sec=body.ttl_sec, force=body.force, phase=body.phase, note=body.note
+    )
 
 
 @router.post("/hosts/{host_id}/heartbeat", response_model=m.HostLock)
-def heartbeat_host(host_id: str, db: Db, owner: Annotated[str, Body(embed=True)]):
-    return hosts.heartbeat_host(db, host_id, owner)
+def heartbeat_host(host_id: str, body: HeartbeatIn, db: Db):
+    return hosts.heartbeat_host(db, host_id, body.owner, phase=body.phase, note=body.note)
 
 
 @router.delete("/hosts/{host_id}/lock")

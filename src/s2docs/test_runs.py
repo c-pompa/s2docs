@@ -97,7 +97,9 @@ def start(db: Database, name: str, *, host_id: str | None = None, project_id: st
     rid = "t-" + secrets.token_hex(4)
     owner = f"test:{rid}"
     if host_id is not None:
-        hosts.claim_host(db, host_id, owner)  # raises HostLocked on contention, before any record exists
+        # The lease's phase is the session's own work: 'test'. It is cleared when the lease is
+        # released on finish/clear, and the server uses it (with the threshold) to flag a stuck run.
+        hosts.claim_host(db, host_id, owner, phase="test")  # raises HostLocked before any record exists
     try:
         with db.writer() as conn, conn:
             conn.execute(

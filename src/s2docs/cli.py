@@ -194,11 +194,23 @@ def _cmd_host(args: argparse.Namespace) -> int:
     from s2docs import hosts
 
     db = Database(get_settings().db_path)
+
+    def _stuck_marker(host_list) -> None:
+        """A human-visible STUCK line on stderr (JSON stays clean on stdout)."""
+        for h in host_list:
+            lock = h.lock
+            if lock is not None and lock.stuck:
+                print(f"STUCK: {h.id} held by {lock.owner!r} — {lock.stuck_reason}", file=sys.stderr)
+
     try:
         if args.host_cmd == "list":
-            out = [h.model_dump() for h in hosts.list_hosts(db)]
+            hs = hosts.list_hosts(db)
+            out = [h.model_dump() for h in hs]
+            _stuck_marker(hs)
         elif args.host_cmd == "show":
-            out = hosts.get_host(db, args.host_id).model_dump()
+            h = hosts.get_host(db, args.host_id)
+            out = h.model_dump()
+            _stuck_marker([h])
         elif args.host_cmd == "register":
             out = hosts.register_host(
                 db,
@@ -213,9 +225,11 @@ def _cmd_host(args: argparse.Namespace) -> int:
         elif args.host_cmd == "probe":
             out = hosts.probe_host(db, args.host_id).model_dump()
         elif args.host_cmd == "lock":
-            out = hosts.claim_host(db, args.host_id, args.owner, ttl_sec=args.ttl, force=args.force).model_dump()
+            out = hosts.claim_host(
+                db, args.host_id, args.owner, ttl_sec=args.ttl, force=args.force, phase=args.phase, note=args.note
+            ).model_dump()
         elif args.host_cmd == "heartbeat":
-            out = hosts.heartbeat_host(db, args.host_id, args.owner).model_dump()
+            out = hosts.heartbeat_host(db, args.host_id, args.owner, phase=args.phase, note=args.note).model_dump()
         elif args.host_cmd == "unlock":
             out = {"result": hosts.release_host(db, args.host_id, args.owner, force=args.force)}
         else:  # pragma: no cover - argparse enforces the subcommand
@@ -591,6 +605,9 @@ def main(argv: list[str] | None = None) -> int:
         q.add_argument("owner", help="Workstream/session id, e.g. ws/occluder-wire")
         if name == "lock":
             q.add_argument("--ttl", type=int, default=1800)
+        if name in ("lock", "heartbeat"):
+            q.add_argument("--phase", help="What you are doing, e.g. 'compile' (drives stuck detection)")
+            q.add_argument("--note", help="Free text for the dashboard")
         if name != "heartbeat":
             q.add_argument("--force", action="store_true")
     p.set_defaults(fn=_cmd_host)

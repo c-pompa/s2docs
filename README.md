@@ -55,7 +55,7 @@ Environment variables: `S2DOCS_DATA_DIR` (default `./data`) and `S2DOCS_DB` (def
 
 `s2docs serve` mounts a small vanilla-JS SPA at `/` (hash routes, no framework, no build step). Besides the browse/search sections (`#/<game>/…`) it has two install-wide operations pages for watching work on remote hosts:
 
-- **Hosts** (`#/hosts`) — the registry plus live lock state: shell, GPU (from the last probe), how long ago it was probed, and the current lock owner with fresh/stale + heartbeat age. Clicking a host opens `#/hosts/<id>` with its facts JSON, **lock history** (claim / stale-takeover / release events) and its recent builds, deployments and test runs. Read-only; auto-refreshes every 5 s while open.
+- **Hosts** (`#/hosts`) — the registry plus live lock state: shell, GPU (from the last probe), how long ago it was probed, and the current lock owner with fresh/stale + heartbeat age, its **phase** (what the owner is doing) and a **STUCK** badge. A lock is STUCK when its heartbeat is fresh but its phase has not moved for longer than the server's threshold — liveness is not progress, so a worker that heartbeats faithfully while its compile hangs still shows up. Clicking a host opens `#/hosts/<id>` with its facts JSON, **lock history** (claim / takeover / release / phase-change events) and its recent builds, deployments and test runs. Read-only; auto-refreshes every 5 s while open.
 - **Activity** (`#/activity`) — the page to watch instead of tailing logs: the current test run (the same `name / step / state / elapsed` fields as the in-game TEST STATUS HUD strip), active and recent build runs (status, host, elapsed, summary counts) and recent deployments (host, verified/total). Auto-refreshes every 5 s.
 
 Both pages read the existing JSON API (`/api/hosts`, `/api/hosts/{id}/locks`, `/api/builds`, `/api/deploys`, `/api/test-runs`); nothing there can mutate a host or a run.
@@ -110,9 +110,10 @@ claude mcp add --transport http s2docs http://127.0.0.1:8000/mcp
 |---|---|
 | `list_hosts`, `get_host`, `register_host` | Registry of test/build hosts (ssh target, shell flavor, probed facts: GPU/RAM/processes/CS2 build) |
 | `probe_host` | SSH-probe a host and store its facts (`scripts/windows/probe_host.ps1`) |
-| `claim_host`, `heartbeat_host`, `release_host` | Server-side host locks with owner + TTL + heartbeat. A fresh lock blocks other owners; a stale lock (crashed worker) is taken over automatically. Check `list_hosts` before driving any host |
+| `claim_host`, `heartbeat_host`, `release_host` | Server-side host locks with owner + TTL + heartbeat + **phase**. A fresh lock blocks other owners; a stale lock (crashed worker) is taken over automatically. Report a `phase` (what you are doing) so the server can flag a lock **STUCK** when its heartbeat is fresh but the phase has not moved (liveness is not progress). Check `list_hosts` before driving any host |
+| **Stuck detection** | The server, never the client, decides stuck-ness: a lock is `stuck=true` when `fresh` and its `phase_age_sec` exceeds a threshold (env `S2DOCS_STUCK_SEC`, default 1800 s) unless a per-phase override applies (env `S2DOCS_STUCK_PHASES`, a JSON object like `{"compile": 7200}` for a legitimately long compile). Heartbeating the same phase does not clear it; report a new phase as work progresses. A lock with no phase (old clients) is never STUCK |
 
-The same operations exist on the CLI (`s2docs host list|show|register|probe|lock|heartbeat|unlock`, JSON out, exit 2 = locked) and the HTTP API (`/api/hosts`, `/api/hosts/{id}/lock`, …; 409 = locked; `/api/hosts/{id}/locks` returns the claim/release audit trail the Hosts page shows).
+The same operations exist on the CLI (`s2docs host list|show|register|probe|lock|heartbeat|unlock`, JSON out, exit 2 = locked; `lock`/`heartbeat` take `--phase`/`--note`, and `host list`/`show` print a `STUCK:` line on stderr) and the HTTP API (`/api/hosts`, `/api/hosts/{id}/lock`, …; 409 = locked; every host read carries `lock.phase`, `lock.phase_age_sec` and `lock.stuck`; `/api/hosts/{id}/locks` returns the claim/takeover/release/phase-change audit trail the Hosts page shows).
 
 | Build tools | |
 |---|---|

@@ -7,6 +7,14 @@ driving this host right now": one lock per host with owner (workstream/session i
 heartbeat and TTL. A lock whose heartbeat is older than its TTL is stale and can be taken
 over — that covers crashed or interrupted workers (the old hand-maintained
 C:\\iso_build\\iso_host.lock on the hosts did not).
+
+A lock also carries a **phase** (what the owner is doing: 'compile', 'test', ...) and the time it
+started. A fresh heartbeat with a phase that has not moved past a threshold reads **STUCK** — the
+server computes it, clients cannot fake it. This is the 2026-10-13 lesson: a worker heartbeat its
+lock faithfully for 95 minutes while its compile sat hung, and the dashboard looked healthy because
+liveness (a fresh heartbeat) is not progress. Thresholds come from the server: S2DOCS_STUCK_SEC
+(default 1800s) and the per-phase overrides in S2DOCS_STUCK_PHASES (e.g. {'compile': 7200}). A lock
+with no phase (an old client that never sends one) is never STUCK — it just reports 'no phase'.
 """
 
 from __future__ import annotations
@@ -16,9 +24,11 @@ import json
 import re
 import sqlite3
 import subprocess
+import time
 from pathlib import Path
 
 from s2docs import models as m
+from s2docs.config import get_settings
 from s2docs.db.connection import Database
 
 HOST_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
@@ -39,18 +49,53 @@ def _check_id(host_id: str) -> None:
         raise HostError(f"invalid host id {host_id!r}: lowercase [a-z0-9-], e.g. 'desktop-pc'")
 
 
+def _now() -> str:
+    """UTC timestamp in the same format the SQL defaults use (so phase_since sorts with them)."""
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def stuck_threshold(phase: str) -> int:
+    """Seconds a fresh lock may hold `phase` before the server calls it stuck (per-phase override wins)."""
+    settings = get_settings()
+    return settings.stuck_phases.get(phase, settings.stuck_sec)
+
+
+def stuck_for(phase: str, phase_age_sec: int | None, *, fresh: bool) -> tuple[bool, str | None]:
+    """Server-side stuck verdict: a *fresh* lock whose phase has not moved past its threshold.
+
+    Fail-soft: no phase reported (old client) or a stale heartbeat (which the lock already exposes
+    as stale) is never STUCK.
+    """
+    if not fresh or not phase or phase_age_sec is None:
+        return False, None
+    threshold = stuck_threshold(phase)
+    if phase_age_sec > threshold:
+        return True, f"phase {phase!r} unchanged for {phase_age_sec}s (threshold {threshold}s)"
+    return False, None
+
+
 def _row_to_host(row: sqlite3.Row, lock: sqlite3.Row | None) -> m.Host:
     lock_model = None
     if lock is not None:
         age = lock["age"]
+        fresh = age <= lock["ttl_sec"]
+        phase = lock["phase"] or ""
+        phase_age = lock["phase_age"]
+        stuck, reason = stuck_for(phase, phase_age, fresh=fresh)
         lock_model = m.HostLock(
             host_id=lock["host_id"],
             owner=lock["owner"],
             acquired_at=lock["acquired_at"],
             heartbeat_at=lock["heartbeat_at"],
             ttl_sec=lock["ttl_sec"],
-            fresh=age <= lock["ttl_sec"],
+            fresh=fresh,
             age_sec=age,
+            phase=phase,
+            phase_since=lock["phase_since"],
+            phase_age_sec=phase_age,
+            note=lock["note"],
+            stuck=stuck,
+            stuck_reason=reason,
         )
     return m.Host(
         id=row["id"],
@@ -67,7 +112,11 @@ def _row_to_host(row: sqlite3.Row, lock: sqlite3.Row | None) -> m.Host:
 
 
 _LOCK_SELECT = """
-    SELECT *, CAST(strftime('%s', 'now') AS INTEGER) - CAST(strftime('%s', heartbeat_at) AS INTEGER) AS age
+    SELECT *,
+           CAST(strftime('%s', 'now') AS INTEGER) - CAST(strftime('%s', heartbeat_at) AS INTEGER) AS age,
+           CASE WHEN phase_since IS NULL THEN NULL
+                ELSE CAST(strftime('%s', 'now') AS INTEGER) - CAST(strftime('%s', phase_since) AS INTEGER)
+           END AS phase_age
     FROM host_locks WHERE host_id = ?
 """
 
@@ -101,6 +150,39 @@ def _record_lock_event(
         "INSERT INTO host_lock_events (host_id, owner, event, detail) VALUES (?, ?, ?, ?)",
         (host_id, owner, event, detail),
     )
+
+
+def _record_phase_event(conn: sqlite3.Connection, host_id: str, owner: str, old_phase: str, new_phase: str) -> None:
+    """Append a phase transition to the audit trail (only when the phase actually moved)."""
+    if old_phase == new_phase:
+        return
+    detail = f"phase {old_phase!r} -> {new_phase!r}" if old_phase else f"phase -> {new_phase!r}"
+    conn.execute(
+        "INSERT INTO host_lock_events (host_id, owner, event, phase, detail) VALUES (?, ?, 'phase', ?, ?)",
+        (host_id, owner, new_phase or None, detail),
+    )
+
+
+def _resolve_phase(
+    requested: str | None, previous: str, prev_since: str | None, *, same_owner: bool
+) -> tuple[str, str | None]:
+    """Decide the (phase, phase_since) a lock mutation should store.
+
+    - requested is None (the client did not report a phase): keep the previous phase when the same
+      owner is refreshing, otherwise start clean (a new owner has no phase yet).
+    - requested is '' (explicitly cleared) or whitespace: no phase.
+    - requested changed, or the owner changed: phase_since resets to now.
+    - requested equals the previous phase for the same owner: phase_since is *kept* (a faithful
+      heartbeat must not hide a phase that has not moved — that is the whole point of stuck-ness).
+    """
+    if requested is None:
+        return (previous, prev_since) if same_owner else ("", None)
+    phase = requested.strip()
+    if not phase:
+        return "", None
+    if same_owner and phase == previous and prev_since:
+        return phase, prev_since
+    return phase, _now()
 
 
 def list_hosts(db: Database) -> list[m.Host]:
@@ -160,8 +242,17 @@ def register_host(
 
 
 def claim_host(
-    db: Database, host_id: str, owner: str, *, ttl_sec: int = DEFAULT_TTL_SEC, force: bool = False
+    db: Database,
+    host_id: str,
+    owner: str,
+    *,
+    ttl_sec: int = DEFAULT_TTL_SEC,
+    force: bool = False,
+    phase: str | None = None,
+    note: str | None = None,
 ) -> m.HostLock:
+    """Take (or refresh) the host lock. ``phase``/``note`` are optional: a phase change resets
+    phase_since; omitting them on a same-owner refresh keeps the phase already reported."""
     _check_id(host_id)
     if not owner.strip():
         raise HostError("owner is required (workstream/session id, e.g. 'ws/occluder-wire' or 'p-1a2b3c4d')")
@@ -180,22 +271,33 @@ def claim_host(
         if lock is not None and lock["owner"] != owner:
             how = "forced takeover" if lock["age"] <= lock["ttl_sec"] else "took over stale lock"
             detail = f"{how} from {lock['owner']!r} (heartbeat {lock['age']}s ago)"
-        conn.execute(
-            """
-            INSERT INTO host_locks (host_id, owner, ttl_sec) VALUES (?, ?, ?)
-            ON CONFLICT(host_id) DO UPDATE SET
-                owner = excluded.owner,
-                acquired_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'),
-                heartbeat_at = excluded.heartbeat_at,
-                ttl_sec = excluded.ttl_sec
-            """,
-            (host_id, owner, ttl_sec),
-        )
+        same_owner = lock is not None and lock["owner"] == owner
+        prev_phase = (lock["phase"] or "") if lock is not None else ""
+        prev_since = lock["phase_since"] if lock is not None else None
+        new_phase, new_since = _resolve_phase(phase, prev_phase, prev_since, same_owner=same_owner)
+        if lock is None:
+            conn.execute(
+                "INSERT INTO host_locks (host_id, owner, ttl_sec, phase, phase_since, note) VALUES (?, ?, ?, ?, ?, ?)",
+                (host_id, owner, ttl_sec, new_phase, new_since, note),
+            )
+        else:
+            conn.execute(
+                "UPDATE host_locks SET owner = ?, acquired_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'), "
+                "heartbeat_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'), ttl_sec = ?, phase = ?, "
+                "phase_since = ?, note = COALESCE(?, note) WHERE host_id = ?",
+                (owner, ttl_sec, new_phase, new_since, note, host_id),
+            )
         _record_lock_event(conn, host_id, owner, "claimed", detail)
+        if lock is not None:
+            _record_phase_event(conn, host_id, owner, prev_phase, new_phase)
         return _load(conn, host_id).lock  # type: ignore[return-value]
 
 
-def heartbeat_host(db: Database, host_id: str, owner: str) -> m.HostLock:
+def heartbeat_host(
+    db: Database, host_id: str, owner: str, *, phase: str | None = None, note: str | None = None
+) -> m.HostLock:
+    """Refresh your lock's heartbeat. Passing the same ``phase`` keeps phase_since (so a genuinely
+    hung run still reads STUCK); passing a new ``phase`` resets it. Omit ``phase`` to leave it as-is."""
     _check_id(host_id)
     with db.writer() as conn, conn:
         lock = conn.execute(_LOCK_SELECT, (host_id,)).fetchone()
@@ -203,10 +305,14 @@ def heartbeat_host(db: Database, host_id: str, owner: str) -> m.HostLock:
             raise HostError(f"host {host_id} is not locked; claim it first")
         if lock["owner"] != owner:
             raise HostLocked(f"host {host_id} is locked by {lock['owner']!r}, not {owner!r}")
+        prev_phase = lock["phase"] or ""
+        new_phase, new_since = _resolve_phase(phase, prev_phase, lock["phase_since"], same_owner=True)
         conn.execute(
-            "UPDATE host_locks SET heartbeat_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE host_id = ?",
-            (host_id,),
+            "UPDATE host_locks SET heartbeat_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'), "
+            "phase = ?, phase_since = ?, note = COALESCE(?, note) WHERE host_id = ?",
+            (new_phase, new_since, note, host_id),
         )
+        _record_phase_event(conn, host_id, owner, prev_phase, new_phase)
         return _load(conn, host_id).lock  # type: ignore[return-value]
 
 

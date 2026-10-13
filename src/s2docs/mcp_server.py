@@ -442,7 +442,10 @@ def create_mcp_server(db: Database, workspace: Path | None = None) -> MCPServer:
     @server.tool(annotations=READ_ONLY)
     def list_hosts() -> list[m.Host]:
         """List registered test/build hosts with their facts (shell, GPU, paths) and current lock state.
-        CHECK THIS before driving any host: a fresh lock means another session/workstream owns it."""
+        CHECK THIS before driving any host: a fresh lock means another session/workstream owns it.
+        Each lock carries `phase` (what the owner is doing), `phase_age_sec` and `stuck` — the SERVER
+        marks a lock STUCK when its heartbeat is fresh but the phase has not moved past the configured
+        threshold (liveness is not progress). Treat `lock.stuck=true` as "the owner may be hung"."""
         return _hosts(lambda: hosts.list_hosts(db))
 
     @server.tool(annotations=READ_ONLY)
@@ -483,16 +486,32 @@ def create_mcp_server(db: Database, workspace: Path | None = None) -> MCPServer:
         owner: Owner,
         ttl_sec: Annotated[int, Field(description="Lock lifetime without heartbeat, seconds (min 60)")] = 1800,
         force: Annotated[bool, Field(description="Take over even if another owner's lock is still fresh")] = False,
+        phase: Annotated[
+            str | None, Field(description="What you are doing, e.g. 'compile', 'test' — powers stuck detection")
+        ] = None,
+        note: Annotated[str | None, Field(description="Free text for the dashboard, e.g. the current step")] = None,
     ) -> m.HostLock:
         """Claim exclusive use of a host. Fails if another owner holds a fresh lock — a stale lock
         (heartbeat older than its TTL, e.g. from a crashed worker) is taken over automatically.
-        Heartbeat with heartbeat_host while you work; release with release_host when done."""
-        return _hosts(lambda: hosts.claim_host(db, host_id, owner, ttl_sec=ttl_sec, force=force))
+        Always report a `phase` (what you are doing); the server flags a lock STUCK when its heartbeat
+        is fresh but the phase has not moved for too long, so keep the phase current (pass a new phase
+        to heartbeat_host) as you progress. Heartbeat while you work; release with release_host when done."""
+        return _hosts(
+            lambda: hosts.claim_host(db, host_id, owner, ttl_sec=ttl_sec, force=force, phase=phase, note=note)
+        )
 
     @server.tool(annotations=HOSTS_WRITE)
-    def heartbeat_host(host_id: HostId, owner: Owner) -> m.HostLock:
-        """Refresh your lock's heartbeat so it doesn't go stale mid-task."""
-        return _hosts(lambda: hosts.heartbeat_host(db, host_id, owner))
+    def heartbeat_host(
+        host_id: HostId,
+        owner: Owner,
+        phase: Annotated[
+            str | None, Field(description="New phase; pass the same value to keep it, a new one to reset the clock")
+        ] = None,
+        note: Annotated[str | None, Field(description="Free text for the dashboard")] = None,
+    ) -> m.HostLock:
+        """Refresh your lock's heartbeat so it doesn't go stale mid-task. Heartbeating the SAME phase
+        does not clear stuck-ness (that is the point); report a new `phase` as your work moves on."""
+        return _hosts(lambda: hosts.heartbeat_host(db, host_id, owner, phase=phase, note=note))
 
     @server.tool(annotations=HOSTS_WRITE)
     def release_host(
@@ -522,7 +541,9 @@ def create_mcp_server(db: Database, workspace: Path | None = None) -> MCPServer:
     ) -> m.BuildRun:
         """Start a server-owned build run on a host: acquires the host lease, runs the command over SSH and
         returns a run id immediately. Do NOT poll with sleeps — use build_wait(run_id) or build_status. The
-        host lease is released automatically when the run reaches a terminal status."""
+        host lease is released automatically when the run reaches a terminal status. The lease's phase is
+        the run `kind` (e.g. 'compile'), so a run whose compile hangs while its heartbeat stays fresh reads
+        STUCK on list_hosts — the server, not the client, decides that."""
         return _runs(lambda: builds.start(db, host_id, command, kind=kind, log_path=log_path, notes=notes))
 
     @server.tool(annotations=READ_ONLY)

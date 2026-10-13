@@ -2,10 +2,16 @@
 
 from __future__ import annotations
 
+import json
 import os
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
+
+# Lock stuck-ness defaults (see hosts.py). A fresh heartbeat whose phase has not moved for longer
+# than the threshold reads STUCK; a per-phase override wins (e.g. {'compile': 7200} lets a legitimate
+# long compile run before it is flagged).
+DEFAULT_STUCK_SEC = 1800
 
 
 @dataclass(frozen=True, slots=True)
@@ -75,6 +81,38 @@ class Settings:
     db_path: Path
     sources_dir: Path
     workspace_dir: Path  # local addon sources (scaffolded/written by the build tools)
+    stuck_sec: int = DEFAULT_STUCK_SEC  # phase age (s) after which a fresh lock reads STUCK
+    stuck_phases: dict[str, int] = field(default_factory=dict)  # per-phase threshold overrides
+
+
+def _stuck_phases() -> dict[str, int]:
+    """Parse S2DOCS_STUCK_PHASES (a JSON object of phase -> seconds); ignore anything malformed.
+
+    Fail-soft on purpose: a bad env value must never take down the read paths that compute stuck-ness.
+    """
+    raw = (os.environ.get("S2DOCS_STUCK_PHASES") or "").strip()
+    if not raw:
+        return {}
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    out: dict[str, int] = {}
+    for key, value in data.items():
+        try:
+            out[str(key)] = int(value)
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def _stuck_sec() -> int:
+    try:
+        return int(os.environ.get("S2DOCS_STUCK_SEC") or DEFAULT_STUCK_SEC)
+    except ValueError:
+        return DEFAULT_STUCK_SEC
 
 
 @lru_cache
@@ -82,7 +120,14 @@ def get_settings() -> Settings:
     data_dir = Path(os.environ.get("S2DOCS_DATA_DIR", Path.cwd() / "data")).expanduser().resolve()
     db_path = Path(os.environ.get("S2DOCS_DB", data_dir / "s2docs.db")).expanduser().resolve()
     workspace = Path(os.environ.get("S2DOCS_WORKSPACE", data_dir / "workspace")).expanduser().resolve()
-    return Settings(data_dir=data_dir, db_path=db_path, sources_dir=data_dir / "sources", workspace_dir=workspace)
+    return Settings(
+        data_dir=data_dir,
+        db_path=db_path,
+        sources_dir=data_dir / "sources",
+        workspace_dir=workspace,
+        stuck_sec=_stuck_sec(),
+        stuck_phases=_stuck_phases(),
+    )
 
 
 def get_game(game_id: str) -> Game:

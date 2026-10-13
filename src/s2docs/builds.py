@@ -230,6 +230,7 @@ def start(
     log_path: str | Path | None = None,
     timeout_sec: int = DEFAULT_TIMEOUT_SEC,
     ttl_sec: int = hosts.DEFAULT_TTL_SEC,
+    lease_renew_sec: float | None = None,
     notes: str | None = None,
     poll_sec: float = DEFAULT_POLL_SEC,
 ) -> m.BuildRun:
@@ -238,12 +239,20 @@ def start(
     The host lease (owner 'build:<run-id>') is acquired here, not by the caller, so a second actor
     gets `hosts.HostLocked` instead of a corrupted compile. It is released when the run reaches a
     terminal status (or immediately if the launch itself fails).
+
+    The lease carries the run's ``kind`` as its initial **phase**, and the watcher renews the
+    heartbeat while the process runs (``lease_renew_sec``, default ttl/3): a legitimately running
+    build therefore does not lose its host to a spurious TTL expiry. Because the phase does not move
+    on its own, a hung compile still reads STUCK server-side (a fresh heartbeat is not progress).
+    If another owner does take the host, the run is finalized 'cancelled' with a clear note instead
+    of driving a host it no longer owns.
     """
     if not command.strip():
         raise BuildError("command is required")
     host = hosts.get_host(db, host_id)  # raises HostError if unknown
     rid = "b-" + secrets.token_hex(4)
     owner = f"build:{rid}"
+    phase = kind.strip() or None  # e.g. 'compile' — settable per-run via kind, allowlisted per phase
 
     if log_path is None:
         log_dir = get_settings().data_dir / "builds"
@@ -252,7 +261,7 @@ def start(
     log_path = Path(log_path)
     log_path.parent.mkdir(parents=True, exist_ok=True)
 
-    hosts.claim_host(db, host_id, owner, ttl_sec=ttl_sec)  # raises HostLocked on contention
+    hosts.claim_host(db, host_id, owner, ttl_sec=ttl_sec, phase=phase)  # raises HostLocked on contention
     with db.writer() as conn, conn:
         conn.execute(
             "INSERT INTO build_runs (id, host_id, kind, command, status, owner, log_path, notes) "
@@ -277,7 +286,10 @@ def start(
     with db.writer() as conn, conn:
         conn.execute("UPDATE build_runs SET handle = ? WHERE id = ?", (str(proc.pid), rid))
     threading.Thread(
-        target=_watch, args=(db, rid, host_id, owner, proc, log_fh, timeout_sec, poll_sec), daemon=True
+        target=_watch,
+        args=(db, rid, host_id, owner, proc, log_fh, timeout_sec, poll_sec),
+        kwargs={"ttl_sec": ttl_sec, "lease_renew_sec": lease_renew_sec, "phase": phase},
+        daemon=True,
     ).start()
     return get_run(db, rid)
 
@@ -291,17 +303,31 @@ def _watch(
     log_fh: IO[bytes],
     timeout_sec: int,
     poll_sec: float,
+    *,
+    ttl_sec: int = hosts.DEFAULT_TTL_SEC,
+    lease_renew_sec: float | None = None,
+    phase: str | None = None,
 ) -> None:
     deadline = time.monotonic() + timeout_sec
+    renew_interval = lease_renew_sec if lease_renew_sec is not None else max(1.0, ttl_sec / 3)
+    last_renew = time.monotonic()
     timed_out = False
+    lease_lost: str | None = None
     while proc.poll() is None:
         status = _status_of(db, rid)
         if status == "cancelled":
             break
-        if time.monotonic() > deadline:
+        now = time.monotonic()
+        if now > deadline:
             timed_out = True
             _terminate(proc)
             break
+        if now - last_renew >= renew_interval:
+            lease_lost = _renew_lease(db, host_id, owner, phase)
+            last_renew = now
+            if lease_lost:
+                _terminate(proc)
+                break
         time.sleep(poll_sec)
     rc = proc.wait()
     log_fh.close()
@@ -314,11 +340,37 @@ def _watch(
     if current == "cancelled" or timed_out:
         final = "cancelled"
     extra = f"timed out after {timeout_sec}s" if timed_out else None
+    if lease_lost:
+        # Explicit expiry behaviour: never keep driving a host another owner took. Finalize without
+        # touching their lock.
+        final = "cancelled"
+        extra = f"host lease lost: {lease_lost}"
+        _finalize(db, rid, host_id, owner, final, rc, notes=extra, release_lease=False)
+        return
     _finalize(db, rid, host_id, owner, final, rc, notes=extra)
 
 
+def _renew_lease(db: Database, host_id: str, owner: str, phase: str | None) -> str | None:
+    """Server-side liveness for a running build: the run keeps its own lease alive. Returns a message
+    when the lease is gone (taken over or released), else None. Same-phase heartbeats keep phase_since,
+    so a phase that never moves still reads STUCK."""
+    try:
+        hosts.heartbeat_host(db, host_id, owner, phase=phase)
+        return None
+    except hosts.HostError as exc:
+        return str(exc)
+
+
 def _finalize(
-    db: Database, rid: str, host_id: str, owner: str, status: str, exit_code: int | None, *, notes: str | None = None
+    db: Database,
+    rid: str,
+    host_id: str,
+    owner: str,
+    status: str,
+    exit_code: int | None,
+    *,
+    notes: str | None = None,
+    release_lease: bool = True,
 ) -> None:
     run = get_run(db, rid)
     summary: dict = {}
@@ -337,13 +389,17 @@ def _finalize(
             "updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE id = ?",
             (status, exit_code, json.dumps(summary), merged_notes, rid),
         )
-    _release(db, host_id, owner)
+    if release_lease:
+        _release(db, host_id, owner)
 
 
 def _release(db: Database, host_id: str, owner: str) -> None:
-    # host or lock already gone → nothing to release
+    """Free the lease iff it is still ours — releasing clears the lock (and its phase). Never deletes
+    another owner's lock: on a takeover the run is finalized without touching the new owner's lease."""
     with contextlib.suppress(hosts.HostError):
-        hosts.release_host(db, host_id, owner, force=True)
+        lock = hosts.get_host(db, host_id).lock
+        if lock is not None and lock.owner == owner:
+            hosts.release_host(db, host_id, owner)
 
 
 def _terminate(proc: subprocess.Popen) -> None:

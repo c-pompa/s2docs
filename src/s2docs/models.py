@@ -376,15 +376,27 @@ class HostLock(BaseModel):
     ttl_sec: int
     fresh: bool = Field(description="heartbeat within ttl (False = stale, can be taken over)")
     age_sec: int = Field(description="seconds since the last heartbeat")
+    phase: str = Field(
+        default="", description="what the owner is doing ('', 'compile', 'test', ...); '' = not reported"
+    )
+    phase_since: str | None = Field(default=None, description="when the current phase started (NULL when no phase)")
+    phase_age_sec: int | None = Field(default=None, description="seconds since the phase was last changed")
+    note: str | None = Field(default=None, description="free text from the owner, e.g. the current step")
+    stuck: bool = Field(
+        default=False,
+        description="fresh heartbeat but the phase has not moved past the server's threshold (liveness != progress)",
+    )
+    stuck_reason: str | None = Field(default=None, description="why the server marked this lock stuck")
 
 
 class HostLockEvent(BaseModel):
-    """One host-lock mutation (claim/takeover/release), for the Hosts page's lock history."""
+    """One host-lock mutation (claim/takeover/release/phase change), for the Hosts page's lock history."""
 
     id: int
     host_id: str
     owner: str
-    event: Literal["claimed", "released"]
+    event: Literal["claimed", "released", "phase"]
+    phase: str | None = None
     detail: str | None = None
     ts: str
 

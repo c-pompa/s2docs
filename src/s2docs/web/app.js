@@ -49,12 +49,19 @@ const gpuOf = (h) => {
   const gpus = h.facts?.probe?.gpu || h.facts?.gpu || [];
   return gpus.map((g) => `${g.name || "gpu"}${g.util_pct != null ? ` (${g.util_pct}%)` : ""}`).join(", ") || "—";
 };
-const lockCell = (lock) =>
-  !lock
-    ? `<span class="muted">free</span>`
-    : `${badge(lock.owner, lock.fresh ? "kind" : "warn")}<div class="muted">${lock.fresh ? "fresh" : "STALE"} · heartbeat ${human(
-        lock.age_sec,
-      )} ago · ttl ${human(lock.ttl_sec)}</div>`;
+const lockCell = (lock) => {
+  if (!lock) return `<span class="muted">free</span>`;
+  // A fresh heartbeat that is not STUCK reads healthy; the SERVER decides stuck-ness from the phase age.
+  const phase = lock.phase
+    ? ` · phase ${esc(lock.phase)}${lock.phase_age_sec != null ? ` ${human(lock.phase_age_sec)}` : ""}`
+    : " · no phase reported";
+  const state = lock.stuck ? "STUCK" : lock.fresh ? "fresh" : "STALE";
+  return `${badge(lock.owner, lock.fresh && !lock.stuck ? "kind" : "warn")}${
+    lock.stuck ? " " + badge("STUCK", "warn") : ""
+  }<div class="muted">${state} · heartbeat ${human(lock.age_sec)} ago · ttl ${human(lock.ttl_sec)}${phase}${
+    lock.stuck && lock.stuck_reason ? `<br>${esc(lock.stuck_reason)}` : ""
+  }</div>`;
+};
 
 const lockRows = (evs) =>
   evs.length
