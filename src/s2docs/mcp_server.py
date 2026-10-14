@@ -638,7 +638,13 @@ def create_mcp_server(db: Database, workspace: Path | None = None) -> MCPServer:
         verify: Annotated[bool, Field(description="Re-check MD5s on the host after copying")] = True,
         owner: Annotated[
             str | None,
-            Field(description="Your host-lock owner if you already hold the lease (the push reuses it)"),
+            Field(
+                description=(
+                    "Your host-lock owner if you already hold the lease (the push reuses it and leaves it "
+                    "locked). Inside an orchestration project pass 'project:<project_id>' — the project holds "
+                    "the lease for the whole run"
+                )
+            ),
         ] = None,
     ) -> m.Deployment:
         """Copy files to a host and verify what landed (Get-FileHash over SSH). Returns a deploy id whose
@@ -646,7 +652,8 @@ def create_mcp_server(db: Database, workspace: Path | None = None) -> MCPServer:
 
         The push takes the host lease for the copy+verify window: a host held by another owner is a
         conflict (pass that owner if it is you), a free host is claimed as 'deploy:<id>' and released
-        when the copy finishes."""
+        when the copy finishes. Inside an orchestration project the project already holds the lease as
+        'project:<project_id>', so pass that as `owner` (the `cs2_live_test` deploy step does)."""
         return _runs(
             lambda: deploys.push(
                 db,

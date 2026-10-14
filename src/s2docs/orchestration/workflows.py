@@ -524,11 +524,12 @@ _register(
                 title="Deploy the build to the host",
                 kind="build",
                 instructions=(
-                    "Deploy the build to `$host_id` with `deploy_push` (manifest: $deploy_manifest). Every file's "
-                    "MD5 is re-checked on the host, so `deploy_push` only succeeds when the bytes landed — and its "
-                    "returned deploy id is `verified`. Record that deploy id as an artifact of this step. The "
-                    "server checks the deployment is `verified` when you mark this done (`deploy_verify` re-checks "
-                    "a drifted copy)."
+                    "Deploy the build to `$host_id` with `deploy_push` (manifest: $deploy_manifest; owner "
+                    "`project:$project_id` — this project already holds the host lease, so the push reuses it "
+                    "instead of taking its own). Every file's MD5 is re-checked on the host, so `deploy_push` "
+                    "only succeeds when the bytes landed — and its returned deploy id is `verified`. Record "
+                    "that deploy id as an artifact of this step. The server checks the deployment is `verified` "
+                    "when you mark this done (`deploy_verify` re-checks a drifted copy)."
                 ),
                 tools=("deploy_push", "deploy_verify", "deploy_list", "add_evidence"),
                 depends_on=("probe",),
