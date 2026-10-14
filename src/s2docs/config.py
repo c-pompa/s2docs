@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import sys
 import time
+import tomllib
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
@@ -107,21 +107,33 @@ class Settings:
         return bool(self.auth_token)
 
 
+def _names_this_project(text: str) -> bool:
+    """True when the pyproject text names this project in its ``[project]`` table.
+
+    Scoped to ``[project].name`` (parsed with stdlib ``tomllib``) so a stray ``name = "s2docs"`` in
+    another table can't make an unrelated repo look like our checkout. Any parse error means 'no'.
+    """
+    try:
+        data = tomllib.loads(text)
+    except tomllib.TOMLDecodeError:
+        return False
+    project = data.get("project")
+    return isinstance(project, dict) and project.get("name") == "s2docs"
+
+
 def _source_checkout() -> Path | None:
     """The repo root when this package runs from a source checkout (editable install), else None.
 
     Detected by src layout: ``<root>/src/s2docs/config.py`` → ``parents[2]`` is ``<root>``, which must
-    hold a ``pyproject.toml`` naming this project. A non-editable installed copy has no such file, so
-    the default falls back to a per-user directory instead of guessing from the cwd.
+    hold a ``pyproject.toml`` naming this project in ``[project]``. A non-editable installed copy has
+    no such file, so the default falls back to a per-user directory instead of guessing from the cwd.
     """
     root = Path(__file__).resolve().parents[2]
     try:
         text = (root / "pyproject.toml").read_text(encoding="utf-8")
     except OSError:
         return None
-    if re.search(r'^\s*name\s*=\s*["\']s2docs["\']', text, re.MULTILINE):
-        return root
-    return None
+    return root if _names_this_project(text) else None
 
 
 def _platform_data_dir() -> Path:

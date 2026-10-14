@@ -47,10 +47,12 @@ def _fail(message: str, code: int) -> int:
 
 
 def _warn_data_dir() -> None:
-    """Loud WARNING (stderr) when S2DOCS_DATA_DIR is unset — the data dir silently defaults to cwd.
+    """Loud WARNING (stderr) when S2DOCS_DATA_DIR is unset — the data dir has a *fixed* default.
 
-    A server and an MCP client started from different working directories would then read/write two
-    different stores (the split-database incident class); make the default impossible to miss.
+    With the variable unset the data dir is the source checkout's ``./data`` (or a per-user directory
+    for an installed copy) — never the cwd. A server and an MCP client then agree on one store; the
+    warning still names the resolved path so a split-database misconfiguration is impossible to miss.
+    Stderr only: a stdio MCP client speaks JSON-RPC on stdout.
     """
     if os.environ.get("S2DOCS_DATA_DIR"):
         return

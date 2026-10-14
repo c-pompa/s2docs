@@ -56,7 +56,7 @@ uv run s2docs mcp                     # MCP over stdio
 | `S2DOCS_DATA_DIR` | the checkout's `./data` when running from a source checkout, else a per-user dir (`~/.local/share/s2docs`, or `%LOCALAPPDATA%\s2docs` on Windows) | Directory holding the index, workspace and captured logs. **Never** relative to the cwd (see below). |
 | `S2DOCS_DB` | `$S2DOCS_DATA_DIR/s2docs.db` | The SQLite index file. |
 | `S2DOCS_WORKSPACE` | `$S2DOCS_DATA_DIR/workspace` | Local addon sources written by the build tools. |
-| `S2DOCS_AUTH_TOKEN` | unset (auth off) | When set, mutating `/api` requests and **every** `/mcp` request must present this token (see below). |
+| `S2DOCS_AUTH_TOKEN` | unset (auth off) | When set, mutating `/api` requests and **every** `/mcp` request must present this token (see below). Read once at startup — restart the server to rotate it. |
 | `S2DOCS_STUCK_SEC` | `1800` | Phase age (seconds) after which a fresh host lock reads STUCK. |
 | `S2DOCS_STUCK_PHASES` | built-in per-phase defaults | JSON object of per-phase stuck thresholds, **merged over** the built-ins. |
 | `S2DOCS_REAP_SEC` | `60` | Seconds between orphan-run reaper passes (`<= 0` disables the periodic task). |
@@ -179,7 +179,7 @@ start_project ─▶ brief (ready steps + tools + rendered prompt) ─▶ agent 
                      └──────────────── next ready steps (dependency DAG) ◀──────┘
 ```
 
-- **Gates** are checked on the server, not taken on trust: `scripts_typecheck` re-runs `tsc` on every `.js` file in the addon, `cfgs_valid` validates every `.cfg`, `addon_exists`, and `evidence` — which requires at least one stored non-note evidence row for the step (via `add_evidence`); notes and artifacts alone no longer pass. `cs2_live_test` adds `host_claimed` (the project really holds the host lease, owner `project:<id>`) and `deploy_verified` (a deployment to the host is recorded as `verified` in the deploy registry). A failed gate returns the exact errors (HTTP 409 / MCP tool error).
+- **Gates** are checked on the server, not taken on trust: `scripts_typecheck` re-runs `tsc` on every `.js` file in the addon, `cfgs_valid` validates every `.cfg`, `addon_exists`, and `evidence` — which requires at least one stored non-note evidence row for the step (via `add_evidence`); notes and artifacts alone no longer pass. `cs2_live_test` adds `host_claimed` (the project really holds the host lease, owner `project:<id>`) and `deploy_verified` — the deployment id from `deploy_push`, recorded as an artifact of the step, must belong to the project's host and be `verified` in the deploy registry (there is **no** latest-for-host fallback, so a stale or unrelated deployment can never satisfy it). A failed gate returns the exact errors (HTTP 409 / MCP tool error).
 - **Steps form a DAG.** Independent steps (e.g. camera script and test cfg) become ready together, so a client can run them in parallel or hand them to subagents.
 - **Projects persist.** Any session can pick one up with `next_step <id>`, and the web UI's **Orchestration** page shows the step-level DAG, gates and evidence, and can start projects or move steps.
 - Steps are snapshotted when a project starts, so editing `orchestration/workflows.py` never changes a project in flight.

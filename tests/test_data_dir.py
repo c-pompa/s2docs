@@ -19,6 +19,18 @@ def test_source_checkout_is_detected():
     assert _source_checkout() == REPO_ROOT
 
 
+def test_project_name_check_is_scoped_to_the_project_table():
+    """The name must come from [project].name, not any `name = ...` anywhere in the file."""
+    from s2docs.config import _names_this_project
+
+    assert _names_this_project('[project]\nname = "s2docs"\n') is True
+    # a `name = "s2docs"` under another table is not the project name
+    assert _names_this_project('[tool.foo]\nname = "s2docs"\n') is False
+    assert _names_this_project('[project]\nname = "other-project"\n') is False
+    assert _names_this_project("[project]\nversion = \"1\"\n") is False
+    assert _names_this_project("this is not : toml [\n") is False
+
+
 def test_default_data_dir_is_the_checkout_not_cwd(tmp_path, monkeypatch):
     monkeypatch.delenv("S2DOCS_DATA_DIR", raising=False)
     monkeypatch.delenv("S2DOCS_DB", raising=False)

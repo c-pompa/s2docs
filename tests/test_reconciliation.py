@@ -7,7 +7,9 @@ path on the server. No real host/network is touched.
 
 from __future__ import annotations
 
+import argparse
 import os
+import sys
 from pathlib import Path
 
 import anyio
@@ -207,13 +209,65 @@ def test_cli_warns_loudly_when_data_dir_is_unset(monkeypatch, capsys):
     monkeypatch.delenv("S2DOCS_DATA_DIR", raising=False)
     get_settings.cache_clear()
     cli._warn_data_dir()
-    err = capsys.readouterr().err
-    assert "S2DOCS_DATA_DIR" in err and "WARNING" in err.upper()
-    # when it is set, no warning
+    captured = capsys.readouterr()
+    assert "S2DOCS_DATA_DIR" in captured.err and "WARNING" in captured.err.upper()
+    # stdout must stay clean — a stdio MCP client speaks JSON-RPC on stdout, so a warning there
+    # would corrupt the stream.
+    assert captured.out == ""
+    # when it is set, no warning on either stream
     monkeypatch.setenv("S2DOCS_DATA_DIR", "/tmp/somewhere")
     get_settings.cache_clear()
     cli._warn_data_dir()
-    assert "S2DOCS_DATA_DIR" not in capsys.readouterr().err
+    captured = capsys.readouterr()
+    assert "S2DOCS_DATA_DIR" not in captured.err and captured.out == ""
+
+
+def test_data_dir_warning_fires_only_for_serve_and_mcp(monkeypatch):
+    """Only `serve` and `mcp` (the long-lived processes) warn; a one-shot read command does not."""
+    import types
+
+    from s2docs import cli, mcp_server
+
+    calls: list[int] = []
+    monkeypatch.setattr(cli, "_warn_data_dir", lambda: calls.append(1))
+
+    # serve and mcp warn
+    fake_uvicorn = types.SimpleNamespace(run=lambda *a, **k: None)
+    monkeypatch.setitem(sys.modules, "uvicorn", fake_uvicorn)
+    cli._cmd_serve(argparse.Namespace(host="127.0.0.1", port=8000))
+    assert calls == [1]
+
+    class _Server:
+        def run(self, *_a, **_k):
+            return None
+
+    monkeypatch.setattr(mcp_server, "create_mcp_server", lambda *a, **k: _Server())
+    cli._cmd_mcp(argparse.Namespace(transport="stdio", host="127.0.0.1", port=8000))
+    assert calls == [1, 1]
+
+    # a one-shot command (stats) never warns
+    class _Conn:
+        def __enter__(self):
+            return object()
+
+        def __exit__(self, *_exc):
+            return False
+
+    class _Repo:
+        def stats(self):
+            class _S:
+                def model_dump_json(self, indent=None):
+                    return "{}"
+
+            return _S()
+
+    monkeypatch.setattr(cli, "Database", lambda _p: types.SimpleNamespace(reader=lambda: _Conn()))
+    monkeypatch.setattr(cli, "get_settings", lambda: types.SimpleNamespace(db_path="x"))
+    import s2docs.db.repository as repo_mod
+
+    monkeypatch.setattr(repo_mod, "Repository", lambda _conn: _Repo())
+    cli._cmd_stats(argparse.Namespace())
+    assert calls == [1, 1]  # unchanged
 
 
 # ------------------------------------------- 4 build log_path confinement

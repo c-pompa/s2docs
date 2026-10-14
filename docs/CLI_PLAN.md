@@ -56,7 +56,8 @@ This plan defines the CLI/MCP/HTTP shapes the services must expose.
   deploy → test → release` (`needs_addon=False`, generic inputs `host_id` / `deploy_manifest` /
   `test_description`). New server-side gates: `host_claimed` (the host lock is held by this
   project's owner, `project:<pid>`) and `deploy_verified` (the deployment named in the step's
-  artifacts, else the host's latest, is `verified` in the deploy registry) — both re-checked by
+  artifacts must belong to the project's host and be `verified` in the deploy registry — there is no
+  latest-for-host fallback) — both re-checked by
   `engine._check_gate`, never trusted from the caller. The `test` step's gate is the existing
   `evidence` gate. `start()` now also renders `$project_id` into step instructions so the workflow
   can name its own lock owner. Since the project holds the lease for the whole run, `test_start` is
