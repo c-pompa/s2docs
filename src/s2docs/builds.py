@@ -211,7 +211,12 @@ def list_runs(db: Database, *, host_id: str | None = None, active: bool = False)
     sql += " ORDER BY created_at DESC"
     with db.reader() as conn:
         rows = conn.execute(sql, (host_id, host_id)).fetchall()
-    return [_row_to_run(r) for r in rows]
+        runs = [_row_to_run(r) for r in rows]
+        # Attach the host lock this run still holds (owner build:<id>) so the Activity page can show
+        # STUCK/phase; a run whose lease was taken over carries no summary.
+        for run in runs:
+            run.lock = hosts.lock_summary(conn, run.host_id, run.owner)
+        return runs
 
 
 def _status_of(db: Database, run_id: str) -> str | None:
@@ -254,10 +259,31 @@ def start(
     owner = f"build:{rid}"
     phase = kind.strip() or None  # e.g. 'compile' — settable per-run via kind, allowlisted per phase
 
+    # One active run per host: a stale/expired lease must not let a second compile start on the same
+    # host while the first run's record is still 'running' (an orphaned run has no live watcher).
+    active = list_runs(db, host_id=host_id, active=True)
+    if active:
+        raise BuildError(
+            f"host {host_id} already has a running build run {active[0].id!r} "
+            f"(status {active[0].status!r}); cancel it or wait for it to finish"
+        )
+
+    # Confine the log to the data dir: an unauthenticated LAN POST must not be able to truncate any
+    # file the server can write. A client-supplied path outside the data dir is rejected; otherwise
+    # the path is derived server-side.
+    settings = get_settings()
     if log_path is None:
-        log_dir = get_settings().data_dir / "builds"
+        log_dir = settings.data_dir / "builds"
         log_dir.mkdir(parents=True, exist_ok=True)
         log_path = log_dir / f"{rid}.log"
+    else:
+        resolved = Path(log_path).expanduser().resolve()
+        data_dir = settings.data_dir.resolve()
+        if resolved != data_dir and not resolved.is_relative_to(data_dir):
+            raise BuildError(
+                f"log_path {resolved} is outside the data dir {data_dir}; derive it server-side instead"
+            )
+        log_path = resolved
     log_path = Path(log_path)
     log_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -456,8 +482,43 @@ def cancel(db: Database, run_id: str) -> m.BuildRun:
         entry = _RUNNERS.get(run_id)
     if entry is not None:
         _terminate(entry[0])  # the watcher notices the cancelled record and finalizes
-    _release(db, run.host_id, run.owner)  # the run is terminal: free the lease now, whoever owns it
+    _release(db, run.host_id, run.owner)  # the run is terminal: free its own lease now
     return get_run(db, run_id)
+
+
+def reconcile_orphans(db: Database) -> list[str]:
+    """Finalize build runs that lost their watcher (e.g. the server restarted).
+
+    Any run still 'queued'/'running' whose watcher is not alive in *this* process is set
+    'interrupted', and its ``build:<id>`` lease is released only if that run still owns it. Returns
+    the run ids that were interrupted. Called once at app startup and by the periodic reaper.
+    """
+    with _RUNNERS_LOCK:
+        live = set(_RUNNERS)
+    interrupted: list[str] = []
+    note = "interrupted: no live watcher for this run in the current server process"
+    with db.writer() as conn, conn:
+        rows = conn.execute(
+            "SELECT id, host_id, owner FROM build_runs WHERE status IN ('queued', 'running')"
+        ).fetchall()
+        for r in rows:
+            if r["id"] in live:
+                continue
+            conn.execute(
+                "UPDATE build_runs SET status = 'interrupted', "
+                "notes = CASE WHEN notes IS NULL OR notes = '' THEN ? ELSE notes || char(10) || ? END, "
+                "updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE id = ?",
+                (note, note, r["id"]),
+            )
+            lock = conn.execute("SELECT owner FROM host_locks WHERE host_id = ?", (r["host_id"],)).fetchone()
+            if lock is not None and lock["owner"] == r["owner"]:
+                conn.execute("DELETE FROM host_locks WHERE host_id = ? AND owner = ?", (r["host_id"], r["owner"]))
+                conn.execute(
+                    "INSERT INTO host_lock_events (host_id, owner, event, detail) VALUES (?, ?, 'released', ?)",
+                    (r["host_id"], r["owner"], "released: orphaned run interrupted at startup"),
+                )
+            interrupted.append(r["id"])
+    return interrupted
 
 
 def record_artifacts(db: Database, run_id: str, paths: list[str]) -> m.BuildRun:

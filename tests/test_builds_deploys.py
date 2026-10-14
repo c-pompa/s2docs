@@ -81,9 +81,8 @@ def fake_popen(payload: bytes = b"", rc: int = 0, hang: bool = False, record: li
 
 
 def _start(bdb, tmp_path, **kw):
-    return builds.start(
-        bdb, "desktop-pc", "resourcecompiler -game csgo -nop4 addon", log_path=tmp_path / "run.log", **kw
-    )
+    # The log path is derived server-side (inside the data dir); a client cannot point it elsewhere.
+    return builds.start(bdb, "desktop-pc", "resourcecompiler -game csgo -nop4 addon", **kw)
 
 
 # ------------------------------------------------------------------- build runs
@@ -121,6 +120,21 @@ def test_build_start_locked_is_server_side(bdb, tmp_path, monkeypatch):
     with pytest.raises(hosts.HostLocked):
         _start(bdb, tmp_path)
     assert builds.list_runs(bdb) == []  # nothing recorded when the lease can't be taken
+
+
+def test_build_start_refuses_when_host_already_has_a_running_run(bdb, tmp_path, monkeypatch):
+    """One active build run per host: even if the lease looks free (a stale/expired holder), a second
+    build_start must not launch a competing compile on the same host."""
+    monkeypatch.setattr(builds.subprocess, "Popen", fake_popen(hang=True))
+    first = _start(bdb, tmp_path)
+    assert first.status == "running"
+    # simulate a lease that expired/freed while the run record is still 'running'
+    hosts.release_host(bdb, "desktop-pc", f"build:{first.id}")
+    with pytest.raises(builds.BuildError, match="running build"):
+        _start(bdb, tmp_path)
+    assert [r.id for r in builds.list_runs(bdb, active=True)] == [first.id]
+    builds.cancel(bdb, first.id)
+    builds.wait(bdb, first.id, timeout_sec=5, poll_sec=0.02)
 
 
 def test_build_cancel_terminates_and_releases(bdb, tmp_path, monkeypatch):
@@ -475,7 +489,6 @@ def test_build_material_warnings_surface_in_summary(bdb, tmp_path, monkeypatch):
         bdb,
         "desktop-pc",
         "resourcecompiler -game csgo addon",
-        log_path=tmp_path / "run.log",
         notes="target=de_dust2_iso map=de_dust2_iso",
     )
     finished = builds.wait(bdb, run.id, timeout_sec=5, poll_sec=0.02)

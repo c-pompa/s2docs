@@ -285,7 +285,7 @@ class _HangingProc:
 
 def test_build_start_sets_phase_and_release_clears_it(hdb, tmp_path, monkeypatch):
     monkeypatch.setattr(builds.subprocess, "Popen", _HangingProc)
-    run = builds.start(hdb, "desktop-pc", "resourcecompiler addon", kind="compile", log_path=tmp_path / "r.log")
+    run = builds.start(hdb, "desktop-pc", "resourcecompiler addon", kind="compile")
     lock = hosts.get_host(hdb, "desktop-pc").lock
     assert lock is not None and lock.owner == f"build:{run.id}" and lock.phase == "compile"
     builds.cancel(hdb, run.id)
@@ -311,7 +311,6 @@ def test_build_renews_its_lease_while_running(hdb, tmp_path, monkeypatch):
         "desktop-pc",
         "compile",
         kind="compile",
-        log_path=tmp_path / "r.log",
         ttl_sec=60,
         lease_renew_sec=0.02,
         poll_sec=0.01,
@@ -336,7 +335,6 @@ def test_build_cancelled_when_lease_is_taken(hdb, tmp_path, monkeypatch):
         "desktop-pc",
         "compile",
         kind="compile",
-        log_path=tmp_path / "r.log",
         ttl_sec=60,
         lease_renew_sec=0.02,
         poll_sec=0.01,

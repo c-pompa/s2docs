@@ -11,10 +11,24 @@ from pathlib import Path
 
 import pytest
 
-from s2docs.config import GAMES
+from s2docs.config import GAMES, get_settings
 from s2docs.db.connection import Database
 from s2docs.ingest.loader import load_build
 from s2docs.ingest.wiki import load_wiki
+
+
+@pytest.fixture(autouse=True)
+def _isolated_data_dir(tmp_path, monkeypatch):
+    """Point S2DOCS_DATA_DIR at a per-test tmp dir so server-derived paths never touch the checkout.
+
+    ``get_settings`` is lru_cached; clear it so the env is actually read, and clear again on teardown
+    so a later test (or a test that sets its own data dir) re-reads a clean environment.
+    """
+    monkeypatch.setenv("S2DOCS_DATA_DIR", str(tmp_path / "data"))
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
+
 
 CONVARS = """\
 mp_roundtime 5 (min: 0.1, max: 60, gamedll notify replicated release)
