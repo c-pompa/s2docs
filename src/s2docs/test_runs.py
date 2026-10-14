@@ -16,6 +16,7 @@ server's source of truth (and reconnect/resume). `elapsed_sec` is computed from 
 from __future__ import annotations
 
 import contextlib
+import os
 import secrets
 import sqlite3
 
@@ -58,12 +59,19 @@ def _row(row: sqlite3.Row) -> m.TestRun:
     )
 
 
+def _enrich_lock(conn: sqlite3.Connection, run: m.TestRun) -> m.TestRun:
+    """Attach the host lock summary when this run still holds it (owner 'test:<id>'), else None."""
+    if run.host_id:
+        run.lock = hosts.lock_summary(conn, run.host_id, f"test:{run.id}")
+    return run
+
+
 def get(db: Database, run_id: str) -> m.TestRun:
     with db.reader() as conn:
         row = conn.execute(_SELECT + " WHERE id = ?", (run_id,)).fetchone()
-    if row is None:
-        raise NotFound(f"no test run {run_id!r}")
-    return _row(row)
+        if row is None:
+            raise NotFound(f"no test run {run_id!r}")
+        return _enrich_lock(conn, _row(row))
 
 
 def current(db: Database) -> m.TestRun | None:
@@ -72,7 +80,7 @@ def current(db: Database) -> m.TestRun | None:
         row = conn.execute(
             _SELECT + " WHERE state != 'idle' ORDER BY updated_at DESC, created_at DESC LIMIT 1"
         ).fetchone()
-    return _row(row) if row else None
+        return _enrich_lock(conn, _row(row)) if row else None
 
 
 def list_runs(db: Database, *, state: str | None = None, host_id: str | None = None) -> list[m.TestRun]:
@@ -85,7 +93,7 @@ def list_runs(db: Database, *, state: str | None = None, host_id: str | None = N
             + " ORDER BY updated_at DESC, created_at DESC",
             (state, state, host_id, host_id),
         ).fetchall()
-    return [_row(r) for r in rows]
+        return [_enrich_lock(conn, _row(r)) for r in rows]
 
 
 def start(db: Database, name: str, *, host_id: str | None = None, project_id: str | None = None) -> m.TestRun:
@@ -125,6 +133,11 @@ def step(db: Database, run_id: str, text: str) -> m.TestRun:
             "UPDATE test_runs SET step = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE id = ?",
             (text, run_id),
         )
+    # Renew the run's lease: a long in-game session must not have its host taken over by a TTL expiry.
+    # A lost lease (taken over) is not fatal to a step label — the reaper will finalize the run.
+    if run.host_id is not None:
+        with contextlib.suppress(hosts.HostError):
+            hosts.heartbeat_host(db, run.host_id, f"test:{run_id}", phase="test")
     return get(db, run_id)
 
 
@@ -179,8 +192,58 @@ def clear(db: Database, run_id: str) -> m.TestRun:
     return get(db, run_id)
 
 
+def reap_stale(db: Database, *, stale_sec: int | None = None, note: str = "reaped: lease lost") -> list[str]:
+    """Finalize test runs whose host lease is gone (or whose host-less record has gone cold).
+
+    A run still 'running' whose host is held by someone else (or not held at all) can never finish
+    on its own — the owner is gone. A host-less run has no lease to check, so it is reaped once it
+    has not been touched for `stale_sec` (S2DOCS_TEST_RUN_STALE_SEC, default 3600 s). Returns the
+    reaped run ids. This is the periodic reaper's function; it is also callable directly.
+    """
+    if stale_sec is None:
+        try:
+            stale_sec = int(os.environ.get("S2DOCS_TEST_RUN_STALE_SEC") or 3600)
+        except ValueError:
+            stale_sec = 3600
+    reaped: list[str] = []
+    with db.writer() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            rows = conn.execute(
+                "SELECT id, host_id, "
+                "CAST(strftime('%s', 'now') AS INTEGER) - CAST(strftime('%s', updated_at) AS INTEGER) AS age "
+                "FROM test_runs WHERE state = 'running'"
+            ).fetchall()
+            for r in rows:
+                rid = r["id"]
+                if r["host_id"] is None:
+                    lost = r["age"] > stale_sec
+                else:
+                    lock = conn.execute(
+                        "SELECT owner FROM host_locks WHERE host_id = ?", (r["host_id"],)
+                    ).fetchone()
+                    lost = lock is None or lock["owner"] != f"test:{rid}"
+                if lost:
+                    conn.execute(
+                        "UPDATE test_runs SET state = 'idle', note = ?, "
+                        "finished_at = COALESCE(finished_at, strftime('%Y-%m-%dT%H:%M:%SZ', 'now')), "
+                        "updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE id = ?",
+                        (note, rid),
+                    )
+                    reaped.append(rid)
+            conn.commit()
+        except BaseException:
+            conn.rollback()
+            raise
+    return reaped
+
+
 def _release(db: Database, host_id: str | None, owner: str) -> None:
+    """Free the lease iff it is still ours. Never deletes another owner's lock (mirrors builds._release):
+    finishing/clearing an orphaned run must not delete whoever holds the host now."""
     if host_id is None:
         return
     with contextlib.suppress(hosts.HostError):
-        hosts.release_host(db, host_id, owner, force=True)
+        lock = hosts.get_host(db, host_id).lock
+        if lock is not None and lock.owner == owner:
+            hosts.release_host(db, host_id, owner)

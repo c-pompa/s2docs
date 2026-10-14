@@ -146,6 +146,26 @@ def test_test_run_claims_and_releases_host(edb, tmp_path):
     assert len(rows) == 1 and rows[0].data["state"] == "pass" and rows[0].data["name"] == "iso_test"
 
 
+def test_test_run_finish_does_not_release_another_owners_lock(edb, tmp_path):
+    """The review's critical finding: finishing/clearing an orphaned test run must only release the
+    lease it still owns — never delete whoever holds the host now."""
+    pid = _project(edb, tmp_path)
+    run = test_runs.start(edb, "iso_test", host_id="desktop-pc", project_id=pid)
+    hosts.claim_host(edb, "desktop-pc", "ws/new-owner", force=True)  # another owner takes over
+    test_runs.finish(edb, run.id, "pass", note="orphan finished")
+    lock = hosts.get_host(edb, "desktop-pc").lock
+    assert lock is not None and lock.owner == "ws/new-owner"  # the new owner's lock survives
+
+
+def test_test_run_clear_does_not_release_another_owners_lock(edb):
+    run = test_runs.start(edb, "iso_test", host_id="desktop-pc")
+    hosts.claim_host(edb, "desktop-pc", "ws/new-owner", force=True)
+    cleaned = test_runs.clear(edb, run.id)  # `iso_test off` on an orphaned run
+    assert cleaned.state == "idle"
+    lock = hosts.get_host(edb, "desktop-pc").lock
+    assert lock is not None and lock.owner == "ws/new-owner"
+
+
 def test_test_run_host_contention_and_unknown(edb):
     hosts.claim_host(edb, "desktop-pc", "ws/other")
     with pytest.raises(hosts.HostLocked):
