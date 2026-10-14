@@ -49,7 +49,23 @@ uv run s2docs prompt cs2_script task="teleport players who touch the lava"
 uv run s2docs mcp                     # MCP over stdio
 ```
 
-Environment variables: `S2DOCS_DATA_DIR` (default `./data`) and `S2DOCS_DB` (default `$S2DOCS_DATA_DIR/s2docs.db`).
+### Environment variables
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `S2DOCS_DATA_DIR` | the checkout's `./data` when running from a source checkout, else a per-user dir (`~/.local/share/s2docs`, or `%LOCALAPPDATA%\s2docs` on Windows) | Directory holding the index, workspace and captured logs. **Never** relative to the cwd (see below). |
+| `S2DOCS_DB` | `$S2DOCS_DATA_DIR/s2docs.db` | The SQLite index file. |
+| `S2DOCS_WORKSPACE` | `$S2DOCS_DATA_DIR/workspace` | Local addon sources written by the build tools. |
+| `S2DOCS_AUTH_TOKEN` | unset (auth off) | When set, mutating `/api` requests and **every** `/mcp` request must present this token (see below). |
+| `S2DOCS_STUCK_SEC` | `1800` | Phase age (seconds) after which a fresh host lock reads STUCK. |
+| `S2DOCS_STUCK_PHASES` | built-in per-phase defaults | JSON object of per-phase stuck thresholds, **merged over** the built-ins. |
+| `S2DOCS_REAP_SEC` | `60` | Seconds between orphan-run reaper passes (`<= 0` disables the periodic task). |
+
+**The data dir never depends on the working directory.** With `S2DOCS_DATA_DIR` unset the default is a *fixed* path: a source checkout uses its own `./data`, and anything else uses a per-user directory. This closes the split-database incident — a server and an MCP client that were launched from different working directories (an MCP config that predates the env fix spawns `s2docs mcp` with `cwd` set to the client's profile dir) used to read and write two different stores, leaving a shadow DB next to an unrelated cwd. `serve` and `mcp` still print a loud stderr warning when the variable is unset, now naming the resolved path. `S2DOCS_DB` and `S2DOCS_WORKSPACE` overrides are unchanged.
+
+**Auth is opt-in.** Set `S2DOCS_AUTH_TOKEN` and the server requires `Authorization: Bearer <token>` or `X-S2docs-Token: <token>` on every non-`GET`/`HEAD`/`OPTIONS` request under `/api` and on every request to the HTTP MCP endpoint `/mcp`; a missing or wrong token is `401` (compared in constant time). `GET` routes and the static web UI stay open, and stdio MCP is unaffected (it is local). With the variable unset the behaviour is unchanged — no auth — and `GET /api/health` and the MCP `server_info` tool report `auth_required: false` (they report only the boolean, never the token).
+
+**`deploy_push` takes the host lease.** A deploy now arbitrates the host through the same lock the build and test services use, so it can never copy onto a host another owner holds. Pass `owner` if you already hold the lease — the push reuses it and leaves it locked; otherwise a free host is claimed as `deploy:<id>` for the copy+verify window and released afterwards (owner-conditional, even on failure), and a host held by a different owner is a `409` (`HostLocked`). The effective owner is recorded on the deployment row. The `deploy_verified` orchestration gate no longer falls back to the host's latest deployment: the step must name the deployment id from `deploy_push` as an artifact, and it must belong to the project's host and be `verified`.
 
 ## Web UI
 
@@ -127,7 +143,7 @@ The same operations exist on the CLI (`s2docs host list|show|register|probe|lock
 
 | Deploy tools | |
 |---|---|
-| `deploy_push` | Copy files to a host per a manifest (`{path, local}`), then verify what landed by re-reading MD5s over SSH (`Get-FileHash`). Returns a deploy id with per-file `md5`/`verified` |
+| `deploy_push` | Copy files to a host per a manifest (`{path, local}`), then verify what landed by re-reading MD5s over SSH (`Get-FileHash`). Returns a deploy id with per-file `md5`/`verified`. Takes the host lease for the copy+verify window: `owner` reuses your existing lease, a free host is claimed as `deploy:<id>` and released afterwards, a host held by another owner is a `HostLocked` error |
 | `deploy_verify` | Re-check a recorded deployment's MD5s and update its status |
 | `deploy_list` | Recent deployments, optionally per host |
 
