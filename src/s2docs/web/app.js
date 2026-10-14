@@ -465,6 +465,7 @@ async function route() {
   renderNav(section);
   clearTimeout(liveTimer); // any auto-refresh from the previous page stops now
   liveTimer = null;
+  liveDirty = false; // a fresh page starts unedited; the previous page's typing is gone
   if (section === "search" && params.q !== undefined) $("#q").value = params.q;
   view.innerHTML = `<p class="muted">Loading…</p>`;
   try {
@@ -482,9 +483,21 @@ async function route() {
       const tick = async () => {
         const el = view.querySelector(selector);
         if (!el) { liveTimer = null; return; }
-        try { el.innerHTML = await render(); } catch { /* keep the last good view */ }
+        // Guard (1): never replace a live region the user is editing — that swap would wipe the notes
+        // box / screenshot note mid-typing. Skip this render (just reschedule) while an input inside the
+        // region has focus or holds text the user typed but has not submitted.
+        if (liveBeingEdited(el)) { liveTimer = setTimeout(tick, delay()); return; }
+        try {
+          // Guard (2): if a background render does run, snapshot each input's value/focus/caret by a
+          // stable key and restore it after the innerHTML swap, so nothing half-typed is dropped.
+          const saved = snapshotLiveInputs(el);
+          el.innerHTML = await render();
+          restoreLiveInputs(el, saved);
+        } catch { /* keep the last good view */ }
         liveTimer = setTimeout(tick, delay());
       };
+      const region = view.querySelector(selector);
+      if (region) region.addEventListener("input", liveInputListener); // mark dirty the moment the user types
       liveTimer = setTimeout(tick, delay());
     }
   } catch (e) {
@@ -497,6 +510,61 @@ async function route() {
 let liveTimer = null;
 let pendingLive = null;
 const liveBody = (selector, render, ms = 5000) => { pendingLive = { selector, render, ms }; };
+
+// ---- Keeping a live region safe to type in ------------------------------------------------
+// A live page (job detail) parks forms INSIDE its #live region, and the tick above replaces that
+// region's innerHTML on every poll. Two guards stop that from eating the user's typing:
+//   (1) liveBeingEdited() — the tick skips the render (reschedules only) while any input/textarea in
+//       the region has focus or holds unsubmitted text. `liveDirty` is set the instant the user types
+//       (see liveInputListener) and cleared after a successful submit (bindJobVerdict / bindJobShot).
+//   (2) snapshotLiveInputs()/restoreLiveInputs() — even when a render does run (nothing was focused,
+//       nothing was dirty), each input's value, focus and caret are saved by a stable key and restored
+//       across the swap, so a background refresh can never silently drop a value.
+let liveDirty = false;
+function liveInputListener(ev) {
+  const t = ev.target;
+  if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA")) liveDirty = true;
+}
+function liveBeingEdited(root) {
+  const a = document.activeElement;
+  if (a && root.contains(a) && (a.tagName === "INPUT" || a.tagName === "TEXTAREA")) return true; // focused
+  if (liveDirty) return true; // typed something, not submitted yet
+  // belt-and-braces: a text box that already holds text the user put there (never a checkbox/radio)
+  return [...root.querySelectorAll("input, textarea")].some(
+    (i) => String(i.value || "").length > 0 && i.type !== "checkbox" && i.type !== "radio",
+  );
+}
+const liveInputKey = (el, i) => el.name || el.getAttribute("data-live-key") || el.id || `${el.tagName}:${i}`;
+function snapshotLiveInputs(root) {
+  return [...root.querySelectorAll("input, textarea")].map((el, i) => ({
+    key: liveInputKey(el, i),
+    i,
+    value: el.value,
+    focused: el === document.activeElement,
+    start: el.selectionStart,
+    end: el.selectionEnd,
+  }));
+}
+function restoreLiveInputs(root, snap) {
+  if (!snap || !snap.length) return;
+  const els = [...root.querySelectorAll("input, textarea")];
+  const used = new Set();
+  for (const s of snap) {
+    if (!s.value) continue;
+    // Match by stable key first, then fall back to the old positional slot.
+    let el = els.find((e, i) => !used.has(i) && liveInputKey(e, i) === s.key);
+    if (!el) el = els[s.i];
+    if (!el) continue;
+    const at = els.indexOf(el);
+    if (used.has(at) || el.value) continue; // don't stomp a fresh render's own value
+    used.add(at);
+    el.value = s.value;
+    if (s.focused) {
+      el.focus();
+      try { el.setSelectionRange(s.start, s.end); } catch { /* number/email inputs reject this */ }
+    }
+  }
+}
 
 // Filters: <form class="filters"> whose inputs map 1:1 to hash params.
 function bindFilters(section, rest, params) {
@@ -530,6 +598,7 @@ function bindJobShot(form) {
       form.querySelector(".result").innerHTML = `<p class="err">${esc(r.body.detail)}</p>`;
       return;
     }
+    liveDirty = false; // request recorded: let auto-refresh resume and re-render immediately
     route();
   });
 }
@@ -547,6 +616,10 @@ function bindJobVerdict(form) {
       form.querySelector(".result").innerHTML = `<p class="err">${esc(r.body.detail || "could not record the verdict")}</p>`;
       return;
     }
+    // The verdict is recorded: drop the note box and refresh at once so the card shows the recorded
+    // verdict. Clearing liveDirty lets the auto-refresh take over again (it was skipping while typing).
+    liveDirty = false;
+    form.elements.notes.value = "";
     route();
   });
 }
