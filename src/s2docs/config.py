@@ -4,9 +4,14 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
+
+VERSION = "0.1.0"
+# Process start time, captured once at import — surfaces in the DB-identity payload (see server_identity).
+STARTED_AT = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
 # Lock stuck-ness defaults (see hosts.py). A fresh heartbeat whose phase has not moved for longer
 # than the threshold reads STUCK; a per-phase override wins (e.g. {'compile': 7200} lets a legitimate
@@ -138,6 +143,23 @@ def get_settings() -> Settings:
         stuck_sec=_stuck_sec(),
         stuck_phases=_stuck_phases(),
     )
+
+
+def server_identity() -> dict:
+    """The DB-identity payload: which store this process serves, and which process it is.
+
+    Clients compare this (REST /api/health, MCP server_info) before writing, so the split-database
+    class of incident — two servers pointed at different data dirs — is at least detectable.
+    """
+    settings = get_settings()
+    return {
+        "status": "ok",
+        "db_path": str(settings.db_path.resolve()),
+        "data_dir": str(settings.data_dir.resolve()),
+        "pid": os.getpid(),
+        "started_at": STARTED_AT,
+        "version": VERSION,
+    }
 
 
 def get_game(game_id: str) -> Game:

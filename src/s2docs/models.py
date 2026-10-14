@@ -420,9 +420,36 @@ class Host(BaseModel):
     lock: HostLock | None = None
 
 
+class ServerInfo(BaseModel):
+    """DB identity of a running server (REST /api/health and MCP server_info return the same shape)."""
+
+    status: str = "ok"
+    db_path: str
+    data_dir: str
+    pid: int
+    started_at: str
+    version: str
+
+
+class LockSummary(BaseModel):
+    """A run's view of the host lock it holds — enough for the Activity page to show STUCK/phase.
+
+    Attached to a build/test-run *only when the lock's owner is that run* (build:<id> / test:<id>);
+    a run whose lease was taken over by someone else carries no summary (the lock is not its own).
+    """
+
+    owner: str
+    phase: str = ""
+    phase_age_sec: int | None = None
+    stuck: bool = False
+    stuck_reason: str | None = None
+
+
 # -------------------------------------------------------------------- builds
-BuildStatus = Literal["queued", "running", "succeeded", "failed", "cancelled"]
-TERMINAL_BUILD_STATUSES: tuple[str, ...] = ("succeeded", "failed", "cancelled")
+# 'interrupted' = the run was still queued/running when the server restarted and no live watcher
+# owns it any more (an orphaned run finalized by reconciles at startup).
+BuildStatus = Literal["queued", "running", "succeeded", "failed", "cancelled", "interrupted"]
+TERMINAL_BUILD_STATUSES: tuple[str, ...] = ("succeeded", "failed", "cancelled", "interrupted")
 
 
 class BuildArtifact(BaseModel):
@@ -461,6 +488,9 @@ class BuildRun(BaseModel):
         default=None, description="Material-guard findings; None when the log was clean or unscanned"
     )
     artifacts: list[BuildArtifact] = []
+    lock: LockSummary | None = Field(
+        default=None, description="The host lock this run holds (owner build:<id>), when it is still its own"
+    )
     created_at: str
     updated_at: str
 
@@ -538,5 +568,8 @@ class TestRun(BaseModel):
     note: str | None = None
     started_at: str | None = None
     finished_at: str | None = None
+    lock: LockSummary | None = Field(
+        default=None, description="The host lock this run holds (owner test:<id>), when it is still its own"
+    )
     created_at: str
     updated_at: str
