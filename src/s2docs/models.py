@@ -557,6 +557,17 @@ class Deployment(BaseModel):
 EvidenceKind = Literal["console_transcript", "file_hash", "pixel_diff", "screenshot", "note", "other", "human-confirm"]
 EVIDENCE_KINDS: tuple[str, ...] = EvidenceKind.__args__  # type: ignore[attr-defined]
 
+# A human verdict on a step. `pass`/`fail` are the original two; `skip` was added so a demo driver can
+# move past a step that cannot be exercised (a parallel director worker sends it).
+Verdict = Literal["pass", "fail", "skip"]
+VERDICTS: tuple[str, ...] = Verdict.__args__  # type: ignore[attr-defined]
+
+# Where a verdict came from: in-game chat (`!pass NOTE`, the director posts source='chat'), the game
+# console, a key bind, the webapp, or the coordinator relaying a verdict the user typed in Hermes chat
+# ('coordinator'). 'director' is the tag the in-game confirm gate's own producer already used.
+ConfirmSource = Literal["chat", "console", "key", "web", "coordinator", "director"]
+CONFIRM_SOURCES: tuple[str, ...] = ConfirmSource.__args__  # type: ignore[attr-defined]
+
 
 class Evidence(BaseModel):
     id: str
@@ -647,6 +658,37 @@ class JobArtifact(BaseModel):
     size: int
 
 
+class StepVerdict(BaseModel):
+    """The verdict that answered a step prompt: which way, from where, and the evidence row it wrote."""
+
+    verdict: str
+    source: str | None = None
+    notes: str | None = None
+    evidence_id: str | None = Field(default=None, description="The human-confirm evidence row this verdict wrote")
+    at: str = Field(description="When the verdict milestone event landed (created_at)")
+
+
+class JobCurrentStep(BaseModel):
+    """The step the runner is waiting on: the newest 'info' prompt event (+phase) and whether it is answered.
+
+    A step prompt is an ``info`` event whose ``data`` carries ``prompt``; the driver posts one per step
+    with ``phase`` = the step id and ``data {prompt, look_for, step_index, step_total, respond_hint,
+    deadline_utc}``. ``verdict`` is set once a *verdict* milestone event (a milestone carrying
+    ``data.verdict``, from any source) is newer than the prompt.
+    """
+
+    phase: str | None = None
+    prompt: str | None = None
+    look_for: str | None = None
+    step_index: int | None = None
+    step_total: int | None = None
+    respond_hint: str | None = None
+    deadline_utc: str | None = Field(default=None, description="ISO-8601 UTC deadline for the answer")
+    asked_at: str = Field(description="When the prompt event landed (created_at)")
+    event_id: int = Field(description="The prompt event's id (verdict must be newer than this)")
+    verdict: StepVerdict | None = Field(default=None, description="Set once a verdict arrived, from any source")
+
+
 class Job(BaseModel):
     id: str
     kind: JobKind
@@ -667,6 +709,9 @@ class Job(BaseModel):
     updated_at: str
     error_count: int = Field(default=0, description="error-level events (the queue board flags these)")
     crash_count: int = Field(default=0, description="crash-level events (the queue board flags these)")
+    current_step: JobCurrentStep | None = Field(
+        default=None, description="The step awaiting a verdict (newest prompt event + whether it is answered)"
+    )
     events: list[JobEvent] = []
     links: list[JobLink] = []
     artifacts: list[JobArtifact] = []

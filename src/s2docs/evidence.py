@@ -23,12 +23,25 @@ from s2docs.db.connection import Database
 from s2docs.db.repository import NotFound
 
 EVIDENCE_KINDS: tuple[str, ...] = m.EVIDENCE_KINDS
+VERDICTS: tuple[str, ...] = m.VERDICTS
+CONFIRM_SOURCES: tuple[str, ...] = m.CONFIRM_SOURCES
 MAX_REF_LEN = 4096
 MAX_DATA_BYTES = 65536
 
 
 class EvidenceError(ValueError):
     pass
+
+
+class EvidenceValidationError(EvidenceError):
+    """A well-formed row with a bad payload (e.g. a human-confirm verdict outside the allowed set).
+
+    Distinct from the generic :class:`EvidenceError` so the HTTP layer can answer 422 (not 400) and name
+    the offending field(s)."""
+
+    def __init__(self, message: str, fields: list[str] | None = None):
+        super().__init__(message)
+        self.fields = fields or []
 
 
 def _row(row: sqlite3.Row) -> m.Evidence:
@@ -76,6 +89,22 @@ def add(
         raise EvidenceError("project_id is required (or a test_run_id to resolve it from)")
     if not (project_id and str(project_id).strip()):
         project_id = None
+    # A human-confirm row IS a verdict: it must carry data.verdict in {pass, fail, skip} (else 422) and,
+    # when present, a data.source drawn from the known set. Validated here (after the run/project resolve,
+    # so an unknown run still reports as that) so every writer — POST /api/evidence, POST /jobs/{id}/verdict,
+    # MCP, CLI — gets the same gate from the one shared add() path.
+    if kind == "human-confirm":
+        payload_data = data or {}
+        verdict = payload_data.get("verdict")
+        if verdict not in VERDICTS:
+            raise EvidenceValidationError(
+                f"human-confirm verdict must be one of {VERDICTS}, not {verdict!r}", ["verdict"]
+            )
+        source = payload_data.get("source")
+        if source is not None and source not in CONFIRM_SOURCES:
+            raise EvidenceValidationError(
+                f"human-confirm source must be one of {CONFIRM_SOURCES}, not {source!r}", ["source"]
+            )
     if ref is not None and len(ref) > MAX_REF_LEN:
         raise EvidenceError(f"ref is too long ({len(ref)} > {MAX_REF_LEN} chars)")
     payload = json.dumps(data or {})
@@ -121,3 +150,36 @@ def count_for_step(db: Database, project_id: str, step_id: str, *, exclude_note:
             "SELECT count(*) FROM evidence WHERE project_id = ? AND step_id = ? AND (? = 0 OR kind != 'note')",
             (project_id, step_id, 1 if exclude_note else 0),
         ).fetchone()[0]
+
+
+def add_and_publish(
+    db: Database,
+    *,
+    kind: str,
+    project_id: str | None = None,
+    step_id: str | None = None,
+    ref: str | None = None,
+    data: dict | None = None,
+    test_run_id: str | None = None,
+) -> m.Evidence:
+    """The one code path that records an evidence row AND fires the confirm push channel for it.
+
+    `POST /api/evidence` and `POST /api/jobs/{id}/verdict` both go through here, so a human-confirm row
+    (a webapp verdict as much as a chat `!pass`) lands in ``<data_dir>/confirms.jsonl`` +
+    ``latest_confirm.json`` exactly the same way. The push is a best-effort side channel (see
+    :func:`s2docs.confirms.publish`); the durable row is what the caller relies on.
+    """
+    row = add(
+        db,
+        kind=kind,
+        project_id=project_id,
+        step_id=step_id,
+        ref=ref,
+        data=data,
+        test_run_id=test_run_id,
+    )
+    if row.kind == "human-confirm":
+        from s2docs import confirms
+
+        confirms.publish(row)
+    return row

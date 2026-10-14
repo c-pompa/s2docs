@@ -660,6 +660,18 @@ def _cmd_job(args: argparse.Namespace) -> int:
             summary = {"what": args.what, "why": args.why, "learned": args.learned, "next": args.next_field}
             job = jobs.finish(db, args.job_id, status=args.status, summary=summary)
             return _emit(args, {"job": job.model_dump()}, _human_job(job))
+        if args.job_cmd == "verdict":
+            # The coordinator relaying a verdict the user typed in the Hermes chat: the CLI defaults its
+            # source to 'coordinator' (the webapp posts 'web'). The service validates verdict/source (9).
+            job = jobs.verdict(
+                db,
+                args.job_id,
+                verdict=args.verdict,
+                notes=args.notes,
+                step=args.step,
+                source=args.source,
+            )
+            return _emit(args, {"job": job.model_dump()}, _human_job(job))
         if args.job_cmd == "cancel":
             job = jobs.cancel(db, args.job_id, reason=args.reason)
             return _emit(args, {"job": job.model_dump()}, _human_job(job))
@@ -940,6 +952,12 @@ def main(argv: list[str] | None = None) -> int:
     q.add_argument("--why", required=True)
     q.add_argument("--learned", required=True)
     q.add_argument("--next", dest="next_field", required=True, help="What is next")
+    q = jc.add_parser("verdict", help="Answer the running job's step: pass | fail | skip")
+    q.add_argument("job_id")
+    q.add_argument("--verdict", required=True, help="pass | fail | skip (validated in the service -> exit 9)")
+    q.add_argument("--notes", help="Free-text note recorded with the verdict")
+    q.add_argument("--step", help="Step id/phase the verdict answers (optional)")
+    q.add_argument("--source", default="coordinator", help="chat | console | key | web | coordinator")
     q = jc.add_parser("cancel", help="queued/running -> cancelled")
     q.add_argument("job_id")
     q.add_argument("--reason")

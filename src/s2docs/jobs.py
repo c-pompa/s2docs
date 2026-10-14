@@ -28,7 +28,7 @@ import secrets
 import sqlite3
 from pathlib import Path
 
-from s2docs import hosts
+from s2docs import evidence, hosts
 from s2docs import models as m
 from s2docs.config import get_settings
 from s2docs.db.connection import Database
@@ -43,6 +43,9 @@ TERMINAL_STATUSES: tuple[str, ...] = m.TERMINAL_JOB_STATUSES
 LEVELS: tuple[str, ...] = m.JOB_EVENT_LEVELS
 LINK_KINDS: tuple[str, ...] = m.JOB_LINK_KINDS
 FINISH_STATUSES: tuple[str, ...] = ("passed", "failed", "error", "cancelled")
+VERDICTS: tuple[str, ...] = m.VERDICTS
+CONFIRM_SOURCES: tuple[str, ...] = m.CONFIRM_SOURCES
+DEFAULT_VERDICT_SOURCE = "web"
 
 SUMMARY_FIELDS: tuple[str, ...] = ("what", "why", "learned", "next")
 SUMMARY_MAX = 600
@@ -213,12 +216,61 @@ def _job(row: sqlite3.Row) -> m.Job:
     )
 
 
+def _current_step(events: list[m.JobEvent]) -> m.JobCurrentStep | None:
+    """Derive the step awaiting a verdict from the timeline.
+
+    A **step prompt** is an ``info`` event whose ``data`` carries ``prompt`` (the driver posts one per
+    step with ``phase`` = the step id). ``current_step`` is the newest such prompt plus whether a
+    **verdict milestone** (a ``milestone`` event carrying ``data.verdict``) landed *after* it — from any
+    source (chat, console, web, coordinator), so a verdict typed in game answers the webapp card too.
+    """
+    prompt: m.JobEvent | None = None
+    for e in events:
+        if e.level == "info" and isinstance(e.data, dict) and "prompt" in e.data:
+            prompt = e  # events are ordered by id ascending -> the last match is the newest
+    if prompt is None:
+        return None
+    verdict_event: m.JobEvent | None = None
+    for e in events:
+        if (
+            e.level == "milestone"
+            and e.id > prompt.id
+            and isinstance(e.data, dict)
+            and e.data.get("verdict") in VERDICTS
+        ):
+            verdict_event = e
+    data = prompt.data
+    ans = None
+    if verdict_event is not None:
+        vd = verdict_event.data
+        ans = m.StepVerdict(
+            verdict=str(vd.get("verdict")),
+            source=vd.get("source"),
+            notes=vd.get("notes"),
+            evidence_id=vd.get("evidence_id"),
+            at=verdict_event.created_at,
+        )
+    return m.JobCurrentStep(
+        phase=prompt.phase,
+        prompt=data.get("prompt"),
+        look_for=data.get("look_for"),
+        step_index=data.get("step_index"),
+        step_total=data.get("step_total"),
+        respond_hint=data.get("respond_hint"),
+        deadline_utc=data.get("deadline_utc"),
+        asked_at=prompt.created_at,
+        event_id=prompt.id,
+        verdict=ans,
+    )
+
+
 def _enrich(conn: sqlite3.Connection, job: m.Job, *, with_events: bool = True) -> m.Job:
     if with_events:
         rows = conn.execute("SELECT * FROM job_events WHERE job_id = ? ORDER BY id", (job.id,)).fetchall()
         job.events = [_event(r) for r in rows]
         job.error_count = sum(1 for e in job.events if e.level == "error")
         job.crash_count = sum(1 for e in job.events if e.level == "crash")
+        job.current_step = _current_step(job.events)
     else:
         counts = conn.execute(
             "SELECT level, count(*) AS n FROM job_events WHERE job_id = ? AND level IN ('error', 'crash') "
@@ -511,6 +563,60 @@ def link(db: Database, job_id: str, *, kind: str, ref_id: str) -> m.Job:
         raise JobValidationError("ref_id is required", ["ref_id"])
     with db.writer() as conn, conn:
         conn.execute("INSERT OR IGNORE INTO job_links (job_id, kind, ref_id) VALUES (?, ?, ?)", (job_id, kind, ref_id))
+    return get(db, job_id)
+
+
+def _latest_test_run_link(db: Database, job_id: str) -> str | None:
+    """The most recently linked test run for a job (rowid DESC), or None when the job links none."""
+    with db.reader() as conn:
+        row = conn.execute(
+            "SELECT ref_id FROM job_links WHERE job_id = ? AND kind = 'test_run' ORDER BY rowid DESC LIMIT 1",
+            (job_id,),
+        ).fetchone()
+    return row["ref_id"] if row else None
+
+
+def verdict(
+    db: Database,
+    job_id: str,
+    *,
+    verdict: str,
+    notes: str | None = None,
+    step: str | None = None,
+    source: str = DEFAULT_VERDICT_SOURCE,
+) -> m.Job:
+    """Answer the running job's step from the webapp (or a coordinator relaying a chat verdict).
+
+    Records a ``human-confirm`` evidence row (through the same path as ``POST /api/evidence``, so the
+    confirm push files fire) and appends a ``milestone`` timeline event. A job that is not running is a
+    conflict, and so is one with no linked test run — a verdict needs a run to anchor its evidence row.
+    """
+    job = get(db, job_id)  # 404 on an unknown job
+    if verdict not in VERDICTS:
+        raise JobValidationError(f"verdict must be one of {VERDICTS}, not {verdict!r}", ["verdict"])
+    if source not in CONFIRM_SOURCES:
+        raise JobValidationError(f"source must be one of {CONFIRM_SOURCES}, not {source!r}", ["source"])
+    if job.status != "running":
+        raise JobConflict(f"job {job_id} is {job.status}; a verdict is only accepted while the job is running")
+    test_run_id = _latest_test_run_link(db, job_id)
+    if test_run_id is None:
+        raise JobConflict(
+            f"job {job_id} has no linked test run; link one (kind='test_run') before posting a verdict"
+        )
+    row = evidence.add_and_publish(
+        db,
+        kind="human-confirm",
+        test_run_id=test_run_id,
+        data={"verdict": verdict, "notes": notes, "step": step, "source": source, "job_id": job_id},
+    )
+    _insert_event(
+        db,
+        job_id,
+        "milestone",
+        None,
+        f"verdict {verdict} ({source}): {notes or ''}",
+        {"verdict": verdict, "notes": notes, "step": step, "source": source, "evidence_id": row.id},
+    )
     return get(db, job_id)
 
 

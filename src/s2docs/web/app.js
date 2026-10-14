@@ -262,10 +262,52 @@ const jobTimeline = (events) =>
         e.data && e.data.log_tail
           ? `<details open><summary class="muted">log tail</summary><pre>${esc(e.data.log_tail)}</pre></details>`
           : "";
-      return `<li>${badge(e.level, JOB_LEVEL_CLASS[e.level] || "")} <span class="muted">${fmtTime(e.created_at)}</span>` +
+      // A verdict milestone carries which way it went and the source it came from — surface both inline
+      // next to the level badge so each step's verdict is readable in the timeline.
+      const vd = e.data && e.data.verdict
+        ? ` ${badge(e.data.verdict, e.data.verdict === "pass" ? "kind" : e.data.verdict === "fail" ? "warn" : "")}` +
+          `${e.data.source ? ` ${badge("via " + e.data.source)}` : ""}`
+        : "";
+      return `<li>${badge(e.level, JOB_LEVEL_CLASS[e.level] || "")}${vd} <span class="muted">${fmtTime(e.created_at)}</span>` +
         `${e.phase ? ` <span class="mono muted">${esc(e.phase)}</span>` : ""}<div>${esc(e.message)}</div>${tail}</li>`;
     })
     .join("")}</ul>`;
+
+// The "NOW TESTING" card: while a job is running and the driver has posted a step prompt, show what is
+// being tested and let the user answer from here instead of in game. Buttons POST /api/jobs/<id>/verdict.
+function nowTestingCard(j) {
+  const cs = j.current_step;
+  if (j.status !== "running" || !cs) return "";
+  const k = cs.step_index != null ? cs.step_index : "?";
+  const n = cs.step_total != null ? cs.step_total : "?";
+  const deadline = cs.deadline_utc
+    ? ` · <span class="muted">deadline <span class="mono" data-deadline="${esc(cs.deadline_utc)}">…</span></span>`
+    : "";
+  const hint = cs.respond_hint
+    ? `<p class="muted">${esc(cs.respond_hint)}</p>`
+    : `<p class="muted">in game: type !pass / !fail / !skip plus a note in chat</p>`;
+  const recorded = cs.verdict
+    ? `<h3 style="margin-bottom:4px">Recorded verdict ${badge(
+        cs.verdict.verdict,
+        cs.verdict.verdict === "pass" ? "kind" : cs.verdict.verdict === "fail" ? "warn" : "",
+      )}${cs.verdict.source ? ` ${badge("via " + cs.verdict.source)}` : ""}</h3>` +
+      `${cs.verdict.notes ? `<p class="muted">“${esc(cs.verdict.notes)}”</p>` : ""}` +
+      `${cs.verdict.evidence_id ? `<p class="mono muted">evidence ${esc(cs.verdict.evidence_id)}</p>` : ""}`
+    : "";
+  const form = `<form data-job-verdict="${esc(j.id)}">
+      <p><input name="notes" placeholder="note (optional)"></p>
+      <p><button type="submit" name="verdict" value="pass">Pass</button>
+         <button type="submit" name="verdict" value="fail">Fail</button>
+         <button type="submit" name="verdict" value="skip">Skip</button></p>
+      <div class="result"></div></form>`;
+  return `<div class="card" style="border-color:var(--accent);border-width:2px">
+    <h2 style="margin-top:0">NOW TESTING <span class="muted">step ${esc(k)}/${esc(n)}:</span> ${badge(cs.phase || "")}</h2>
+    ${cs.prompt ? `<p><strong>${esc(cs.prompt)}</strong></p>` : ""}
+    ${cs.look_for ? `<p class="muted">Look for: ${esc(cs.look_for)}</p>` : ""}
+    ${hint}${deadline}
+    ${recorded ? `${recorded}<p class="muted">Post another if the call changes:</p>` : ""}${form}</div>`;
+}
+
 
 function jobDetail(j) {
   const p = j.params || {};
@@ -320,7 +362,7 @@ function jobDetail(j) {
   }`;
   return `${nowLine()}<div>${jobHeadline(j)}</div>
     <p>${jobMeta(j)}<span class="muted"> · ${when}</span></p>
-    ${summary}${intake}${shotForm}${gallery}${otherArts}${links}${timeline}`;
+    ${nowTestingCard(j)}${summary}${intake}${shotForm}${gallery}${otherArts}${links}${timeline}`;
 }
 
 // Minimal Markdown renderer for docs: escape first, then add a small safe subset of formatting.
@@ -459,6 +501,7 @@ function bindFilters(section, rest, params) {
   view.querySelectorAll("form[data-start-project]").forEach(bindStartProject);
   view.querySelectorAll("form[data-step]").forEach(bindStepForm);
   view.querySelectorAll("form[data-job-shot]").forEach(bindJobShot);
+  view.querySelectorAll("form[data-job-verdict]").forEach(bindJobVerdict);
 }
 
 function bindJobShot(form) {
@@ -471,6 +514,34 @@ function bindJobShot(form) {
       return;
     }
     route();
+  });
+}
+
+// The NOW TESTING card's Pass/Fail/Skip buttons: the pressed button's value is the verdict; the note
+// rides along. On success re-render so the card shows the recorded verdict (from any source).
+function bindJobVerdict(form) {
+  form.addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    const verdict = ev.submitter && ev.submitter.value;
+    if (!verdict) return;
+    const notes = form.elements.notes.value.trim() || null;
+    const r = await postJson(`/api/jobs/${enc(form.dataset.jobVerdict)}/verdict`, { verdict, notes, source: "web" });
+    if (!r.ok) {
+      form.querySelector(".result").innerHTML = `<p class="err">${esc(r.body.detail || "could not record the verdict")}</p>`;
+      return;
+    }
+    route();
+  });
+}
+
+// Live countdown to each step's deadline_utc (the NOW TESTING card): a 1 s ticker over [data-deadline],
+// re-read every tick so it keeps up with the 5 s auto-refresh that replaces the card's innerHTML.
+function updateCountdowns() {
+  document.querySelectorAll("[data-deadline]").forEach((el) => {
+    const t = Date.parse(el.dataset.deadline);
+    if (Number.isNaN(t)) return;
+    const left = Math.floor((t - Date.now()) / 1000);
+    el.textContent = left <= 0 ? "0:00 (expired)" : `${Math.floor(left / 60)}:${String(left % 60).padStart(2, "0")} left`;
   });
 }
 
@@ -1165,6 +1236,7 @@ async function boot() {
     }
   });
   window.addEventListener("hashchange", route);
+  setInterval(updateCountdowns, 1000); // ticks the NOW TESTING deadline regardless of which page is up
   route();
 }
 boot();

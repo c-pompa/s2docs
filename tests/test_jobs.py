@@ -21,7 +21,7 @@ import pytest
 from fastapi.testclient import TestClient
 from mcp import Client
 
-from s2docs import hosts, jobs
+from s2docs import confirms, evidence, hosts, jobs, test_runs
 from s2docs.api.app import create_app
 from s2docs.db.connection import Database
 from s2docs.db.repository import NotFound
@@ -561,6 +561,11 @@ def test_web_jobs_route_and_static_assets(client):
     assert 'GLOBAL_SECTIONS = new Set(["hosts", "jobs", "activity"])' in js  # install-wide, not per game
     assert "function jobBoard(" in js and "function jobDetail(" in js
     assert "data-job-shot" in js and "Request screenshot" in js and "Close-out summary" in js
+    # the "respond from the webapp" card: NOW TESTING + the Pass/Fail/Skip form posting to /verdict
+    assert "function nowTestingCard(" in js and "NOW TESTING" in js
+    assert "data-job-verdict" in js and "function bindJobVerdict(" in js
+    assert "/verdict" in js and "data-deadline" in js and "function updateCountdowns(" in js
+    assert 'name="verdict" value="pass"' in js and 'value="fail"' in js and 'value="skip"' in js
     # non-image artifacts render as a "Files" list with download links, under the gallery
     assert "<h2>Files</h2>" in js and "download>" in js
     assert js.index("<h2>Screenshots</h2>") < js.index("<h2>Files</h2>")
@@ -572,3 +577,183 @@ def test_web_jobs_route_and_static_assets(client):
     assert client.get("/").status_code == 200
     assert client.get("/index.html").status_code == 200
     assert client.get("/app.js").status_code == 200
+
+
+# ------------------------------------------------------- verdict (respond from the webapp)
+def _running_job_with_run(client, jdb, *, start=True):
+    """A job (running by default) linked to a fresh project-less test run — the shape /verdict needs."""
+    jid = _enq(client).json()["id"]
+    if start:
+        client.post(f"/api/jobs/{jid}/start", json={"worker": "ws/x"})
+    run = test_runs.start(jdb, "iso_test")
+    client.post(f"/api/jobs/{jid}/link", json={"kind": "test_run", "ref_id": run.id})
+    return jid, run.id
+
+
+def test_job_verdict_happy_path_writes_evidence_push_and_milestone(client, jdb):
+    """POST /jobs/{id}/verdict: a human-confirm row (through the shared evidence path -> push files fire)
+    plus a `milestone` timeline event carrying the verdict/step/source/evidence_id."""
+    jid, run_id = _running_job_with_run(client, jdb)
+    r = client.post(f"/api/jobs/{jid}/verdict", json={"verdict": "skip", "notes": "cannot exercise", "step": "step-2"})
+    assert r.status_code == 200, r.text
+    job = r.json()
+    assert job["status"] == "running"  # a verdict does not close the job
+    ms = [e for e in job["events"] if e["level"] == "milestone" and e["data"].get("verdict") == "skip"]
+    assert len(ms) == 1
+    assert ms[0]["data"]["source"] == "web" and ms[0]["data"]["step"] == "step-2"
+    assert ms[0]["message"] == "verdict skip (web): cannot exercise"
+    eid = ms[0]["data"]["evidence_id"]
+    # the evidence row landed through the SAME path as POST /api/evidence
+    rows = client.get("/api/evidence", params={"kind": "human-confirm"}).json()
+    assert [e["id"] for e in rows] == [eid]
+    assert rows[0]["test_run_id"] == run_id and rows[0]["data"]["job_id"] == jid
+    assert evidence.get(jdb, eid).data["source"] == "web"
+    # and the confirm push files fired
+    latest = json.loads(confirms.latest_confirm_path().read_text(encoding="utf-8"))
+    assert latest["id"] == eid and latest["data"]["verdict"] == "skip"
+    lines = [
+        json.loads(ln) for ln in confirms.confirms_jsonl_path().read_text(encoding="utf-8").splitlines() if ln.strip()
+    ]
+    assert lines[-1]["id"] == eid
+
+
+@pytest.mark.parametrize("v", ["pass", "fail", "skip"])
+def test_job_verdict_accepts_each_verdict(client, jdb, v):
+    jid, _ = _running_job_with_run(client, jdb)
+    r = client.post(f"/api/jobs/{jid}/verdict", json={"verdict": v})
+    assert r.status_code == 200, r.text
+    assert any(e["data"].get("verdict") == v for e in r.json()["events"])
+    # the CLI source default is 'coordinator'; the webapp's default (no source sent) is 'web'
+    assert [e for e in r.json()["events"] if e["data"].get("verdict") == v][0]["data"]["source"] == "web"
+
+
+def test_job_verdict_source_is_recorded(client, jdb):
+    jid, _ = _running_job_with_run(client, jdb)
+    r = client.post(f"/api/jobs/{jid}/verdict", json={"verdict": "pass", "source": "coordinator"})
+    assert r.status_code == 200
+    ms = [e for e in r.json()["events"] if e["level"] == "milestone"]
+    assert ms[-1]["data"]["source"] == "coordinator"
+    # an unknown source is validation (422)
+    assert client.post(f"/api/jobs/{jid}/verdict", json={"verdict": "pass", "source": "telepathy"}).status_code == 422
+
+
+def test_job_verdict_rejects_unknown_verdict(client, jdb):
+    jid, _ = _running_job_with_run(client, jdb)
+    assert client.post(f"/api/jobs/{jid}/verdict", json={"verdict": "maybe"}).status_code == 422
+    assert client.post(f"/api/jobs/{jid}/verdict", json={}).status_code == 422  # verdict is required
+    # nothing was recorded by the rejected calls
+    assert client.get("/api/evidence", params={"kind": "human-confirm"}).json() == []
+
+
+def test_job_verdict_conflicts_not_running_and_no_run(client, jdb):
+    # a queued job is a conflict (409) even with a linked run
+    jid, _ = _running_job_with_run(client, jdb, start=False)
+    r = client.post(f"/api/jobs/{jid}/verdict", json={"verdict": "pass"})
+    assert r.status_code == 409 and "running" in r.json()["detail"]
+    # a running job with no linked test run is a conflict (409) with a clear message
+    jid2 = _enq(client).json()["id"]
+    client.post(f"/api/jobs/{jid2}/start", json={"worker": "ws/x"})
+    r = client.post(f"/api/jobs/{jid2}/verdict", json={"verdict": "pass"})
+    assert r.status_code == 409 and "no linked test run" in r.json()["detail"]
+    # unknown job -> 404
+    assert client.post("/api/jobs/j-ghost/verdict", json={"verdict": "pass"}).status_code == 404
+
+
+def test_current_step_derivation_and_verdict_from_any_source(client, jdb):
+    """current_step = the newest prompt event (+phase); its verdict is set once a verdict milestone newer
+    than it lands — from ANY source (chat via a director event, or the webapp itself)."""
+    jid, run_id = _running_job_with_run(client, jdb)
+    assert client.get(f"/api/jobs/{jid}").json()["current_step"] is None  # no prompt yet
+    prompt = {
+        "prompt": "walk into the wall",
+        "look_for": "the wire disappears",
+        "step_index": 1,
+        "step_total": 3,
+        "respond_hint": "in game: type !pass / !fail / !skip plus a note in chat (Y)",
+        "deadline_utc": "2030-01-01T00:00:00Z",
+    }
+    client.post(
+        f"/api/jobs/{jid}/event",
+        json={"level": "info", "message": "step 1", "phase": "wall-occlusion", "data": prompt},
+    )
+    cs = client.get(f"/api/jobs/{jid}").json()["current_step"]
+    assert cs["phase"] == "wall-occlusion" and cs["prompt"] == "walk into the wall"
+    assert cs["look_for"] == "the wire disappears" and cs["step_index"] == 1 and cs["step_total"] == 3
+    assert cs["step_total"] == 3 and cs["deadline_utc"] == "2030-01-01T00:00:00Z" and cs["verdict"] is None
+    assert cs["respond_hint"].startswith("in game:")
+    # a chat verdict (posted by the director as a milestone event) answers the webapp card
+    client.post(
+        f"/api/jobs/{jid}/event",
+        json={
+            "level": "milestone",
+            "message": "verdict pass (chat): looks good",
+            "data": {"verdict": "pass", "source": "chat", "notes": "looks good"},
+        },
+    )
+    cs = client.get(f"/api/jobs/{jid}").json()["current_step"]
+    assert cs["verdict"]["verdict"] == "pass" and cs["verdict"]["source"] == "chat"
+    # a fresh prompt supersedes and starts unanswered
+    step2 = {**prompt, "prompt": "second step", "step_index": 2}
+    client.post(
+        f"/api/jobs/{jid}/event",
+        json={"level": "info", "message": "step 2", "phase": "step2", "data": step2},
+    )
+    cs = client.get(f"/api/jobs/{jid}").json()["current_step"]
+    assert cs["step_index"] == 2 and cs["prompt"] == "second step" and cs["verdict"] is None
+    # answering it from the webapp records a verdict and flips current_step.verdict (source=web)
+    client.post(f"/api/jobs/{jid}/verdict", json={"verdict": "fail", "notes": "still visible"})
+    cs = client.get(f"/api/jobs/{jid}").json()["current_step"]
+    assert cs["verdict"]["verdict"] == "fail" and cs["verdict"]["source"] == "web"
+    assert cs["verdict"]["evidence_id"] and cs["verdict"]["notes"] == "still visible"
+
+
+def test_mcp_job_verdict_round_trip(jdb):
+    server = create_mcp_server(jdb)
+
+    async def main():
+        async with Client(server) as c:
+            jid = (await c.call_tool("job_enqueue", {**INTAKE, "host_id": "desktop-pc"})).structured_content["id"]
+            await c.call_tool("job_start", {"job_id": jid, "worker": "ws/mcp"})
+            run = test_runs.start(jdb, "iso_test")
+            await c.call_tool("job_link", {"job_id": jid, "kind": "test_run", "ref_id": run.id})
+            return await c.call_tool(
+                "job_verdict", {"job_id": jid, "verdict": "skip", "notes": "n", "source": "coordinator"}
+            )
+
+    res = anyio.run(main)
+    job = res.structured_content
+    ms = [e for e in job["events"] if e["data"].get("verdict") == "skip"]
+    assert ms and ms[-1]["data"]["source"] == "coordinator"
+    assert evidence.get(jdb, ms[-1]["data"]["evidence_id"]).kind == "human-confirm"
+
+
+def test_cli_job_verdict_exit_codes(tmp_path, monkeypatch, capsys):
+    db = Database(tmp_path / "data" / "s2docs.db")
+    hosts.register_host(db, "desktop-pc", "pompa@x", shell="powershell")
+    run = test_runs.start(db, "iso_test")
+    base = [
+        "job", "enqueue", "--kind", "test", "--title", "t", "--target", "x@1",
+        "--purpose", "p", "--expected", "e", "--host", "desktop-pc",
+    ]
+    assert _run_cli(monkeypatch, tmp_path, ["--json", *base]) == 0
+    jid = json.loads(capsys.readouterr().out)["job"]["id"]
+
+    # before start: not running -> conflict (4)
+    assert _run_cli(monkeypatch, tmp_path, ["job", "verdict", jid, "--verdict", "pass"]) == 4
+    capsys.readouterr()
+    assert _run_cli(monkeypatch, tmp_path, ["job", "start", jid, "--worker", "ws/cli"]) == 0
+    capsys.readouterr()
+    # running but no linked test run -> conflict (4)
+    assert _run_cli(monkeypatch, tmp_path, ["job", "verdict", jid, "--verdict", "fail"]) == 4
+    capsys.readouterr()
+    jobs.link(db, jid, kind="test_run", ref_id=run.id)
+    # happy path: the CLI relays a chat verdict as source=coordinator (0)
+    assert _run_cli(monkeypatch, tmp_path, ["--json", "job", "verdict", jid, "--verdict", "skip", "--notes", "n"]) == 0
+    out = json.loads(capsys.readouterr().out)["job"]
+    ms = [e for e in out["events"] if e["data"].get("verdict") == "skip"]
+    assert ms and ms[-1]["data"]["source"] == "coordinator"
+    # a bad verdict is validation (9, the global EXIT_VALIDATION)
+    assert _run_cli(monkeypatch, tmp_path, ["job", "verdict", jid, "--verdict", "maybe"]) == 9
+    assert "error:" in capsys.readouterr().err
+    # an unknown job is not found (3)
+    assert _run_cli(monkeypatch, tmp_path, ["job", "verdict", "j-ghost", "--verdict", "pass"]) == 3
