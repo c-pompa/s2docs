@@ -3,7 +3,7 @@
 
 const $ = (sel) => document.querySelector(sel);
 const view = $("#view");
-const state = { games: [], game: localStorage.getItem("s2docs.game") || "cs2", activityActive: false };
+const state = { games: [], game: localStorage.getItem("s2docs.game") || "cs2", activityActive: false, jobsActive: false };
 
 const esc = (v) =>
   String(v ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
@@ -192,6 +192,133 @@ const testRows = (ts) =>
         .join("")}</table>`
     : `<p class="muted">No test runs.</p>`;
 
+// ---- Jobs helpers --------------------------------------------------------
+// A job is the one record for a requested test/demo/final run. The queue board groups by host (running
+// on top, then queued by position); the job page shows the intake, timeline, screenshots, links and the
+// close-out summary. Events at level error/crash expand their log tail in a <pre>.
+const JOB_LEVEL_CLASS = { error: "warn", crash: "warn", milestone: "kind", learning: "kind", screenshot: "kind" };
+const jobStatusBadge = (s) =>
+  badge(s, s === "passed" || s === "running" ? "kind" : s === "failed" || s === "error" ? "warn" : "");
+const jobFlags = (j) =>
+  `${j.error_count ? badge(`${j.error_count} error${j.error_count === 1 ? "" : "s"}`, "warn") : ""}` +
+  `${j.crash_count ? badge(`${j.crash_count} crash${j.crash_count === 1 ? "" : "es"}`, "warn") : ""}`;
+const jobHeadline = (j) =>
+  `${jobStatusBadge(j.status)}${badge(j.kind)}${jobFlags(j)} <strong>${esc(j.title)}</strong> ` +
+  `<span class="mono muted">${esc(j.target)}</span>`;
+const jobMeta = (j) => {
+  const bits = [];
+  if (j.host_id) bits.push(link(["hosts", j.host_id], j.host_id));
+  if (j.worker) bits.push(badge("worker: " + j.worker));
+  if (j.phase) bits.push(`phase ${badge(j.phase)}`);
+  bits.push(`elapsed ${runTime(j)}`);
+  if (j.params && j.params.pending_shot) bits.push(badge("screenshot requested", "kind"));
+  return bits.join(" · ");
+};
+const jobCard = (j) =>
+  `<div class="card" style="margin-bottom:8px">${link(["jobs", j.id], j.id)} ${jobHeadline(j)}` +
+  `<div class="muted">${jobMeta(j)}</div></div>`;
+const jobTable = (jobs) =>
+  `<table><tr><th>Job</th><th>Kind</th><th>Status</th><th>Host</th><th>Duration</th><th>Finished</th></tr>${jobs
+    .map(
+      (j) =>
+        `<tr><td>${link(["jobs", j.id], j.id)}<div class="muted">${esc(j.title)}</div></td>` +
+        `<td>${badge(j.kind)}</td><td>${jobStatusBadge(j.status)}${jobFlags(j)}</td>` +
+        `<td>${j.host_id ? link(["hosts", j.host_id], j.host_id) : "—"}</td>` +
+        `<td class="muted">${runTime(j)}</td><td class="muted">${fmtTime(j.finished_at || j.updated_at)}</td></tr>`,
+    )
+    .join("")}</table>`;
+
+function jobBoard(jobs, hosts) {
+  const isActive = (j) => j.status === "running" || j.status === "queued";
+  const active = jobs.filter(isActive);
+  const done = jobs.filter((j) => !isActive(j));
+  // One column per registered host (even empty), plus any host that only appears on a job, plus
+  // "(unassigned)". Running first, then queued by position (ties broken by created_at).
+  const columns = new Map(hosts.map((h) => [h.id, []]));
+  active.forEach((j) => {
+    const key = j.host_id || "(unassigned)";
+    if (!columns.has(key)) columns.set(key, []);
+    columns.get(key).push(j);
+  });
+  const byOrder = (a, b) => a.position - b.position || (a.created_at < b.created_at ? -1 : 1);
+  const cols = [...columns.entries()]
+    .map(([hid, list]) => {
+      const running = list.filter((j) => j.status === "running").sort(byOrder);
+      const queued = list.filter((j) => j.status === "queued").sort(byOrder);
+      const label = hid === "(unassigned)" ? `<strong>${esc(hid)}</strong>` : link(["hosts", hid], hid);
+      const body = [...running, ...queued].map(jobCard).join("") || `<p class="muted">No queued jobs.</p>`;
+      return `<div class="dag-col"><h3>${label} <span class="muted">${running.length} running · ${queued.length} queued</span></h3>${body}</div>`;
+    })
+    .join("");
+  return `${nowLine()}<h2>Queue <span class="muted">per host — running on top, then queued by position</span></h2>
+    <div class="dag">${cols}</div>
+    <h2>Finished</h2>${done.length ? jobTable(done) : `<p class="muted">No finished jobs yet.</p>`}`;
+}
+
+const jobTimeline = (events) =>
+  `<ul class="timeline">${events
+    .map((e) => {
+      const tail =
+        e.data && e.data.log_tail
+          ? `<details open><summary class="muted">log tail</summary><pre>${esc(e.data.log_tail)}</pre></details>`
+          : "";
+      return `<li>${badge(e.level, JOB_LEVEL_CLASS[e.level] || "")} <span class="muted">${fmtTime(e.created_at)}</span>` +
+        `${e.phase ? ` <span class="mono muted">${esc(e.phase)}</span>` : ""}<div>${esc(e.message)}</div>${tail}</li>`;
+    })
+    .join("")}</ul>`;
+
+function jobDetail(j) {
+  const p = j.params || {};
+  const summary = j.summary
+    ? `<div class="card"><h2 style="margin-top:0">Close-out summary</h2>
+        <p><strong>What:</strong> ${esc(j.summary.what)}</p>
+        <p><strong>Why:</strong> ${esc(j.summary.why)}</p>
+        <p><strong>Learned:</strong> ${esc(j.summary.learned)}</p>
+        <p><strong>Next:</strong> ${esc(j.summary.next)}</p></div>`
+    : "";
+  const intake = `<div class="card"><h2 style="margin-top:0">Intake</h2>
+      <p><strong>Purpose:</strong> ${esc(p.purpose || "—")}</p>
+      <p><strong>Expected:</strong> ${esc(p.expected || "—")}</p>
+      <p class="muted">Cap ${esc(p.max_minutes)} min · screenshots ${esc(p.screenshots)} · confirm gate ${
+        p.needs_confirm ? "on" : "off"
+      } · watching ${p.watching ? "yes" : "no"}${p.branch ? ` · branch ${esc(p.branch)}` : ""}${
+        p.commit ? ` · ${esc(p.commit)}` : ""
+      }</p>${p.cleanup && p.cleanup.length ? `<p class="muted">Cleanup: ${p.cleanup.map(esc).join(", ")}</p>` : ""}</div>`;
+  const shotForm = `<form data-job-shot="${esc(j.id)}" class="card">
+      <p class="muted">Request a screenshot — the runner answers by uploading; the flag clears on upload.</p>
+      <p><input name="note" placeholder="what to capture (optional)"></p>
+      <button type="submit">Request screenshot</button><div class="result"></div></form>`;
+  const isImg = (a) => /\.(png|jpe?g)$/i.test(a.name);
+  const shots = j.artifacts.filter(isImg);
+  const gallery = shots.length
+    ? `<h2>Screenshots</h2><div class="grid">${shots
+        .map(
+          (a) =>
+            `<figure class="card" style="margin:0"><img src="${esc(a.url)}" alt="${esc(a.name)}" style="width:100%;border-radius:6px">` +
+            `<figcaption class="muted mono">${esc(a.name)}<br>${esc(a.md5)}</figcaption></figure>`,
+        )
+        .join("")}</div>`
+    : "";
+  const others = j.artifacts.filter((a) => !isImg(a));
+  const otherArts = others.length
+    ? `<h2>Artifacts</h2><table><tr><th>Name</th><th>Size</th><th>MD5</th></tr>${others
+        .map((a) => `<tr><td>${esc(a.name)}</td><td class="muted">${a.size} B</td><td class="mono muted">${esc(a.md5)}</td></tr>`)
+        .join("")}</table>`
+    : "";
+  const links = j.links.length
+    ? `<h2>Linked records</h2><table><tr><th>Kind</th><th>Ref</th></tr>${j.links
+        .map((l) => `<tr><td>${badge(l.kind)}</td><td class="mono">${esc(l.ref_id)}</td></tr>`)
+        .join("")}</table>`
+    : "";
+  const timeline = `<h2>Timeline</h2>${j.events.length ? jobTimeline(j.events) : `<p class="muted">No events yet.</p>`}`;
+  const when = `created ${fmtTime(j.created_at)}${j.started_at ? ` · started ${fmtTime(j.started_at)}` : ""}${
+    j.finished_at ? ` · finished ${fmtTime(j.finished_at)}` : ""
+  }`;
+  return `${nowLine()}<div>${jobHeadline(j)}</div>
+    <p>${jobMeta(j)}<span class="muted"> · ${when}</span></p>
+    ${summary}${intake}${shotForm}${gallery}${otherArts}${links}${timeline}`;
+}
+
 // Minimal Markdown renderer for docs: escape first, then add a small safe subset of formatting.
 function markdown(src) {
   const blocks = [];
@@ -234,10 +361,11 @@ const SECTIONS = [
   ["search", "Search"], ["convars", "ConVars & Commands"], ["entities", "Entities (Hammer)"],
   ["schema", "Schema"], ["events", "Game Events"], ["script", "cs_script API"], ["examples", "Examples"],
   ["pulse", "Pulse"], ["docs", "Docs (source2.wiki)"], ["validate", "Validate"], ["projects", "Orchestration"],
-  ["hosts", "Hosts"], ["activity", "Activity"], ["diff", "Build Diff"], ["prompts", "Prompts"], ["stats", "Stats"],
+  ["hosts", "Hosts"], ["jobs", "Jobs"], ["activity", "Activity"], ["diff", "Build Diff"], ["prompts", "Prompts"],
+  ["stats", "Stats"],
 ];
-// Pages that are about the whole install (hosts/runs), not one game — routed as #/<section>, no game prefix.
-const GLOBAL_SECTIONS = new Set(["hosts", "activity"]);
+// Pages that are about the whole install (hosts/runs/jobs), not one game — routed as #/<section>, no game prefix.
+const GLOBAL_SECTIONS = new Set(["hosts", "jobs", "activity"]);
 
 function parseHash() {
   const [path, query = ""] = location.hash.replace(/^#\/?/, "").split("?");
@@ -326,6 +454,20 @@ function bindFilters(section, rest, params) {
   view.querySelectorAll("form[data-validate]").forEach(bindValidateForm);
   view.querySelectorAll("form[data-start-project]").forEach(bindStartProject);
   view.querySelectorAll("form[data-step]").forEach(bindStepForm);
+  view.querySelectorAll("form[data-job-shot]").forEach(bindJobShot);
+}
+
+function bindJobShot(form) {
+  form.addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    const note = form.elements.note.value.trim() || null;
+    const r = await postJson(`/api/jobs/${enc(form.dataset.jobShot)}/screenshot-request`, { note });
+    if (!r.ok) {
+      form.querySelector(".result").innerHTML = `<p class="err">${esc(r.body.detail)}</p>`;
+      return;
+    }
+    route();
+  });
 }
 
 const pager = (page) => {
@@ -846,6 +988,27 @@ const ROUTES = {
       (MCP <code>build_start</code>/<code>test_start</code>/<code>deploy_push</code>, or the CLI), <em>not</em> from any CS2 running anywhere.
       Test-run rows mirror the in-game HUD strip (name / step / state / elapsed). Every row also carries its
       <strong>run time</strong>: live while a run is going, the final duration once it finishes. Auto-refreshes every 5 s while a run is active, 15 s when idle.</p><div id="live">${await body()}</div>`;
+  },
+
+  // Game-independent: the job ledger + queue — one record per requested test/demo/final run.
+  async jobs([jobId]) {
+    if (jobId) {
+      const body = async () => jobDetail(await api(`/jobs/${enc(jobId)}`));
+      liveBody("#live", body, () => 5000);
+      return `<p>${link(["jobs"], "← Jobs")}</p><div id="live">${await body()}</div>`;
+    }
+    const body = async () => {
+      const [allJobs, hosts] = await Promise.all([api("/jobs"), api("/hosts")]);
+      state.jobsActive = allJobs.some((j) => j.status === "running");
+      return jobBoard(allJobs, hosts);
+    };
+    // Fast (5 s) while any job is running; slow (15 s) when the queue is idle.
+    liveBody("#live", body, () => (state.jobsActive ? 5000 : 15000));
+    return `<h1>Jobs</h1><p class="muted">One record per requested run: the intake is the gate, the timeline is the
+      record, screenshots/logs are artifacts, and a job closes out with a mandatory summary (what / why / learned /
+      next). Jobs <strong>never</strong> claim the host lease — the build/test/deploy tools still do; a job links to
+      those records. The queue is per host: running on top, then queued by position. Auto-refreshes every 5 s while a
+      job is running, 15 s when idle.</p><div id="live">${await body()}</div>`;
   },
 
   async validate() {

@@ -223,6 +223,8 @@ def server_identity() -> dict:
         # The confirm push channel: files a waiting agent watches instead of polling /api/evidence.
         "confirms_jsonl": str((settings.data_dir / "confirms.jsonl").resolve()),
         "latest_confirm": str((settings.data_dir / "latest_confirm.json").resolve()),
+        # The job-event push channel: every job event appends a line here (data_dir/job_events.jsonl).
+        "job_events_jsonl": str((settings.data_dir / "job_events.jsonl").resolve()),
     }
 
 

@@ -25,6 +25,13 @@ EXIT_PARTIAL = 6
 EXIT_TIMEOUT = 7
 EXIT_MATERIALS = 8  # build finished but the material guard flagged warnings (strict mode)
 
+# The `s2docs job` subcommand uses the exit-code contract from docs/TEST_JOBS_PLAN.md: 2 = validation
+# (intake/summary gate), 3 = conflict (illegal transition / held lease / existing artifact), 4 = not
+# found. These are job-local and deliberately differ from the global host/lock contract above.
+EXIT_JOB_VALIDATION = 2
+EXIT_JOB_CONFLICT = 3
+EXIT_JOB_NOT_FOUND = 4
+
 _DURATION_RE = re.compile(r"^(\d+)([smhd]?)$")
 _DURATION_UNITS = {"": 1, "s": 1, "m": 60, "h": 3600, "d": 86400}
 
@@ -547,6 +554,129 @@ def _cmd_test(args: argparse.Namespace) -> int:
     return _fail(f"unknown test command {args.test_cmd!r}", EXIT_ERROR)
 
 
+def _human_job(job) -> list[str]:
+    out = [f"{job.id}  {job.kind:5}  {job.status:9}  pos={job.position}  {job.title}"]
+    out.append(f"  target: {job.target}")
+    if job.host_id:
+        out.append(f"  host: {job.host_id}")
+    if job.worker:
+        out.append(f"  worker: {job.worker}")
+    if job.phase:
+        out.append(f"  phase: {job.phase}")
+    if job.error_count or job.crash_count:
+        out.append(f"  errors={job.error_count} crashes={job.crash_count}")
+    p = job.params or {}
+    out.append(f"  purpose: {p.get('purpose', '')}")
+    out.append(f"  expected: {p.get('expected', '')}")
+    out.append(
+        f"  max_minutes: {p.get('max_minutes')}  screenshots: {p.get('screenshots')}  confirm: {p.get('needs_confirm')}"
+    )
+    if p.get("pending_shot"):
+        out.append("  pending_shot: true")
+    out.append(f"  events: {len(job.events)}  links: {len(job.links)}  artifacts: {len(job.artifacts)}")
+    if job.summary:
+        for key in ("what", "why", "learned", "next"):
+            out.append(f"  {key}: {job.summary.get(key, '')}")
+    return out
+
+
+def _tail_lines(path: str, count: int = 200) -> str:
+    lines = Path(path).read_text(encoding="utf-8", errors="replace").splitlines()
+    return "\n".join(lines[-count:])
+
+
+def _cmd_job(args: argparse.Namespace) -> int:
+    from s2docs import jobs
+    from s2docs.db.repository import NotFound
+
+    db = Database(get_settings().db_path)
+    try:
+        if args.job_cmd == "enqueue":
+            job = jobs.enqueue(
+                db,
+                kind=args.kind,
+                title=args.title,
+                target=args.target,
+                purpose=args.purpose,
+                expected=args.expected,
+                host_id=args.host,
+                host_choice="ask" if args.ask_host else None,
+                max_minutes=args.max_minutes,
+                reason=args.reason,
+                needs_confirm=args.confirm,
+                screenshots=args.screenshots,
+                watching=args.watching,
+                branch=args.branch,
+                commit=args.commit,
+                requested_by=args.requested_by,
+            )
+            return _emit(args, {"job": job.model_dump()}, _human_job(job))
+        if args.job_cmd == "list":
+            rows = jobs.list_jobs(db, status="active" if args.active else None, host_id=args.host)
+            human = [f"{j.id}  {j.kind:5}  {j.status:9}  pos={j.position}  {j.host_id or '-'}  {j.title}" for j in rows]
+            return _emit(args, {"jobs": [j.model_dump() for j in rows]}, human or ["no jobs"])
+        if args.job_cmd == "show":
+            job = jobs.get(db, args.job_id)
+            return _emit(args, {"job": job.model_dump()}, _human_job(job))
+        if args.job_cmd == "next":
+            job = jobs.next_job(db, args.host)
+            return _emit(args, {"job": job.model_dump()}, _human_job(job))
+        if args.job_cmd == "start":
+            job = jobs.start(db, args.job_id, worker=args.worker)
+            return _emit(args, {"job": job.model_dump()}, _human_job(job))
+        if args.job_cmd == "event":
+            data = json.loads(args.data) if args.data else {}
+            if args.log_file:
+                data = {**data, "log_tail": _tail_lines(args.log_file, 200)}
+            ev = jobs.event(db, args.job_id, level=args.level, message=args.message, phase=args.phase, data=data)
+            return _emit(args, {"event": ev.model_dump()}, [f"{ev.id}  {ev.level}  {ev.phase or '-'}  {ev.message}"])
+        if args.job_cmd == "attach":
+            path = Path(args.file).expanduser()
+            name = args.name or path.name
+            ctype = jobs.content_type_for(name)
+            if ctype is None:
+                return _fail(f"unsupported file type {path.suffix!r}; use png/jpg/txt/log/json/zip", EXIT_ERROR)
+            art = jobs.save_artifact(db, args.job_id, name, path.read_bytes(), ctype)
+            return _emit(args, {"artifact": art.model_dump()}, [f"{art.name}  {art.size} B  md5={art.md5}  {art.url}"])
+        if args.job_cmd == "shot-request":
+            job = jobs.request_screenshot(db, args.job_id, note=args.note)
+            return _emit(args, {"job": job.model_dump()}, _human_job(job))
+        if args.job_cmd == "finish":
+            summary = {"what": args.what, "why": args.why, "learned": args.learned, "next": args.next_field}
+            job = jobs.finish(db, args.job_id, status=args.status, summary=summary)
+            return _emit(args, {"job": job.model_dump()}, _human_job(job))
+        if args.job_cmd == "cancel":
+            job = jobs.cancel(db, args.job_id, reason=args.reason)
+            return _emit(args, {"job": job.model_dump()}, _human_job(job))
+        if args.job_cmd == "watch":
+            return _watch_job(db, args.job_id)
+    except NotFound as exc:
+        return _fail(str(exc), EXIT_JOB_NOT_FOUND)
+    except jobs.JobConflict as exc:
+        return _fail(str(exc), EXIT_JOB_CONFLICT)
+    except jobs.JobValidationError as exc:
+        return _fail(str(exc), EXIT_JOB_VALIDATION)
+    except (jobs.JobError, ValueError, OSError) as exc:
+        return _fail(str(exc), EXIT_ERROR)
+    return _fail(f"unknown job command {args.job_cmd!r}", EXIT_ERROR)
+
+
+def _watch_job(db, job_id: str) -> int:
+    """Tail a job's events until it reaches a terminal status (passed -> 0, otherwise 1)."""
+    from s2docs import jobs
+
+    seen = 0
+    while True:
+        job = jobs.get(db, job_id)
+        for ev in job.events[seen:]:
+            print(f"{ev.created_at}  {ev.level:10}  {ev.phase or '-':12}  {ev.message}", flush=True)
+        seen = len(job.events)
+        if job.status in jobs.TERMINAL_STATUSES:
+            print(f"# job {job.id} -> {job.status}")
+            return EXIT_OK if job.status == "passed" else EXIT_ERROR
+        time.sleep(1.0)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="s2docs", description="Source 2 docs index, API and MCP server")
     parser.add_argument("-v", "--verbose", action="store_true")
@@ -730,6 +860,64 @@ def main(argv: list[str] | None = None) -> int:
     q = tc.add_parser("list", help="List test runs (newest first)")
     q.add_argument("--state", choices=list(_TEST_STATES))
     p.set_defaults(fn=_cmd_test)
+
+    p = sub.add_parser("job", help="Job ledger + queue: one record per requested run")
+    jc = p.add_subparsers(dest="job_cmd", required=True)
+    q = jc.add_parser("enqueue", help="Enqueue a job (intake is validated)")
+    q.add_argument("--kind", required=True, choices=["test", "demo", "final"])
+    q.add_argument("--title", required=True)
+    q.add_argument("--target", required=True, help="What is under test: feature/test + branch@sha")
+    q.add_argument("--purpose", required=True, help="One sentence: why this run exists")
+    q.add_argument("--expected", required=True, help="Pass criterion (observable)")
+    q.add_argument("--host", help="Host to queue on (or use --ask-host)")
+    q.add_argument("--ask-host", action="store_true", help="Leave unassigned until assign")
+    q.add_argument("--max-minutes", type=int, help="Cap; test/demo default 5, larger needs --reason")
+    q.add_argument("--reason", help="Why the run may exceed the 5-minute default")
+    q.add_argument("--confirm", action="store_true", help="The human iso_confirm gate decides pass/fail")
+    q.add_argument("--screenshots", default="each_step", choices=["each_step", "on_request", "none"])
+    q.add_argument("--watching", action="store_true", help="The user is watching this run live")
+    q.add_argument("--branch")
+    q.add_argument("--commit")
+    q.add_argument("--requested-by", help="Coordinator session id")
+    q = jc.add_parser("list", help="List jobs (newest first)")
+    q.add_argument("--active", action="store_true", help="Only queued + running")
+    q.add_argument("--host")
+    q = jc.add_parser("show", help="Show one job with its timeline, links and artifacts")
+    q.add_argument("job_id")
+    q = jc.add_parser("next", help="Head queued job for a host, when that host's lease is free")
+    q.add_argument("--host", required=True)
+    q = jc.add_parser("start", help="queued -> running")
+    q.add_argument("job_id")
+    q.add_argument("--worker", required=True, help="Subagent id / branch running it")
+    q = jc.add_parser("event", help="Append a timeline event")
+    q.add_argument("job_id")
+    q.add_argument(
+        "--level", required=True, choices=["info", "warn", "error", "crash", "screenshot", "milestone", "learning"]
+    )
+    q.add_argument("--message", required=True)
+    q.add_argument("--phase", help="Sets the job's current phase")
+    q.add_argument("--data", help="JSON detail, e.g. '{\"exit_code\": 1}'")
+    q.add_argument("--log-file", help="Attach the tail (200 lines) of this file as data.log_tail")
+    q = jc.add_parser("attach", help="Copy a local file into the job's artifacts (append-only)")
+    q.add_argument("job_id")
+    q.add_argument("file")
+    q.add_argument("--name", help="Stored name (default: the file's basename)")
+    q = jc.add_parser("shot-request", help="Ask the runner for a screenshot (sets params.pending_shot)")
+    q.add_argument("job_id")
+    q.add_argument("--note", help="What to capture")
+    q = jc.add_parser("finish", help="Close out a job (all four summary fields required)")
+    q.add_argument("job_id")
+    q.add_argument("--status", required=True, choices=["passed", "failed", "error", "cancelled"])
+    q.add_argument("--what", required=True)
+    q.add_argument("--why", required=True)
+    q.add_argument("--learned", required=True)
+    q.add_argument("--next", dest="next_field", required=True, help="What is next")
+    q = jc.add_parser("cancel", help="queued/running -> cancelled")
+    q.add_argument("job_id")
+    q.add_argument("--reason")
+    q = jc.add_parser("watch", help="Tail a job's events until it ends")
+    q.add_argument("job_id")
+    p.set_defaults(fn=_cmd_job)
 
     args = parser.parse_args(argv)
     # stdout is the MCP stdio channel: logs must go to stderr.

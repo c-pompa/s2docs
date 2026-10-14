@@ -438,6 +438,9 @@ class ServerInfo(BaseModel):
     latest_confirm: str = Field(
         default="", description="Atomically-rewritten newest human confirm (data_dir/latest_confirm.json)"
     )
+    job_events_jsonl: str = Field(
+        default="", description="Append-only job-event journal a waiting agent watches (data_dir/job_events.jsonl)"
+    )
 
 
 class LockSummary(BaseModel):
@@ -551,9 +554,7 @@ class Deployment(BaseModel):
 
 
 # ------------------------------------------------------------------ evidence
-EvidenceKind = Literal[
-    "console_transcript", "file_hash", "pixel_diff", "screenshot", "note", "other", "human-confirm"
-]
+EvidenceKind = Literal["console_transcript", "file_hash", "pixel_diff", "screenshot", "note", "other", "human-confirm"]
 EVIDENCE_KINDS: tuple[str, ...] = EvidenceKind.__args__  # type: ignore[attr-defined]
 
 
@@ -595,3 +596,77 @@ class TestRun(BaseModel):
     )
     created_at: str
     updated_at: str
+
+
+# --------------------------------------------------------------------- jobs
+# A job is the one record for a requested run: kind, target, host, intake, a timeline, artifacts and a
+# mandatory close-out summary. It is a ledger + queue, never a host lock (see docs/TEST_JOBS.md).
+JobKind = Literal["test", "demo", "final"]
+JOB_KINDS: tuple[str, ...] = JobKind.__args__  # type: ignore[attr-defined]
+
+JobStatus = Literal["queued", "running", "passed", "failed", "error", "cancelled"]
+JOB_STATUSES: tuple[str, ...] = JobStatus.__args__  # type: ignore[attr-defined]
+ACTIVE_JOB_STATUSES: tuple[str, ...] = ("queued", "running")
+TERMINAL_JOB_STATUSES: tuple[str, ...] = ("passed", "failed", "error", "cancelled")
+
+JobEventLevel = Literal["info", "warn", "error", "crash", "screenshot", "milestone", "learning"]
+JOB_EVENT_LEVELS: tuple[str, ...] = JobEventLevel.__args__  # type: ignore[attr-defined]
+
+JobLinkKind = Literal["test_run", "build", "deploy", "evidence", "project"]
+JOB_LINK_KINDS: tuple[str, ...] = JobLinkKind.__args__  # type: ignore[attr-defined]
+
+
+class JobSummary(BaseModel):
+    """The mandatory close-out summary: what was asked, why, what we learned, what is next."""
+
+    what: str
+    why: str
+    learned: str
+    next: str
+
+
+class JobEvent(BaseModel):
+    id: int
+    job_id: str
+    level: JobEventLevel
+    phase: str | None = None
+    message: str
+    data: dict = Field(default_factory=dict, description="JSON detail: log_tail, exit_code, artifact url, md5, ...")
+    created_at: str
+
+
+class JobLink(BaseModel):
+    kind: JobLinkKind
+    ref_id: str
+
+
+class JobArtifact(BaseModel):
+    name: str
+    url: str = Field(description="REST path that serves the bytes, e.g. '/api/artifacts/j-1a2b3c4d/hud.png'")
+    md5: str
+    size: int
+
+
+class Job(BaseModel):
+    id: str
+    kind: JobKind
+    title: str
+    target: str
+    host_id: str | None = Field(default=None, description="NULL = not yet assigned (host_choice='ask')")
+    status: JobStatus
+    position: int = 100
+    params: dict = Field(default_factory=dict, description="Intake: purpose, expected, caps, flags, pending_shot, ...")
+    requested_by: str | None = None
+    worker: str | None = None
+    phase: str = ""
+    project_id: str | None = None
+    summary: JobSummary | None = Field(default=None, description="Present once the job is closed out")
+    created_at: str
+    started_at: str | None = None
+    finished_at: str | None = None
+    updated_at: str
+    error_count: int = Field(default=0, description="error-level events (the queue board flags these)")
+    crash_count: int = Field(default=0, description="crash-level events (the queue board flags these)")
+    events: list[JobEvent] = []
+    links: list[JobLink] = []
+    artifacts: list[JobArtifact] = []
