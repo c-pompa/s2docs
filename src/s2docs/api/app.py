@@ -23,6 +23,7 @@ from s2docs.config import get_settings
 from s2docs.db.connection import Database, DatabaseNotInitialized
 from s2docs.db.repository import NotFound
 from s2docs.hosts import HostLocked
+from s2docs.jobs import JobConflict, JobValidationError
 from s2docs.orchestration.engine import GateFailed, Orchestrator
 from s2docs.prompts import PromptError
 
@@ -114,6 +115,15 @@ def create_app(db_path: Path | None = None, *, mount_mcp: bool = True, workspace
     @app.exception_handler(HostLocked)
     async def _host_locked(_: Request, exc: HostLocked) -> JSONResponse:
         return JSONResponse({"detail": str(exc), "host_locked": True}, status_code=409)
+
+    @app.exception_handler(JobValidationError)
+    async def _job_invalid(_: Request, exc: JobValidationError) -> JSONResponse:
+        # The intake/summary gate reports every offending field in one 422 so an agent fixes them at once.
+        return JSONResponse({"detail": str(exc), "fields": exc.fields}, status_code=422)
+
+    @app.exception_handler(JobConflict)
+    async def _job_conflict(_: Request, exc: JobConflict) -> JSONResponse:
+        return JSONResponse({"detail": str(exc), "conflict": True}, status_code=409)
 
     @app.exception_handler(BuildTimeout)
     async def _build_timeout(_: Request, exc: BuildTimeout) -> JSONResponse:

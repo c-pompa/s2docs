@@ -6,11 +6,11 @@ from collections.abc import Iterator
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Path, Query, Request
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import PlainTextResponse, Response
 from pydantic import BaseModel, Field
 
 from s2docs import builds as build_svc
-from s2docs import deploys, evidence, hosts, test_runs
+from s2docs import confirms, deploys, evidence, hosts, jobs, test_runs
 from s2docs import models as m
 from s2docs.build.validate_cfg import validate_cfg
 from s2docs.build.validate_script import validate_cs_script
@@ -498,7 +498,10 @@ def verify_deploy(deploy_id: str, db: Db):
 
 # ---------------------------------------------------------------- evidence
 class EvidenceIn(BaseModel):
-    project_id: str
+    project_id: str | None = Field(default=None, description="Owning project; omit when test_run_id identifies the run")
+    test_run_id: str | None = Field(
+        default=None, description="Run this evidence records; its project is used when project_id is omitted"
+    )
     step_id: str | None = None
     kind: m.EvidenceKind
     ref: str | None = None
@@ -507,9 +510,23 @@ class EvidenceIn(BaseModel):
 
 @router.post("/evidence", response_model=m.Evidence, status_code=201)
 def add_evidence(body: EvidenceIn, db: Db):
-    return evidence.add(
-        db, kind=body.kind, project_id=body.project_id, step_id=body.step_id, ref=body.ref, data=body.data
+    # The director puts the run inside `data`; accept a top-level `test_run_id` too. The store resolves
+    # the project from it, so human-confirm evidence stores without the caller knowing a project.
+    test_run_id = body.test_run_id or body.data.get("test_run_id")
+    row = evidence.add(
+        db,
+        kind=body.kind,
+        project_id=body.project_id,
+        step_id=body.step_id,
+        ref=body.ref,
+        data=body.data,
+        test_run_id=test_run_id,
     )
+    # Push human-confirm rows to the watchable files (data_dir/confirms.jsonl + latest_confirm.json)
+    # so a waiting agent can watch a local file instead of polling GET /api/evidence every ~5 s.
+    if row.kind == "human-confirm":
+        confirms.publish(row)
+    return row
 
 
 @router.get("/evidence", response_model=list[m.Evidence])
@@ -574,6 +591,139 @@ def finish_test_run(run_id: str, body: TestFinishIn, db: Db):
 @router.post("/test-runs/{run_id}/clear", response_model=m.TestRun)
 def clear_test_run(run_id: str, db: Db):
     return test_runs.clear(db, run_id)
+
+
+# ------------------------------------------------------------------- jobs
+class JobEnqueueIn(BaseModel):
+    kind: str | None = Field(default=None, description="test | demo | final")
+    title: str | None = Field(default=None, description="Human name (HUD strip / banner)")
+    target: str | None = Field(default=None, description="What is under test: feature/test + branch@sha")
+    purpose: str | None = Field(default=None, description="One sentence: why this run exists")
+    expected: str | None = Field(default=None, description="Pass criterion (observable)")
+    host_id: str | None = Field(default=None, description="Host to queue on; or use host_choice='ask'")
+    host_choice: str | None = Field(default=None, description="'ask' = stays queued + unassigned")
+    max_minutes: int | None = Field(default=None, description="Cap; >5 min needs a reason (test/demo)")
+    reason: str | None = Field(default=None, description="Why the run may exceed the 5-minute default")
+    needs_confirm: bool = Field(default=False, description="True = the human iso_confirm gate decides pass/fail")
+    screenshots: str = Field(default="each_step", description="each_step | on_request | none")
+    watching: bool = Field(default=False, description="The user is watching this run live")
+    branch: str | None = None
+    commit: str | None = None
+    cleanup: list[str] | None = Field(default=None, description="Things that must be gone at the end")
+    requested_by: str | None = Field(default=None, description="Coordinator session id")
+    project_id: str | None = None
+
+
+class JobAssignIn(BaseModel):
+    host_id: str
+    position: int | None = None
+
+
+class JobStartIn(BaseModel):
+    worker: str | None = Field(default=None, description="Subagent id / branch running it")
+
+
+class JobEventIn(BaseModel):
+    level: str
+    message: str = ""
+    phase: str | None = None
+    data: dict | None = None
+
+
+class JobLinkIn(BaseModel):
+    kind: str
+    ref_id: str
+
+
+class JobScreenshotIn(BaseModel):
+    note: str | None = None
+
+
+class JobFinishIn(BaseModel):
+    status: str
+    summary: dict | None = None
+
+
+class JobCancelIn(BaseModel):
+    reason: str | None = None
+
+
+@router.post("/jobs", response_model=m.Job, status_code=201)
+def enqueue_job(body: JobEnqueueIn, db: Db):
+    return jobs.enqueue(db, **body.model_dump())
+
+
+@router.get("/jobs", response_model=list[m.Job])
+def list_jobs(
+    db: Db,
+    status: Annotated[str | None, Query(description="A status, or 'active' = queued+running")] = None,
+    host_id: str | None = None,
+    limit: Annotated[int, Query(ge=1, le=500)] = 100,
+):
+    return jobs.list_jobs(db, status=status, host_id=host_id, limit=limit)
+
+
+@router.get("/jobs/next", response_model=m.Job)
+def next_job(db: Db, host_id: Annotated[str, Query(description="Host whose queue to read")]):
+    """Head queued job for a host, only when that host's lease is free (409 + holder otherwise)."""
+    return jobs.next_job(db, host_id)
+
+
+@router.get("/jobs/{job_id}", response_model=m.Job)
+def get_job(job_id: str, db: Db):
+    return jobs.get(db, job_id)
+
+
+@router.post("/jobs/{job_id}/assign", response_model=m.Job)
+def assign_job(job_id: str, body: JobAssignIn, db: Db):
+    return jobs.assign(db, job_id, body.host_id, position=body.position)
+
+
+@router.post("/jobs/{job_id}/start", response_model=m.Job)
+def start_job(job_id: str, body: JobStartIn, db: Db):
+    return jobs.start(db, job_id, worker=body.worker)
+
+
+@router.post("/jobs/{job_id}/event", response_model=m.JobEvent)
+def job_event(job_id: str, body: JobEventIn, db: Db):
+    return jobs.event(db, job_id, level=body.level, message=body.message, phase=body.phase, data=body.data)
+
+
+@router.put("/jobs/{job_id}/artifacts/{name}", response_model=m.JobArtifact)
+async def put_job_artifact(job_id: str, name: str, request: Request, db: Db):
+    """Store a raw-body artifact (append-only, <= 25 MB, name `^[A-Za-z0-9._-]{1,120}$`)."""
+    content = await request.body()
+    return jobs.save_artifact(db, job_id, name, content, request.headers.get("content-type", ""))
+
+
+@router.get("/artifacts/{job_id}/{name}")
+def get_job_artifact(job_id: str, name: str, db: Db):
+    data, ctype = jobs.read_artifact(db, job_id, name)
+    headers = None
+    if not ctype.startswith("image/"):
+        # Non-image artifacts (logs, json, crash dumps, zips) are downloads, not inline views.
+        headers = {"Content-Disposition": f'attachment; filename="{name}"'}
+    return Response(content=data, media_type=ctype, headers=headers)
+
+
+@router.post("/jobs/{job_id}/link", response_model=m.Job)
+def link_job(job_id: str, body: JobLinkIn, db: Db):
+    return jobs.link(db, job_id, kind=body.kind, ref_id=body.ref_id)
+
+
+@router.post("/jobs/{job_id}/screenshot-request", response_model=m.Job)
+def request_job_screenshot(job_id: str, body: JobScreenshotIn, db: Db):
+    return jobs.request_screenshot(db, job_id, note=body.note)
+
+
+@router.post("/jobs/{job_id}/finish", response_model=m.Job)
+def finish_job(job_id: str, body: JobFinishIn, db: Db):
+    return jobs.finish(db, job_id, status=body.status, summary=body.summary)
+
+
+@router.post("/jobs/{job_id}/cancel", response_model=m.Job)
+def cancel_job(job_id: str, body: JobCancelIn, db: Db):
+    return jobs.cancel(db, job_id, reason=body.reason)
 
 
 # ------------------------------------------------------------- prompts

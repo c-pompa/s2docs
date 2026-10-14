@@ -234,6 +234,67 @@ def client(edb):
         yield c
 
 
+def test_api_human_confirm_evidence_without_project(edb, client, tmp_path):
+    """The director's human-confirm gate POSTs kind='human-confirm' with NO project_id, only a test_run_id
+    (the live run t-5e1fb5cc has project_id=NULL). The row must store with project_id NULL + test_run_id
+    set, and read back through the kind filter with its payload intact."""
+    run = test_runs.start(edb, "iso_test")  # like the live run: no project
+    payload = {
+        "kind": "human-confirm",
+        "test_run_id": run.id,
+        "data": {
+            "test_run_id": run.id,
+            "verdict": "pass",
+            "notes": "wall looked clean",
+            "evidence_refs": ["shots/a.png", "shots/b.png"],
+            "purpose": "accept the overlay",
+            "expected": "no gaps",
+            "map": "de_dust2",
+            "source": "director",
+        },
+    }
+    r = client.post("/api/evidence", json=payload)
+    assert r.status_code == 201, r.text
+    body = r.json()
+    assert body["kind"] == "human-confirm"
+    assert body["project_id"] is None  # resolved from a project-less run -> stays NULL
+    assert body["test_run_id"] == run.id
+    eid = body["id"]
+    # GET ?kind=human-confirm returns it, payload intact
+    listed = client.get("/api/evidence", params={"kind": "human-confirm"}).json()
+    assert [e["id"] for e in listed] == [eid]
+    d = listed[0]["data"]
+    assert d["verdict"] == "pass" and d["notes"] == "wall looked clean"
+    assert d["evidence_refs"] == ["shots/a.png", "shots/b.png"]
+    assert d["purpose"] == "accept the overlay" and d["expected"] == "no gaps"
+    assert d["map"] == "de_dust2" and d["source"] == "director"
+    # and the store round-trips it (durable on disk, not just in the response)
+    assert evidence.get(edb, eid).data["verdict"] == "pass"
+    assert "human-confirm" in evidence.EVIDENCE_KINDS
+
+
+def test_api_human_confirm_resolves_project_from_run(edb, client, tmp_path):
+    """When the run DOES have a project, the omitted project_id is resolved from it (FK stays valid)."""
+    pid = _project(edb, tmp_path)
+    run = test_runs.start(edb, "iso_test", project_id=pid)
+    r = client.post(
+        "/api/evidence", json={"kind": "human-confirm", "test_run_id": run.id, "data": {"verdict": "fail"}}
+    )
+    assert r.status_code == 201, r.text
+    assert r.json()["project_id"] == pid
+    assert r.json()["test_run_id"] == run.id
+    rows = client.get("/api/evidence", params={"project_id": pid, "kind": "human-confirm"}).json()
+    assert [e["id"] for e in rows] == [r.json()["id"]]
+
+
+def test_api_evidence_needs_project_or_known_run(edb, client):
+    """A human-confirm row with neither project_id nor a run is still rejected, as is an unknown run."""
+    r = client.post("/api/evidence", json={"kind": "human-confirm", "data": {"verdict": "pass"}})
+    assert r.status_code == 400 and "project_id is required" in r.json()["detail"]
+    r = client.post("/api/evidence", json={"kind": "human-confirm", "test_run_id": "t-ghost"})
+    assert r.status_code == 400 and "unknown test_run" in r.json()["detail"]
+
+
 def test_api_evidence_and_test_routes(edb, client, tmp_path):
     pid = _project(edb, tmp_path)
     r = client.post(

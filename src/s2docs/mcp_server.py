@@ -16,7 +16,7 @@ from mcp.server.mcpserver.prompts.base import Prompt, PromptArgument
 from mcp_types import ToolAnnotations
 from pydantic import Field
 
-from s2docs import builds, deploys, evidence, hosts, test_runs
+from s2docs import builds, deploys, evidence, hosts, jobs, test_runs
 from s2docs import models as m
 from s2docs.build import workspace as ws
 from s2docs.build.validate_cfg import validate_cfg as _validate_cfg
@@ -41,6 +41,8 @@ Owner = Annotated[
     str,
     Field(description="Who is asking: workstream/session id, e.g. 'ws/occluder-wire', 'p-1a2b3c4d', 'coord-session'"),
 ]
+JobId = Annotated[str, Field(description="Job id from job_enqueue/job_list, e.g. 'j-1a2b3c4d'")]
+JobLevel = Literal["info", "warn", "error", "crash", "screenshot", "milestone", "learning"]
 
 INSTRUCTIONS = """\
 Reference data for Valve's Source 2 engine games (Counter-Strike 2 = `cs2`, Deadlock = `deadlock`),
@@ -768,6 +770,180 @@ def create_mcp_server(db: Database, workspace: Path | None = None) -> MCPServer:
     ) -> list[m.TestRun]:
         """Recent test sessions (newest first), optionally filtered by state."""
         return _ev(lambda: test_runs.list_runs(db, state=state))
+
+    # ------------------------------------------------------------------ jobs
+    # A job is the one record for a requested test/demo/final run: intake, timeline, artifacts and a
+    # mandatory close-out summary. Jobs never claim the host lease — the canonical tools do.
+    # Seed/order writes (assign, link) are idempotent upserts; everything that appends a record or
+    # launches work is NON_IDEMPOTENT, so a retry is never silently a second job/event/artifact.
+    JOBS_WRITE = ToolAnnotations(read_only_hint=False, destructive_hint=False, idempotent_hint=True)
+
+    def _jobs(fn: Callable[[], T]) -> T:
+        try:
+            return fn()
+        except (jobs.JobError, hosts.HostError, NotFound, OSError) as exc:
+            raise ToolError(str(exc)) from exc
+
+    @server.tool(annotations=READ_ONLY)
+    def job_list(
+        status: Annotated[str | None, Field(description="A status, or 'active' = queued+running")] = None,
+        host_id: Annotated[str | None, Field(description="Restrict to one host")] = None,
+        limit: Annotated[int, Field(ge=1, le=500)] = 100,
+    ) -> list[m.Job]:
+        """Jobs newest first. `status='active'` means queued + running. Each row carries error/crash counts."""
+        return _jobs(lambda: jobs.list_jobs(db, status=status, host_id=host_id, limit=limit))
+
+    @server.tool(annotations=READ_ONLY)
+    def job_get(job_id: JobId) -> m.Job:
+        """One job with its full timeline (events), links to test runs/builds/deploys/evidence and artifacts."""
+        return _jobs(lambda: jobs.get(db, job_id))
+
+    @server.tool(annotations=NON_IDEMPOTENT)
+    def job_enqueue(
+        kind: Annotated[str, Field(description="test | demo | final")],
+        title: Annotated[str, Field(description="Human name (the HUD strip / banner label)")],
+        target: Annotated[str, Field(description="What is under test: feature/test name + branch@sha")],
+        purpose: Annotated[str, Field(description="One sentence: why this run exists")],
+        expected: Annotated[str, Field(description="Pass criterion (an observable outcome)")],
+        host_id: Annotated[str | None, Field(description="Host to queue on, or set host_choice='ask'")] = None,
+        host_choice: Annotated[
+            str | None, Field(description="'ask' = stays queued + unassigned until assigned")
+        ] = None,
+        max_minutes: Annotated[int | None, Field(description="Cap; test/demo default 5, larger needs `reason`")] = None,
+        reason: Annotated[str | None, Field(description="Why the run may exceed the 5-minute default")] = None,
+        needs_confirm: Annotated[
+            bool, Field(description="True = the human iso_confirm gate decides pass/fail")
+        ] = False,
+        screenshots: Annotated[str, Field(description="each_step (default) | on_request | none")] = "each_step",
+        watching: Annotated[bool, Field(description="The user is watching this run live")] = False,
+        branch: Annotated[str | None, Field(description="Branch under test")] = None,
+        commit: Annotated[str | None, Field(description="Commit sha under test")] = None,
+        cleanup: Annotated[list[str] | None, Field(description="Things that must be gone at the end")] = None,
+        requested_by: Annotated[str | None, Field(description="Coordinator session id")] = None,
+        project_id: Annotated[str | None, Field(description="Project this job belongs to")] = None,
+    ) -> m.Job:
+        """Enqueue a job (validated intake -> queued). The intake is the gate: every missing required field
+        comes back in one error with a field list. Set `host_choice='ask'` to queue unassigned."""
+        return _jobs(
+            lambda: jobs.enqueue(
+                db,
+                kind=kind,
+                title=title,
+                target=target,
+                purpose=purpose,
+                expected=expected,
+                host_id=host_id,
+                host_choice=host_choice,
+                max_minutes=max_minutes,
+                reason=reason,
+                needs_confirm=needs_confirm,
+                screenshots=screenshots,
+                watching=watching,
+                branch=branch,
+                commit=commit,
+                cleanup=cleanup,
+                requested_by=requested_by,
+                project_id=project_id,
+            )
+        )
+
+    @server.tool(annotations=READ_ONLY)
+    def job_next(host_id: HostId) -> m.Job:
+        """The head queued job for a host, only when that host's lease is free. Errors (with the holder)
+        when a fresh lock blocks it, and when the host's queue is empty."""
+        return _jobs(lambda: jobs.next_job(db, host_id))
+
+    @server.tool(annotations=JOBS_WRITE)
+    def job_assign(
+        job_id: JobId,
+        host_id: HostId,
+        position: Annotated[int | None, Field(description="Queue order (ascending); omit to keep the current")] = None,
+    ) -> m.Job:
+        """Set (or move) a queued job's host and queue order."""
+        return _jobs(lambda: jobs.assign(db, job_id, host_id, position=position))
+
+    @server.tool(annotations=NON_IDEMPOTENT)
+    def job_start(
+        job_id: JobId,
+        worker: Annotated[str, Field(description="Subagent id / branch running it, e.g. 'ws/occluder-wire'")],
+    ) -> m.Job:
+        """queued -> running, recording the worker and started_at. A second call is a conflict."""
+        return _jobs(lambda: jobs.start(db, job_id, worker=worker))
+
+    @server.tool(annotations=NON_IDEMPOTENT)
+    def job_event(
+        job_id: JobId,
+        level: JobLevel,
+        message: Annotated[str, Field(description="What happened (the timeline line)")],
+        phase: Annotated[str | None, Field(description="Sets the job's current phase when given")] = None,
+        data: Annotated[
+            dict | None,
+            Field(description="JSON detail: log_tail (capped 64 KB) for error/crash, exit_code, url, md5, test_run_id"),
+        ] = None,
+    ) -> m.JobEvent:
+        """Append one timeline event. `phase` updates the job's current phase; `error`/`crash` require a
+        message and SHOULD carry `data.log_tail` so the job page can expand the failure in a <pre>."""
+        return _jobs(lambda: jobs.event(db, job_id, level=level, message=message, phase=phase, data=data))
+
+    def _attach(job_id: str, path: str, name: str | None) -> m.JobArtifact:
+        src = Path(path).expanduser()
+        if not src.is_file():
+            raise jobs.JobValidationError(f"no such file {path!r}", ["path"])
+        ctype = jobs.content_type_for(src.name)
+        if ctype is None:
+            raise jobs.JobValidationError(
+                f"unsupported file type {src.suffix!r}; use a png/jpg/txt/log/json/zip/dmp/mdmp/evtx file", ["path"]
+            )
+        return jobs.save_artifact(db, job_id, name or src.name, src.read_bytes(), ctype)
+
+    @server.tool(annotations=NON_IDEMPOTENT)
+    def job_attach(
+        job_id: JobId,
+        path: Annotated[str, Field(description="Local (Mac) file to copy into the job's artifacts")],
+        name: Annotated[str | None, Field(description="Stored name; default = the file's basename")] = None,
+    ) -> m.JobArtifact:
+        """Copy a local file into the job's artifacts (MCP runs on the Mac). Append-only: no overwrite.
+        Images also record a `screenshot` event automatically."""
+        return _jobs(lambda: _attach(job_id, path, name))
+
+    @server.tool(annotations=NON_IDEMPOTENT)
+    def job_request_screenshot(
+        job_id: JobId,
+        note: Annotated[str | None, Field(description="What to capture, e.g. 'the HUD after the wall test'")] = None,
+    ) -> m.Job:
+        """Ask the runner for a screenshot: an info event plus `params.pending_shot=true`. The runner
+        polls the job and answers by uploading an artifact, which clears the flag."""
+        return _jobs(lambda: jobs.request_screenshot(db, job_id, note=note))
+
+    @server.tool(annotations=JOBS_WRITE)
+    def job_link(
+        job_id: JobId,
+        kind: Annotated[str, Field(description="test_run | build | deploy | evidence | project")],
+        ref_id: Annotated[str, Field(description="Id of the test run / build / deploy / evidence / project")],
+    ) -> m.Job:
+        """Attach a canonical record the job is about (a test run, build, deploy, evidence row or project)."""
+        return _jobs(lambda: jobs.link(db, job_id, kind=kind, ref_id=ref_id))
+
+    @server.tool(annotations=NON_IDEMPOTENT)
+    def job_finish(
+        job_id: JobId,
+        status: Annotated[str, Field(description="passed | failed | error | cancelled")],
+        summary: Annotated[
+            dict,
+            Field(description="Close-out summary, ALL FOUR required and <=600 chars each: {what, why, learned, next}"),
+        ],
+    ) -> m.Job:
+        """Close out a running/queued job. Gate: `summary` must carry what, why, learned and next, each
+        non-empty and <=600 chars; otherwise the call is rejected with the offending field names."""
+        return _jobs(lambda: jobs.finish(db, job_id, status=status, summary=summary))
+
+    @server.tool(annotations=NON_IDEMPOTENT)
+    def job_cancel(
+        job_id: JobId,
+        reason: Annotated[str | None, Field(description="Why it was cancelled (recorded on the timeline)")] = None,
+    ) -> m.Job:
+        """queued/running -> cancelled; the reason is recorded as a timeline event."""
+        return _jobs(lambda: jobs.cancel(db, job_id, reason=reason))
 
     # -------------------------------------------------------------- resources
     @server.resource(
