@@ -371,8 +371,8 @@ def test_duration_rendering_executes_in_node(client, timed_rows):
 # ------------------------------------------------------- Central (America/Chicago) time display
 # The user ask: timestamps must read as actual local clock time in Central, not just '5m ago' or a
 # raw UTC ISO. Every timestamp renderer goes through one formatter: '<Central> (<relative>)'. The
-# zone label is 'CT' (the zone shifts CST/CDT with DST, the label must not) and Intl supplies the
-# DST rules, so these tests pin one winter (CST) and one summer (CDT) instant.
+# zone label is the real Intl abbreviation for that date — 'CST' in standard time, 'CDT' in daylight
+# time (a November date reads CST even in a CDT year) — so these tests pin a winter and a summer instant.
 def test_frontend_central_time_markers(client):
     """The shared Central formatter exists next to human()/parseTs and every timestamp cell uses it."""
     js = client.get("/app.js").text
@@ -380,9 +380,13 @@ def test_frontend_central_time_markers(client):
     assert "central-time-helpers:start" in js and "central-time-helpers:end" in js
     assert 'CT_ZONE = "America/Chicago"' in js
     assert "const ctAbs" in js and "const ctStamp" in js and "const fmtTime" in js and "const nowCT" in js
-    # 12-hour clock, short month, seconds; labelled 'CT' (never CST/CDT — the zone shifts with DST)
+    # 12-hour clock, short month, seconds; the zone label comes from Intl's short timeZoneName part
     assert 'hour12: true' in js and 'month: "short"' in js and 'second: "2-digit"' in js
-    assert "} CT`" in js and "CST" not in js and "CDT" not in js
+    assert 'timeZoneName: "short"' in js and "formatToParts" in js and 'x.type === "timeZoneName"' in js
+    # no hard-coded ' CT' label survives anywhere; the abbr is per-timestamp, with 'CT' only as fallback
+    assert not re.search(r" CT[`\"]", js)
+    assert 'return "CT";' in js  # Intl-less fallback only
+    assert "all times shown in Central time (America/Chicago, CST/CDT)" in js
     # every timestamp cell renders through the one formatter (lock cell, lock history, deploy, hosts
     # probed x2, project list, step table, Activity idle note)
     assert js.count("fmtTime(") >= 8
@@ -401,7 +405,8 @@ def test_frontend_central_time_markers(client):
 @pytest.mark.skipif(NODE is None, reason="node not installed")
 def test_central_time_rendering_executes_in_node(client):
     """Lift the shipped Central formatter out of app.js and run it: the exact absolute string, the
-    DST switch (one CST winter instant, one CDT summer instant), and the fallbacks."""
+    per-timestamp DST abbreviation (a CST winter instant, a CDT summer instant, a CST November
+    instant), and the fallbacks."""
     assert NODE is not None  # skipif above
     js = client.get("/app.js").text
     dur = js.split("// duration-helpers:start", 1)[1].split("// duration-helpers:end", 1)[0]
@@ -424,18 +429,21 @@ def test_central_time_rendering_executes_in_node(client):
         "Date.now = () => SUMMER;\n"
         "const summer = ctStamp('2026-07-15T21:37:21Z');\n"
         "const now = nowCT();\n"
+        # 2026-11-01 is the CST switch; a mid-November instant must read CST, not CDT.
+        "const novAbs = ctAbs(new Date(Date.parse('2026-11-15T22:37:21Z')));\n"
         "console.log(JSON.stringify({winter, earlier, winterHtml, summer, unparseableStamp,"
-        " unparseableHtml, nullHtml, now}));\n"
+        " unparseableHtml, nullHtml, now, novAbs}));\n"
     )
     proc = subprocess.run([NODE, "-e", script], capture_output=True, text=True, encoding="utf-8", timeout=60)
     assert proc.returncode == 0, proc.stderr
     out = json.loads(proc.stdout)
-    assert out["winter"] == "Jan 15, 4:37:21 PM CT (5m00s ago)"  # CST: UTC-6
-    assert out["earlier"] == "Jan 15, 4:12:21 PM CT (30m00s ago)"
-    assert out["summer"] == "Jul 15, 4:37:21 PM CT (5m00s ago)"  # CDT: UTC-5, the same wall clock
+    assert out["winter"] == "Jan 15, 4:37:21 PM CST (5m00s ago)"  # CST: UTC-6
+    assert out["earlier"] == "Jan 15, 4:12:21 PM CST (30m00s ago)"
+    assert out["summer"] == "Jul 15, 4:37:21 PM CDT (5m00s ago)"  # CDT: UTC-5, the same wall clock
+    assert out["novAbs"] == "Nov 15, 4:37:21 PM CST"  # after the 2026-11-01 CST switch
     assert out["winterHtml"] == (
-        '<span title="2026-01-15T22:37:21Z">Jan 15, 4:37:21 PM CT (5m00s ago)</span>'
+        '<span title="2026-01-15T22:37:21Z">Jan 15, 4:37:21 PM CST (5m00s ago)</span>'
     )
     assert out["unparseableStamp"] is None and out["unparseableHtml"] == "dry-run"  # kept, escaped
     assert out["nullHtml"] == "—"
-    assert re.fullmatch(r"\d{1,2}:\d{2} [AP]M CT", out["now"]), out["now"]  # '4:42 PM CT'
+    assert re.fullmatch(r"\d{1,2}:\d{2} [AP]M (CST|CDT)", out["now"]), out["now"]  # '4:42 PM CST'

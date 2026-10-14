@@ -54,8 +54,8 @@ const secsAgo = (iso) => {
 // ---- Central (America/Chicago) absolute timestamps -------------------------
 // The default clock for every timestamp the UI renders. One user is in America/Chicago and wants
 // to read wall-clock time, not a relative age. Intl carries the DST rules, so the same formatter
-// prints the standard offset in winter and the daylight offset in summer; the label stays 'CT'
-// (the zone shifts, the label must not).
+// prints the standard offset in winter and the daylight offset in summer; the label is the zone's
+// real abbreviation for that date — 'CST' in standard time, 'CDT' in daylight time.
 // central-time-helpers:start
 const CT_ZONE = "America/Chicago";
 const CT_DAY = new Intl.DateTimeFormat("en-US", { timeZone: CT_ZONE, month: "short", day: "numeric" });
@@ -63,9 +63,26 @@ const CT_CLOCK = new Intl.DateTimeFormat("en-US", {
   timeZone: CT_ZONE, hour: "numeric", minute: "2-digit", second: "2-digit", hour12: true,
 });
 const CT_NOW = new Intl.DateTimeFormat("en-US", { timeZone: CT_ZONE, hour: "numeric", minute: "2-digit", hour12: true });
-// Absolute Central wall-clock for one instant: 'Oct 13, 4:37:21 PM CT'.
-const ctAbs = (d) => `${CT_DAY.format(d)}, ${CT_CLOCK.format(d)} CT`;
-// The single timestamp string: '<Central> (<relative>)', e.g. 'Oct 13, 4:37:21 PM CT (5m ago)'.
+// The zone's real abbreviation for one instant: 'CST' in standard time, 'CDT' in daylight time.
+// Intl resolves the DST switch per date, so a November timestamp reads CST even in a CDT year.
+// Falls back to the generic 'CT' only when Intl cannot name the zone (no timeZoneName support).
+const CT_TZN = (() => {
+  try {
+    return new Intl.DateTimeFormat("en-US", { timeZone: CT_ZONE, timeZoneName: "short" });
+  } catch (e) {
+    return null;
+  }
+})();
+const ctAbbr = (d) => {
+  if (CT_TZN) {
+    const p = CT_TZN.formatToParts(d).find((x) => x.type === "timeZoneName");
+    if (p && p.value) return p.value;
+  }
+  return "CT";
+};
+// Absolute Central wall-clock for one instant: 'Oct 13, 4:37:21 PM CDT'.
+const ctAbs = (d) => `${CT_DAY.format(d)}, ${CT_CLOCK.format(d)} ${ctAbbr(d)}`;
+// The single timestamp string: '<Central> (<relative>)', e.g. 'Oct 13, 4:37:21 PM CDT (5m ago)'.
 // null when unparseable (the caller keeps its own fallback). The relative age is the shared secsAgo().
 const ctStamp = (iso) => {
   const t = parseTs(iso);
@@ -80,9 +97,9 @@ const fmtTime = (iso) => {
   const s = ctStamp(iso);
   return s == null ? esc(String(iso)) : `<span title="${esc(String(iso))}">${esc(s)}</span>`;
 };
-// 'Server now: 4:37 PM CT' — the sanity check that makes a relative age trustworthy.
-const nowCT = () => `${CT_NOW.format(new Date())} CT`;
-const nowLine = () => `<p class="muted">Server now: <strong>${nowCT()}</strong> · all times shown in Central (America/Chicago).</p>`;
+// 'Server now: 4:37 PM CDT' — the sanity check that makes a relative age trustworthy.
+const nowCT = () => { const d = new Date(); return `${CT_NOW.format(d)} ${ctAbbr(d)}`; };
+const nowLine = () => `<p class="muted">Server now: <strong>${nowCT()}</strong> · all times shown in Central time (America/Chicago, CST/CDT).</p>`;
 // central-time-helpers:end
 // Shared status colours across build/test/deploy/lock states.
 const STATE_CLASS = {
