@@ -699,7 +699,11 @@ async def put_job_artifact(job_id: str, name: str, request: Request, db: Db):
 @router.get("/artifacts/{job_id}/{name}")
 def get_job_artifact(job_id: str, name: str, db: Db):
     data, ctype = jobs.read_artifact(db, job_id, name)
-    return Response(content=data, media_type=ctype)
+    headers = None
+    if not ctype.startswith("image/"):
+        # Non-image artifacts (logs, json, crash dumps, zips) are downloads, not inline views.
+        headers = {"Content-Disposition": f'attachment; filename="{name}"'}
+    return Response(content=data, media_type=ctype, headers=headers)
 
 
 @router.post("/jobs/{job_id}/link", response_model=m.Job)

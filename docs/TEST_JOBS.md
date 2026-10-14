@@ -28,8 +28,8 @@ pass/fail), `screenshots` (`each_step` default | `on_request` | `none`), `watchi
 | `POST /jobs/{id}/assign {host_id, position?}` | set/move host & queue order (queued only) |
 | `POST /jobs/{id}/start {worker}` | queued → running, `started_at` |
 | `POST /jobs/{id}/event {level, phase?, message, data?}` | append timeline; a `phase` updates `jobs.phase`; `error`/`crash` need a message and should carry `data.log_tail` (capped 64 KB) |
-| `PUT /jobs/{id}/artifacts/{name}` | raw body, `Content-Type` one of `image/jpeg\|png`, `text/plain`, `application/json`, `application/zip`; stored under `<data_dir>/artifacts/<job_id>/<name>`, ≤ 25 MB, name `^[A-Za-z0-9._-]{1,120}$`, no overwrite (`409`). An image auto-adds a `screenshot` event; any upload clears `pending_shot` |
-| `GET /artifacts/{job_id}/{name}` | serve the file with the content type derived from its extension |
+| `PUT /jobs/{id}/artifacts/{name}` | raw body, `Content-Type` one of `image/jpeg\|png`, `text/plain`, `application/json`, `application/zip`, `application/octet-stream` (crash dumps `.dmp`/`.mdmp`, Windows event logs `.evtx`); stored under `<data_dir>/artifacts/<job_id>/<name>`, ≤ 25 MB, name `^[A-Za-z0-9._-]{1,120}$`, no overwrite (`409`). An image auto-adds a `screenshot` event; any upload clears `pending_shot` |
+| `GET /artifacts/{job_id}/{name}` | serve the file with the content type derived from its extension; non-images (logs, json, dumps, zips) come back as a download (`Content-Disposition: attachment`), images stay inline |
 | `POST /jobs/{id}/link {kind, ref_id}` | attach a test run / build / deploy / evidence / project |
 | `POST /jobs/{id}/screenshot-request {note}` | adds an `info` event and sets `params.pending_shot=true`; the runner answers by uploading |
 | `POST /jobs/{id}/finish {status, summary}` | gate: all four of `what`/`why`/`learned`/`next` non-empty, each ≤ 600 chars (`422` + `fields` otherwise); queued/running only |
@@ -63,10 +63,11 @@ s2docs job cancel <id> --reason R
 s2docs job watch <id>          # tail events until the job ends
 ```
 
-Exit codes (the `job` subcommand's own contract, from the plan): `0` ok, `1` error, `2` validation
-(intake/summary gate), `3` conflict (illegal transition / held lease / existing artifact), `4` not
-found. The other subcommands keep the global contract (`2` locked, `3` not found, `4` conflict). Pass
-the global `--json` for one `{"schema": "s2docs/v1", …}` object on stdout.
+Exit codes (the global contract, shared with every other subcommand): `0` ok, `1` error, `2` locked,
+`3` not found, `4` conflict (illegal transition / held lease / existing artifact), `9` validation
+(intake/summary gate). The `job` subcommand uses `3`/`4`/`9` — no job-local aliases, so an agent can
+always read one meaning per code. Pass the global `--json` for one `{"schema": "s2docs/v1", …}` object
+on stdout.
 
 ## Web UI
 
@@ -74,9 +75,11 @@ the global `--json` for one `{"schema": "s2docs/v1", …}` object on stdout.
   on top with phase + elapsed, then queued jobs by position; status badges and error/crash counts in
   red; a finished-jobs table below. Auto-refreshes every 5 s while a job is running, 15 s when idle.
 - `#/jobs/<id>` — the job page: the close-out **summary card** first on a finished job, then the intake
-  (purpose, expected, cap, confirm gate), a "Request screenshot" button, the screenshot gallery (inline
-  `<img>` from `/api/artifacts/...`), other artifacts, linked records, and the timeline (levels coloured,
-  `crash`/`error` expanded with the log tail in a `<pre>`).
+  (purpose, expected, cap, confirm gate), a "Request screenshot" button (a themed input for the capture
+  note), the screenshot gallery (inline `<img>` from `/api/artifacts/...` with the md5 wrapped inside the
+  card), then a **Files** list of the non-image artifacts (`log`/`txt`/`json`/`dmp`/`zip`) with download
+  links, linked records, and the timeline (levels coloured, `crash`/`error` expanded with the log tail in
+  a `<pre>`).
 
 ## Push file
 

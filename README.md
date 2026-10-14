@@ -171,7 +171,7 @@ CLI: `s2docs evidence add|list|show` and `s2docs test start|step|finish|clear|st
 | `job_attach`, `job_request_screenshot` | Copy a local file into the job's artifacts (append-only), or ask the runner for a screenshot |
 | `job_link`, `job_finish`, `job_cancel` | Attach a test run/build/deploy/evidence/project, close out (all four summary fields required), or cancel |
 
-CLI: `s2docs job enqueue|list|show|next|start|event|attach|shot-request|finish|cancel|watch` (its own exit codes: 2 validation, 3 conflict, 4 not found). HTTP: `/api/jobs` (+ `/next`, `/{id}`, `/{id}/assign|start|event|link|screenshot-request|finish|cancel`, `/{id}/artifacts/{name}`), `GET /api/artifacts/{job}/{name}`. Every job event also appends `<data_dir>/job_events.jsonl` (`/api/health` → `job_events_jsonl`). Full notes: `docs/TEST_JOBS.md`.
+CLI: `s2docs job enqueue|list|show|next|start|event|attach|shot-request|finish|cancel|watch` (the global exit codes: 3 not found, 4 conflict, 9 validation). HTTP: `/api/jobs` (+ `/next`, `/{id}`, `/{id}/assign|start|event|link|screenshot-request|finish|cancel`, `/{id}/artifacts/{name}`), `GET /api/artifacts/{job}/{name}`. Every job event also appends `<data_dir>/job_events.jsonl` (`/api/health` → `job_events_jsonl`). Full notes: `docs/TEST_JOBS.md`.
 
 | Orchestration tools | |
 |---|---|

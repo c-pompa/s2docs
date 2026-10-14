@@ -24,13 +24,10 @@ EXIT_TOOLCHAIN = 5
 EXIT_PARTIAL = 6
 EXIT_TIMEOUT = 7
 EXIT_MATERIALS = 8  # build finished but the material guard flagged warnings (strict mode)
+EXIT_VALIDATION = 9  # request failed validation, e.g. the `s2docs job` intake/summary gate
 
-# The `s2docs job` subcommand uses the exit-code contract from docs/TEST_JOBS_PLAN.md: 2 = validation
-# (intake/summary gate), 3 = conflict (illegal transition / held lease / existing artifact), 4 = not
-# found. These are job-local and deliberately differ from the global host/lock contract above.
-EXIT_JOB_VALIDATION = 2
-EXIT_JOB_CONFLICT = 3
-EXIT_JOB_NOT_FOUND = 4
+# `s2docs job` shares the global contract above: 3 = not found, 4 = conflict; intake/summary
+# validation failures are EXIT_VALIDATION (9). An agent can always read one meaning per code.
 
 _DURATION_RE = re.compile(r"^(\d+)([smhd]?)$")
 _DURATION_UNITS = {"": 1, "s": 1, "m": 60, "h": 3600, "d": 86400}
@@ -635,7 +632,9 @@ def _cmd_job(args: argparse.Namespace) -> int:
             name = args.name or path.name
             ctype = jobs.content_type_for(name)
             if ctype is None:
-                return _fail(f"unsupported file type {path.suffix!r}; use png/jpg/txt/log/json/zip", EXIT_ERROR)
+                return _fail(
+                    f"unsupported file type {path.suffix!r}; use png/jpg/txt/log/json/zip/dmp/mdmp/evtx", EXIT_ERROR
+                )
             art = jobs.save_artifact(db, args.job_id, name, path.read_bytes(), ctype)
             return _emit(args, {"artifact": art.model_dump()}, [f"{art.name}  {art.size} B  md5={art.md5}  {art.url}"])
         if args.job_cmd == "shot-request":
@@ -651,11 +650,11 @@ def _cmd_job(args: argparse.Namespace) -> int:
         if args.job_cmd == "watch":
             return _watch_job(db, args.job_id)
     except NotFound as exc:
-        return _fail(str(exc), EXIT_JOB_NOT_FOUND)
+        return _fail(str(exc), EXIT_NOT_FOUND)
     except jobs.JobConflict as exc:
-        return _fail(str(exc), EXIT_JOB_CONFLICT)
+        return _fail(str(exc), EXIT_CONFLICT)
     except jobs.JobValidationError as exc:
-        return _fail(str(exc), EXIT_JOB_VALIDATION)
+        return _fail(str(exc), EXIT_VALIDATION)
     except (jobs.JobError, ValueError, OSError) as exc:
         return _fail(str(exc), EXIT_ERROR)
     return _fail(f"unknown job command {args.job_cmd!r}", EXIT_ERROR)

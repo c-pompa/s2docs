@@ -188,6 +188,7 @@ def test_artifact_put_get_roundtrip_and_guards(client, jdb):
     got = client.get(f"/api/artifacts/{jid}/hud.png")
     assert got.status_code == 200 and got.content == png
     assert got.headers["content-type"] == "image/png"
+    assert "content-disposition" not in got.headers  # images stay inline for the gallery
     assert hashlib.md5(got.content).hexdigest() == art["md5"]
     # append-only: no overwrite
     again = client.put(f"/api/jobs/{jid}/artifacts/hud.png", content=png, headers={"content-type": "image/png"})
@@ -231,6 +232,39 @@ def test_screenshot_event_auto_added_for_images(client):
     j = client.get(f"/api/jobs/{jid}").json()
     assert len([e for e in j["events"] if e["level"] == "screenshot"]) == 1
     assert {a["name"] for a in j["artifacts"]} == {"hud.png", "notes.txt"}
+
+
+def test_crash_artifacts_dmp_mdmp_evtx_zip_served_as_attachment(client, jdb):
+    """Crash artifacts (.dmp/.mdmp/.evtx) are octet-stream downloads; .zip keeps its own type. No
+    screenshot event for any of them (images only), still <= 25 MB / name-guarded / no overwrite."""
+    jid = _enq(client).json()["id"]
+    cases = {
+        "crash.dmp": ("application/octet-stream", b"\x00\x01\x02mdmp-in-disguise"),
+        "mini.mdmp": ("application/octet-stream", b"MDMP\x93\xa7" + b"\x00" * 24),
+        "system.evtx": ("application/octet-stream", b"ElfFile\x00\x00"),
+        "bundle.zip": ("application/zip", b"PK\x03\x04zip"),
+    }
+    for name, (ctype, body) in cases.items():
+        r = client.put(f"/api/jobs/{jid}/artifacts/{name}", content=body, headers={"content-type": ctype})
+        assert r.status_code == 200, r.text
+        got = client.get(f"/api/artifacts/{jid}/{name}")
+        assert got.status_code == 200 and got.content == body
+        assert got.headers["content-type"] == ctype
+        assert got.headers["content-disposition"] == f'attachment; filename="{name}"'
+        assert hashlib.md5(body).hexdigest() == r.json()["md5"]
+    # the content type is derived from the stored name on read, so a generic PUT header is fine too
+    octet = {"content-type": "application/octet-stream"}
+    extra = client.put(f"/api/jobs/{jid}/artifacts/extra.dmp", content=b"x", headers=octet)
+    assert extra.status_code == 200
+    # no-overwrite and the name guard still apply to the new types
+    dup = client.put(f"/api/jobs/{jid}/artifacts/crash.dmp", content=b"x", headers=octet)
+    assert dup.status_code == 409
+    with pytest.raises(jobs.JobValidationError):
+        jobs.save_artifact(jdb, jid, "../evil.dmp", b"x", "application/octet-stream")
+    # only images create the auto screenshot event
+    j = client.get(f"/api/jobs/{jid}").json()
+    assert [e for e in j["events"] if e["level"] == "screenshot"] == []
+    assert {"crash.dmp", "mini.mdmp", "system.evtx", "bundle.zip", "extra.dmp"} <= {a["name"] for a in j["artifacts"]}
 
 
 def test_request_screenshot_then_upload_clears_pending(client):
@@ -419,19 +453,19 @@ def test_cli_job_flow_and_exit_codes(tmp_path, monkeypatch, capsys):
     assert _run_cli(monkeypatch, tmp_path, ["--json", *base]) == 0
     jid = json.loads(capsys.readouterr().out)["job"]["id"]
 
-    # the intake gate is validation (2): a >5 min run without --reason
-    assert _run_cli(monkeypatch, tmp_path, [*base, "--max-minutes", "30"]) == 2
+    # the intake gate is validation (9, the global EXIT_VALIDATION): a >5 min run without --reason
+    assert _run_cli(monkeypatch, tmp_path, [*base, "--max-minutes", "30"]) == 9
     assert "error:" in capsys.readouterr().err
 
-    # next finds the head; an empty host queue is not found (4)
+    # next finds the head; an empty host queue is not found (3, the global EXIT_NOT_FOUND)
     assert _run_cli(monkeypatch, tmp_path, ["--json", "job", "next", "--host", "desktop-pc"]) == 0
     capsys.readouterr()
-    assert _run_cli(monkeypatch, tmp_path, ["job", "next", "--host", "mini"]) == 4
+    assert _run_cli(monkeypatch, tmp_path, ["job", "next", "--host", "mini"]) == 3
 
-    # start, then a second start is a conflict (3)
+    # start, then a second start is a conflict (4, the global EXIT_CONFLICT)
     assert _run_cli(monkeypatch, tmp_path, ["job", "start", jid, "--worker", "ws/cli"]) == 0
     capsys.readouterr()
-    assert _run_cli(monkeypatch, tmp_path, ["job", "start", jid, "--worker", "ws/cli"]) == 3
+    assert _run_cli(monkeypatch, tmp_path, ["job", "start", jid, "--worker", "ws/cli"]) == 4
 
     # event with a log tail (tail 200 of 500 lines), attach a file, request a screenshot
     log = tmp_path / "cs2.log"
@@ -450,10 +484,15 @@ def test_cli_job_flow_and_exit_codes(tmp_path, monkeypatch, capsys):
     png.write_bytes(_png())
     assert _run_cli(monkeypatch, tmp_path, ["job", "attach", jid, str(png)]) == 0
     capsys.readouterr()
+    # a crash dump is a crash artifact too (the CLI extension check accepts .dmp)
+    dmp = tmp_path / "crash.dmp"
+    dmp.write_bytes(b"\x00\x01\x02crash")
+    assert _run_cli(monkeypatch, tmp_path, ["job", "attach", jid, str(dmp)]) == 0
+    capsys.readouterr()
     assert _run_cli(monkeypatch, tmp_path, ["job", "shot-request", jid, "--note", "now"]) == 0
     capsys.readouterr()
 
-    # an oversized summary field is validation (2); a full summary closes the job (0)
+    # an oversized summary field is validation (9); a full summary closes the job (0)
     assert (
         _run_cli(
             monkeypatch,
@@ -474,7 +513,7 @@ def test_cli_job_flow_and_exit_codes(tmp_path, monkeypatch, capsys):
                 "d",
             ],
         )
-        == 2
+        == 9
     )
     assert (
         _run_cli(
@@ -507,9 +546,9 @@ def test_cli_job_flow_and_exit_codes(tmp_path, monkeypatch, capsys):
     assert shown["status"] == "passed" and shown["summary"]["learned"] == "c"
     assert _run_cli(monkeypatch, tmp_path, ["job", "watch", jid]) == 0
     capsys.readouterr()  # watch prints the event tail; drain it before the next parse
-    # a finished job cannot be cancelled (3); an unknown job is not found (4)
-    assert _run_cli(monkeypatch, tmp_path, ["job", "cancel", jid, "--reason", "x"]) == 3
-    assert _run_cli(monkeypatch, tmp_path, ["job", "show", "j-ghost"]) == 4
+    # a finished job cannot be cancelled (4, conflict); an unknown job is not found (3)
+    assert _run_cli(monkeypatch, tmp_path, ["job", "cancel", jid, "--reason", "x"]) == 4
+    assert _run_cli(monkeypatch, tmp_path, ["job", "show", "j-ghost"]) == 3
     assert _run_cli(monkeypatch, tmp_path, ["--json", "job", "list", "--active"]) == 0
     assert json.loads(capsys.readouterr().out)["jobs"] == []
 
@@ -522,6 +561,13 @@ def test_web_jobs_route_and_static_assets(client):
     assert 'GLOBAL_SECTIONS = new Set(["hosts", "jobs", "activity"])' in js  # install-wide, not per game
     assert "function jobBoard(" in js and "function jobDetail(" in js
     assert "data-job-shot" in js and "Request screenshot" in js and "Close-out summary" in js
+    # non-image artifacts render as a "Files" list with download links, under the gallery
+    assert "<h2>Files</h2>" in js and "download>" in js
+    assert js.index("<h2>Screenshots</h2>") < js.index("<h2>Files</h2>")
+    # the screenshot caption wraps its md5 and the request-screenshot input is a themed input
+    css = client.get("/style.css").text
+    assert ".shot-cap" in css
+    assert "input:not([type=checkbox]):not([type=radio])" in css
     # the SPA is served as static assets; the hash route is client-side
     assert client.get("/").status_code == 200
     assert client.get("/index.html").status_code == 200

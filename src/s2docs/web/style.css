@@ -20,7 +20,8 @@ code { background: var(--code); padding: 1px 5px; border-radius: 4px; }
           padding: 10px 16px; background: var(--panel); border-bottom: 1px solid var(--border); }
 .brand { font-weight: 700; color: var(--accent); font-size: 17px; }
 #search-form { flex: 1; max-width: 720px; }
-#q, select, .filters input, .filters select, textarea {
+#q, select, textarea, .filters input, .filters select,
+input:not([type=checkbox]):not([type=radio]) {
   width: 100%; padding: 7px 10px; border-radius: 6px; border: 1px solid var(--border);
   background: var(--bg); color: var(--fg); font: inherit; }
 select#game { width: auto; }
@@ -58,6 +59,8 @@ button:disabled { opacity: .4; cursor: default; }
 .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 10px; }
 .card { border: 1px solid var(--border); border-radius: 8px; padding: 12px; background: var(--panel); }
 .card .n { font-size: 22px; font-weight: 700; color: var(--accent); }
+/* Screenshot caption: the 32-char md5 has no break points — keep it inside the card. */
+.shot-cap { display: block; overflow-wrap: anywhere; word-break: break-all; }
 /* Orchestration step DAG: one column per dependency depth, connected left→right. */
 .dag { display: flex; align-items: stretch; gap: 6px; overflow-x: auto; padding: 6px 0 10px; }
 .dag-col { display: flex; flex-direction: column; gap: 8px; min-width: 170px; flex: 1; }

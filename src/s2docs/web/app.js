@@ -295,14 +295,18 @@ function jobDetail(j) {
         .map(
           (a) =>
             `<figure class="card" style="margin:0"><img src="${esc(a.url)}" alt="${esc(a.name)}" style="width:100%;border-radius:6px">` +
-            `<figcaption class="muted mono">${esc(a.name)}<br>${esc(a.md5)}</figcaption></figure>`,
+            `<figcaption class="muted mono shot-cap">${esc(a.name)}<br>${esc(a.md5)}</figcaption></figure>`,
         )
         .join("")}</div>`
     : "";
   const others = j.artifacts.filter((a) => !isImg(a));
   const otherArts = others.length
-    ? `<h2>Artifacts</h2><table><tr><th>Name</th><th>Size</th><th>MD5</th></tr>${others
-        .map((a) => `<tr><td>${esc(a.name)}</td><td class="muted">${a.size} B</td><td class="mono muted">${esc(a.md5)}</td></tr>`)
+    ? `<h2>Files</h2><table><tr><th>Name</th><th>Size</th><th>MD5</th></tr>${others
+        .map(
+          (a) =>
+            `<tr><td><a href="${esc(a.url)}" download>${esc(a.name)}</a></td>` +
+            `<td class="muted">${a.size} B</td><td class="mono muted">${esc(a.md5)}</td></tr>`,
+        )
         .join("")}</table>`
     : "";
   const links = j.links.length

@@ -58,6 +58,7 @@ ARTIFACT_CONTENT_TYPES: tuple[str, ...] = (
     "text/plain",
     "application/json",
     "application/zip",
+    "application/octet-stream",  # crash dumps (.dmp/.mdmp) + Windows event logs (.evtx)
 )
 LOG_TAIL_MAX = 64 * 1024  # cap data.log_tail so a runaway log can't bloat a row
 
@@ -65,7 +66,8 @@ JOBS_JSONL_NAME = "job_events.jsonl"
 
 _ARTIFACT_DIR_NAME = "artifacts"
 
-# Serve the right content type from the stored name (artifacts are files, there is no metadata table).
+# Content type to serve a stored artifact as, by extension (artifacts are files; no metadata table).
+# Crash artifacts (.dmp/.mdmp/.evtx) have no dedicated type, so they are served as a binary download.
 _CONTENT_TYPE_BY_EXT: dict[str, str] = {
     ".png": "image/png",
     ".jpg": "image/jpeg",
@@ -74,6 +76,9 @@ _CONTENT_TYPE_BY_EXT: dict[str, str] = {
     ".log": "text/plain",
     ".json": "application/json",
     ".zip": "application/zip",
+    ".dmp": "application/octet-stream",
+    ".mdmp": "application/octet-stream",
+    ".evtx": "application/octet-stream",
 }
 
 

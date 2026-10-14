@@ -892,7 +892,7 @@ def create_mcp_server(db: Database, workspace: Path | None = None) -> MCPServer:
         ctype = jobs.content_type_for(src.name)
         if ctype is None:
             raise jobs.JobValidationError(
-                f"unsupported file type {src.suffix!r}; use a png/jpg/txt/log/json/zip file", ["path"]
+                f"unsupported file type {src.suffix!r}; use a png/jpg/txt/log/json/zip/dmp/mdmp/evtx file", ["path"]
             )
         return jobs.save_artifact(db, job_id, name or src.name, src.read_bytes(), ctype)
 

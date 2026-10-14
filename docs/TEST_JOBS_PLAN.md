@@ -66,8 +66,8 @@ Reject with 422 and a field list when required fields are missing — the intake
 | `POST /jobs/{id}/assign {host_id, position?}` | set/move host & order (queued only) |
 | `POST /jobs/{id}/start {worker}` | queued → running, started_at |
 | `POST /jobs/{id}/event {level, phase?, message, data?}` | append timeline; a `phase` updates `jobs.phase`; `error`/`crash` require `message` and SHOULD carry `data.log_tail` (capped 64 KB) |
-| `PUT /jobs/{id}/artifacts/{name}` (raw body, Content-Type image/jpeg|png|text/plain|application/json|application/zip) | store under `<data_dir>/artifacts/<job_id>/<name>`, ≤ 25 MB, name `^[A-Za-z0-9._-]{1,120}$`, no overwrite (409) — append-only like committed evidence; auto-adds a `screenshot` event for images (`data.url`, `data.md5`, `data.bytes`) |
-| `GET /artifacts/{job_id}/{name}` | serve the file (correct content type) |
+| `PUT /jobs/{id}/artifacts/{name}` (raw body, Content-Type image/jpeg|png|text/plain|application/json|application/zip|application/octet-stream) | store under `<data_dir>/artifacts/<job_id>/<name>`, ≤ 25 MB, name `^[A-Za-z0-9._-]{1,120}$`, no overwrite (409) — append-only like committed evidence; auto-adds a `screenshot` event for images (`data.url`, `data.md5`, `data.bytes`). Crash artifacts `.dmp`/`.mdmp`/`.evtx` are octet-stream |
+| `GET /artifacts/{job_id}/{name}` | serve the file (correct content type); non-images as a download (`Content-Disposition: attachment`) |
 | `POST /jobs/{id}/link {kind, ref_id}` | attach test run / build / deploy / evidence / project |
 | `POST /jobs/{id}/screenshot-request {note}` | adds an `info` event `screenshot requested` and sets `params.pending_shot=true`; the runner polls `GET /jobs/{id}` (or `/jobs/{id}/requests`) and answers by uploading; upload clears it |
 | `POST /jobs/{id}/finish {status: passed|failed|error|cancelled, summary:{what,why,learned,next}}` | **gate:** all four summary fields non-empty, each ≤ 600 chars; running/queued only; sets finished_at |
@@ -81,7 +81,7 @@ gains `job_events_jsonl` so a coordinator can watch locally instead of polling.
 (MCP runs on the Mac: copies a local file into artifacts), `job_request_screenshot, job_link,
 job_finish, job_cancel`. Add them to `tests/test_mcp.py`'s explicit writer set.
 
-## CLI (`s2docs job …`, exit 0 ok / 2 validation / 3 conflict / 4 not found)
+## CLI (`s2docs job …`, exit 0 ok / 3 not found / 4 conflict / 9 validation — the global contract)
 `enqueue --kind --title --target --purpose --expected (--host | --ask-host) [--max-minutes] [--confirm]`,
 `list [--active] [--host]`, `show <id>`, `next --host`, `start <id> --worker`,
 `event <id> --level --message [--phase] [--log-file F (tail 200 lines)]`,
@@ -106,6 +106,6 @@ on pomps-pc ends.
 
 ## Tests (pytest, synthetic DB)
 intake 422s per missing field; queue order + `next` 409 when lease held; event phase update; artifact
-put/get/size cap/bad name/no overwrite/content type; screenshot event auto-added; request→upload clears
+put/get/size cap/bad name/no overwrite/content type (incl. `.dmp`/`.mdmp`/`.evtx` octet-stream + attachment header); screenshot event auto-added; request→upload clears
 pending; finish gate (missing/oversized summary field → 422); cancel; push jsonl + health field; MCP
 tool registration + one end-to-end MCP round trip; CLI exit codes; web UI static check (route present).
