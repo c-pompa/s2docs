@@ -14,10 +14,14 @@ from pathlib import Path
 DEFAULT_STUCK_SEC = 1800
 
 # Built-in per-phase thresholds (code default, not env-only: an env override is lost on every server
-# restart). 'compile:lighting' bakes silently for most of a ~38 min compile, so the global 1800 s would
-# read a healthy bake as STUCK; 7200 s matches the driver's own hang threshold in tools/build/compile_map.py
-# (3 x 2400 s). S2DOCS_STUCK_PHASES merges over these per key — it does not replace the dict.
-DEFAULT_STUCK_PHASES: dict[str, int] = {"compile:lighting": 7200}
+# restart). The long silent stretch of a CS2 compile is the *visibility* ray tracing, not lighting: a
+# live run (2026-10-13, t-f763024a) measured CBoundaryPointsRayGenerator at 1353.8 s and the LOS scan at
+# 1409 s, while the lighting bake is only ~1m47s. compile_map.py reports these as 'compile:vis_rays' and
+# 'compile:vis_los', each with its own hang threshold of 3 x 1800 s = 5400 s. Because the driver's log is
+# buffered, the server can see 'compile:vis_rays' unchanged for ~25-30 min on a *healthy* run — over the
+# 1800 s global default — and raise a false STUCK. Lighting is ~2 min, so it needs no override.
+# S2DOCS_STUCK_PHASES merges over these per key — it does not replace the dict.
+DEFAULT_STUCK_PHASES: dict[str, int] = {"compile:vis_rays": 5400, "compile:vis_los": 5400}
 
 
 @dataclass(frozen=True, slots=True)

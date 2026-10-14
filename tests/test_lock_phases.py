@@ -182,8 +182,9 @@ def test_stuck_phase_allowlist_override(hdb, monkeypatch):
 def test_malformed_stuck_env_is_fail_soft(hdb, monkeypatch):
     monkeypatch.setenv("S2DOCS_STUCK_PHASES", "{not json")
     monkeypatch.setenv("S2DOCS_STUCK_SEC", "not-a-number")
-    # malformed env is ignored, leaving only the built-in per-phase default intact
-    assert get_settings().stuck_phases == {"compile:lighting": 7200} and get_settings().stuck_sec == 1800
+    # malformed env is ignored, leaving only the built-in per-phase defaults intact
+    assert get_settings().stuck_phases == {"compile:vis_rays": 5400, "compile:vis_los": 5400}
+    assert get_settings().stuck_sec == 1800
 
 
 # ------------------------------------------------------------------- surfaces: API
