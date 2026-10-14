@@ -925,6 +925,28 @@ def create_mcp_server(db: Database, workspace: Path | None = None) -> MCPServer:
         return _jobs(lambda: jobs.link(db, job_id, kind=kind, ref_id=ref_id))
 
     @server.tool(annotations=NON_IDEMPOTENT)
+    def job_verdict(
+        job_id: JobId,
+        verdict: m.Verdict,
+        notes: Annotated[str | None, Field(description="Free-text note recorded with the verdict")] = None,
+        step: Annotated[str | None, Field(description="Step id/phase the verdict answers (optional)")] = None,
+        source: Annotated[
+            str,
+            Field(
+                description=(
+                    "Where the verdict came from: 'coordinator' when relaying one the user typed in the "
+                    "Hermes chat, else chat | console | key | web"
+                )
+            ),
+        ] = "web",
+    ) -> m.Job:
+        """Answer the running job's current step with a human verdict (pass | fail | skip). Writes a
+        human-confirm evidence row through the same path as `POST /api/evidence` (so the confirm push
+        files fire) and appends a `milestone` event. The job must be running and link a test run, else
+        the call is a conflict."""
+        return _jobs(lambda: jobs.verdict(db, job_id, verdict=verdict, notes=notes, step=step, source=source))
+
+    @server.tool(annotations=NON_IDEMPOTENT)
     def job_finish(
         job_id: JobId,
         status: Annotated[str, Field(description="passed | failed | error | cancelled")],
