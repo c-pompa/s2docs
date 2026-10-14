@@ -545,17 +545,25 @@ class Deployment(BaseModel):
 
 
 # ------------------------------------------------------------------ evidence
-EvidenceKind = Literal["console_transcript", "file_hash", "pixel_diff", "screenshot", "note", "other"]
+EvidenceKind = Literal[
+    "console_transcript", "file_hash", "pixel_diff", "screenshot", "note", "other", "human-confirm"
+]
 EVIDENCE_KINDS: tuple[str, ...] = EvidenceKind.__args__  # type: ignore[attr-defined]
 
 
 class Evidence(BaseModel):
     id: str
-    project_id: str
+    project_id: str | None = Field(
+        default=None,
+        description="Owning project; None when the row is anchored to a test run with no project",
+    )
     step_id: str | None = Field(default=None, description="Owning step; None = project-level evidence")
     kind: EvidenceKind
     ref: str | None = Field(default=None, description="Path / url / command the evidence points at")
     data: dict = Field(default_factory=dict, description="Structured detail (md5s, pixel diff pct, transcript excerpt)")
+    test_run_id: str | None = Field(
+        default=None, description="Test run this evidence records (a human-confirm verdict, a transcript, ...)"
+    )
     created_at: str
 
 

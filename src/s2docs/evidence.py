@@ -39,6 +39,7 @@ def _row(row: sqlite3.Row) -> m.Evidence:
         kind=row["kind"],
         ref=row["ref"],
         data=json.loads(row["data"]),
+        test_run_id=row["test_run_id"],
         created_at=row["created_at"],
     )
 
@@ -47,20 +48,34 @@ def add(
     db: Database,
     *,
     kind: str,
-    project_id: str,
+    project_id: str | None = None,
     step_id: str | None = None,
     ref: str | None = None,
     data: dict | None = None,
+    test_run_id: str | None = None,
 ) -> m.Evidence:
     """Store one evidence row. Validates the kind and caps `ref`/`data` so a caller can't bloat the DB.
 
     A (project_id, step_id) pair that isn't a real project step is rejected (the composite FK); so is
     an unknown project.
+
+    `project_id` may be omitted when `test_run_id` is given: the project is resolved from that run
+    (and stays NULL when the run itself has no project — e.g. a director-driven iso run). This is what
+    lets a human-confirm verdict be stored as durable evidence without the caller knowing a project.
     """
     if kind not in EVIDENCE_KINDS:
         raise EvidenceError(f"kind must be one of {EVIDENCE_KINDS}, not {kind!r}")
-    if not project_id or not str(project_id).strip():
-        raise EvidenceError("project_id is required")
+    if test_run_id:
+        with db.reader() as conn:
+            run_row = conn.execute("SELECT project_id FROM test_runs WHERE id = ?", (test_run_id,)).fetchone()
+        if run_row is None:
+            raise EvidenceError(f"unknown test_run {test_run_id!r}")
+        if not (project_id and str(project_id).strip()):
+            project_id = run_row["project_id"]  # may still be None
+    elif not (project_id and str(project_id).strip()):
+        raise EvidenceError("project_id is required (or a test_run_id to resolve it from)")
+    if not (project_id and str(project_id).strip()):
+        project_id = None
     if ref is not None and len(ref) > MAX_REF_LEN:
         raise EvidenceError(f"ref is too long ({len(ref)} > {MAX_REF_LEN} chars)")
     payload = json.dumps(data or {})
@@ -70,8 +85,9 @@ def add(
     with db.writer() as conn, conn:
         try:
             conn.execute(
-                "INSERT INTO evidence (id, project_id, step_id, kind, ref, data) VALUES (?, ?, ?, ?, ?, ?)",
-                (eid, project_id, step_id, kind, ref, payload),
+                "INSERT INTO evidence (id, project_id, step_id, kind, ref, data, test_run_id) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (eid, project_id, step_id, kind, ref, payload, test_run_id),
             )
         except sqlite3.IntegrityError as exc:
             raise EvidenceError(f"unknown project/step ({project_id!r}, {step_id!r}): {exc}") from exc

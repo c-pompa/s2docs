@@ -498,7 +498,12 @@ def verify_deploy(deploy_id: str, db: Db):
 
 # ---------------------------------------------------------------- evidence
 class EvidenceIn(BaseModel):
-    project_id: str
+    project_id: str | None = Field(
+        default=None, description="Owning project; omit when test_run_id identifies the run"
+    )
+    test_run_id: str | None = Field(
+        default=None, description="Run this evidence records; its project is used when project_id is omitted"
+    )
     step_id: str | None = None
     kind: m.EvidenceKind
     ref: str | None = None
@@ -507,8 +512,17 @@ class EvidenceIn(BaseModel):
 
 @router.post("/evidence", response_model=m.Evidence, status_code=201)
 def add_evidence(body: EvidenceIn, db: Db):
+    # The director puts the run inside `data`; accept a top-level `test_run_id` too. The store resolves
+    # the project from it, so human-confirm evidence stores without the caller knowing a project.
+    test_run_id = body.test_run_id or body.data.get("test_run_id")
     return evidence.add(
-        db, kind=body.kind, project_id=body.project_id, step_id=body.step_id, ref=body.ref, data=body.data
+        db,
+        kind=body.kind,
+        project_id=body.project_id,
+        step_id=body.step_id,
+        ref=body.ref,
+        data=body.data,
+        test_run_id=test_run_id,
     )
 
 
