@@ -186,9 +186,26 @@ def _resolve_phase(
 
 
 def list_hosts(db: Database) -> list[m.Host]:
-    with db.writer() as conn:
+    with db.reader() as conn:
         rows = conn.execute("SELECT * FROM hosts ORDER BY id").fetchall()
         return [_load(conn, r["id"]) for r in rows]
+
+
+def lock_summary(conn: sqlite3.Connection, host_id: str, owner: str) -> m.LockSummary | None:
+    """The lock summary for a run *iff* `owner` still holds the host; else None.
+
+    Used to enrich build/test-run list rows (the Activity page's lockStuckBadge reads `run.lock`).
+    Takes an existing (read-only) connection so a list endpoint enriches N runs without N connects.
+    """
+    lock = conn.execute(_LOCK_SELECT, (host_id,)).fetchone()
+    if lock is None or lock["owner"] != owner:
+        return None
+    phase = lock["phase"] or ""
+    fresh = lock["age"] <= lock["ttl_sec"]
+    stuck, reason = stuck_for(phase, lock["phase_age"], fresh=fresh)
+    return m.LockSummary(
+        owner=lock["owner"], phase=phase, phase_age_sec=lock["phase_age"], stuck=stuck, stuck_reason=reason
+    )
 
 
 def lock_history(db: Database, host_id: str, *, limit: int = 20) -> list[m.HostLockEvent]:
@@ -204,7 +221,7 @@ def lock_history(db: Database, host_id: str, *, limit: int = 20) -> list[m.HostL
 
 def get_host(db: Database, host_id: str) -> m.Host:
     _check_id(host_id)
-    with db.writer() as conn:
+    with db.reader() as conn:
         return _load(conn, host_id)
 
 
@@ -258,39 +275,49 @@ def claim_host(
         raise HostError("owner is required (workstream/session id, e.g. 'ws/occluder-wire' or 'p-1a2b3c4d')")
     if ttl_sec < 60:
         raise HostError("ttl_sec must be >= 60")
-    with db.writer() as conn, conn:
-        _load(conn, host_id)  # raises if unknown
-        lock = conn.execute(_LOCK_SELECT, (host_id,)).fetchone()
-        if lock is not None and lock["owner"] != owner and lock["age"] <= lock["ttl_sec"] and not force:
-            raise HostLocked(
-                f"host {host_id} is locked by {lock['owner']!r} "
-                f"(heartbeat {lock['age']}s ago, ttl {lock['ttl_sec']}s); "
-                "heartbeat it, wait for expiry, or pass force=true to take over"
-            )
-        detail = None
-        if lock is not None and lock["owner"] != owner:
-            how = "forced takeover" if lock["age"] <= lock["ttl_sec"] else "took over stale lock"
-            detail = f"{how} from {lock['owner']!r} (heartbeat {lock['age']}s ago)"
-        same_owner = lock is not None and lock["owner"] == owner
-        prev_phase = (lock["phase"] or "") if lock is not None else ""
-        prev_since = lock["phase_since"] if lock is not None else None
-        new_phase, new_since = _resolve_phase(phase, prev_phase, prev_since, same_owner=same_owner)
-        if lock is None:
-            conn.execute(
-                "INSERT INTO host_locks (host_id, owner, ttl_sec, phase, phase_since, note) VALUES (?, ?, ?, ?, ?, ?)",
-                (host_id, owner, ttl_sec, new_phase, new_since, note),
-            )
-        else:
-            conn.execute(
-                "UPDATE host_locks SET owner = ?, acquired_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'), "
-                "heartbeat_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'), ttl_sec = ?, phase = ?, "
-                "phase_since = ?, note = COALESCE(?, note) WHERE host_id = ?",
-                (owner, ttl_sec, new_phase, new_since, note, host_id),
-            )
-        _record_lock_event(conn, host_id, owner, "claimed", detail)
-        if lock is not None:
-            _record_phase_event(conn, host_id, owner, prev_phase, new_phase)
-        return _load(conn, host_id).lock  # type: ignore[return-value]
+    with db.writer() as conn:
+        # BEGIN IMMEDIATE takes the write lock before the SELECT, so two racing claims are serialized:
+        # the loser re-reads the winner's row and gets HostLocked instead of a UNIQUE IntegrityError.
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            _load(conn, host_id)  # raises if unknown
+            lock = conn.execute(_LOCK_SELECT, (host_id,)).fetchone()
+            if lock is not None and lock["owner"] != owner and lock["age"] <= lock["ttl_sec"] and not force:
+                raise HostLocked(
+                    f"host {host_id} is locked by {lock['owner']!r} "
+                    f"(heartbeat {lock['age']}s ago, ttl {lock['ttl_sec']}s); "
+                    "heartbeat it, wait for expiry, or pass force=true to take over"
+                )
+            detail = None
+            if lock is not None and lock["owner"] != owner:
+                how = "forced takeover" if lock["age"] <= lock["ttl_sec"] else "took over stale lock"
+                detail = f"{how} from {lock['owner']!r} (heartbeat {lock['age']}s ago)"
+            same_owner = lock is not None and lock["owner"] == owner
+            prev_phase = (lock["phase"] or "") if lock is not None else ""
+            prev_since = lock["phase_since"] if lock is not None else None
+            new_phase, new_since = _resolve_phase(phase, prev_phase, prev_since, same_owner=same_owner)
+            if lock is None:
+                conn.execute(
+                    "INSERT INTO host_locks (host_id, owner, ttl_sec, phase, phase_since, note) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (host_id, owner, ttl_sec, new_phase, new_since, note),
+                )
+            else:
+                conn.execute(
+                    "UPDATE host_locks SET owner = ?, acquired_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'), "
+                    "heartbeat_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'), ttl_sec = ?, phase = ?, "
+                    "phase_since = ?, note = COALESCE(?, note) WHERE host_id = ?",
+                    (owner, ttl_sec, new_phase, new_since, note, host_id),
+                )
+            _record_lock_event(conn, host_id, owner, "claimed", detail)
+            if lock is not None:
+                _record_phase_event(conn, host_id, owner, prev_phase, new_phase)
+            result = _load(conn, host_id).lock
+            conn.commit()
+            return result  # type: ignore[return-value]
+        except BaseException:
+            conn.rollback()
+            raise
 
 
 def heartbeat_host(
@@ -299,37 +326,62 @@ def heartbeat_host(
     """Refresh your lock's heartbeat. Passing the same ``phase`` keeps phase_since (so a genuinely
     hung run still reads STUCK); passing a new ``phase`` resets it. Omit ``phase`` to leave it as-is."""
     _check_id(host_id)
-    with db.writer() as conn, conn:
-        lock = conn.execute(_LOCK_SELECT, (host_id,)).fetchone()
-        if lock is None:
-            raise HostError(f"host {host_id} is not locked; claim it first")
-        if lock["owner"] != owner:
-            raise HostLocked(f"host {host_id} is locked by {lock['owner']!r}, not {owner!r}")
-        prev_phase = lock["phase"] or ""
-        new_phase, new_since = _resolve_phase(phase, prev_phase, lock["phase_since"], same_owner=True)
-        conn.execute(
-            "UPDATE host_locks SET heartbeat_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'), "
-            "phase = ?, phase_since = ?, note = COALESCE(?, note) WHERE host_id = ?",
-            (new_phase, new_since, note, host_id),
-        )
-        _record_phase_event(conn, host_id, owner, prev_phase, new_phase)
-        return _load(conn, host_id).lock  # type: ignore[return-value]
+    with db.writer() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            lock = conn.execute(_LOCK_SELECT, (host_id,)).fetchone()
+            if lock is None:
+                raise HostError(f"host {host_id} is not locked; claim it first")
+            if lock["owner"] != owner:
+                raise HostLocked(f"host {host_id} is locked by {lock['owner']!r}, not {owner!r}")
+            prev_phase = lock["phase"] or ""
+            new_phase, new_since = _resolve_phase(phase, prev_phase, lock["phase_since"], same_owner=True)
+            # Owner-conditional: a former owner's heartbeat must never refresh the new owner's lock.
+            cur = conn.execute(
+                "UPDATE host_locks SET heartbeat_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'), "
+                "phase = ?, phase_since = ?, note = COALESCE(?, note) WHERE host_id = ? AND owner = ?",
+                (new_phase, new_since, note, host_id, owner),
+            )
+            if cur.rowcount != 1:
+                raise HostLocked(f"host {host_id} is no longer locked by {owner!r}")
+            _record_phase_event(conn, host_id, owner, prev_phase, new_phase)
+            result = _load(conn, host_id).lock
+            conn.commit()
+            return result  # type: ignore[return-value]
+        except BaseException:
+            conn.rollback()
+            raise
 
 
 def release_host(db: Database, host_id: str, owner: str, *, force: bool = False) -> str:
     _check_id(host_id)
-    with db.writer() as conn, conn:
-        lock = conn.execute(_LOCK_SELECT, (host_id,)).fetchone()
-        if lock is None:
-            return f"host {host_id} was not locked"
-        if lock["owner"] != owner and not force:
-            raise HostLocked(
-                f"host {host_id} is locked by {lock['owner']!r}, not {owner!r}; pass force=true to override"
-            )
-        conn.execute("DELETE FROM host_locks WHERE host_id = ?", (host_id,))
-        detail = f"released by {owner}" if owner != lock["owner"] else None
-        _record_lock_event(conn, host_id, lock["owner"], "released", detail)
-        return f"released {host_id} (was held by {lock['owner']})"
+    with db.writer() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            lock = conn.execute(_LOCK_SELECT, (host_id,)).fetchone()
+            if lock is None:
+                conn.rollback()
+                return f"host {host_id} was not locked"
+            if lock["owner"] != owner and not force:
+                raise HostLocked(
+                    f"host {host_id} is locked by {lock['owner']!r}, not {owner!r}; pass force=true to override"
+                )
+            if force:
+                cur = conn.execute("DELETE FROM host_locks WHERE host_id = ?", (host_id,))
+            else:
+                # Owner-conditional: a former owner cannot delete the new owner's lock.
+                cur = conn.execute("DELETE FROM host_locks WHERE host_id = ? AND owner = ?", (host_id, owner))
+            if cur.rowcount != 1:
+                raise HostLocked(
+                    f"host {host_id} is locked by {lock['owner']!r}, not {owner!r}; pass force=true to override"
+                )
+            detail = f"released by {owner}" if owner != lock["owner"] else None
+            _record_lock_event(conn, host_id, lock["owner"], "released", detail)
+            conn.commit()
+            return f"released {host_id} (was held by {lock['owner']})"
+        except BaseException:
+            conn.rollback()
+            raise
 
 
 def probe_host(db: Database, host_id: str, *, timeout: int = 90) -> m.Host:

@@ -1,10 +1,14 @@
 """Host registry + locks: contention, stale takeover, heartbeat, MCP/API surface."""
 
+import threading
+
 import anyio
 import pytest
+from fastapi.testclient import TestClient
 from mcp import Client
 
 from s2docs import hosts
+from s2docs.api.app import create_app
 from s2docs.db.connection import Database
 from s2docs.mcp_server import create_mcp_server
 
@@ -34,6 +38,10 @@ def test_register_and_get(hdb):
 def test_register_validation(hdb):
     with pytest.raises(hosts.HostError):
         hosts.register_host(hdb, "Desktop PC", "x")
+    # The unknown-host read below goes through db.reader(), so the store must exist (initialized)
+    # rather than being lazily created by a writer.
+    with hdb.writer():
+        pass
     with pytest.raises(hosts.HostError):
         hosts.register_host(hdb, "ok-name", "x", shell="bash")
     with pytest.raises(hosts.HostError):
@@ -138,3 +146,74 @@ def test_mcp_host_flow(hdb):
     assert host["id"] == "pomps-pc" and host["lock"]["fresh"]
     assert not released.is_error
     assert bad_id.is_error and "invalid host id" in bad_id.content[0].text
+
+
+# ------------------------------------------------- atomic, owner-conditional locks
+def test_claim_is_atomic_under_a_race(hdb):
+    """The review's finding: claim_host was a SELECT-then-INSERT, so two racing claims both INSERT and
+    the loser raised IntegrityError (HTTP 500). Exactly one must win; the other gets HostLocked."""
+    _register(hdb)
+    barrier = threading.Barrier(2)
+    outcomes: dict[str, str] = {}
+
+    def claim(name: str) -> None:
+        barrier.wait()
+        try:
+            hosts.claim_host(hdb, "desktop-pc", name)
+            outcomes[name] = "ok"
+        except hosts.HostLocked:
+            outcomes[name] = "locked"
+        except Exception as exc:  # noqa: BLE001 - an IntegrityError leaking here is exactly the bug
+            outcomes[name] = f"error:{type(exc).__name__}"
+
+    threads = [threading.Thread(target=claim, args=(n,)) for n in ("ws/one", "ws/two")]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert sorted(outcomes.values()) == ["locked", "ok"], outcomes
+    lock = hosts.get_host(hdb, "desktop-pc").lock
+    assert lock is not None and lock.owner in ("ws/one", "ws/two")
+
+
+def test_heartbeat_and_release_are_owner_conditional(hdb):
+    """A former owner's heartbeat/release must not touch the new owner's lock (the review's finding)."""
+    _register(hdb)
+    hosts.claim_host(hdb, "desktop-pc", "ws/a", phase="compile")
+    hosts.claim_host(hdb, "desktop-pc", "ws/b", force=True)  # takeover
+    before = hosts.get_host(hdb, "desktop-pc").lock.heartbeat_at
+    with pytest.raises(hosts.HostLocked):
+        hosts.heartbeat_host(hdb, "desktop-pc", "ws/a")
+    assert hosts.get_host(hdb, "desktop-pc").lock.heartbeat_at == before  # new owner's lock unchanged
+    assert hosts.heartbeat_host(hdb, "desktop-pc", "ws/b").fresh  # the real owner can heartbeat
+    with pytest.raises(hosts.HostLocked):
+        hosts.release_host(hdb, "desktop-pc", "ws/a")
+    assert hosts.get_host(hdb, "desktop-pc").lock.owner == "ws/b"
+
+
+def test_api_claim_race_conflict_is_409(hdb):
+    _register(hdb)
+    with TestClient(create_app(hdb.path)) as c:
+        assert c.post("/api/hosts/desktop-pc/lock", json={"owner": "ws/a"}).status_code == 200
+        r = c.post("/api/hosts/desktop-pc/lock", json={"owner": "ws/b"})
+        assert r.status_code == 409 and r.json()["host_locked"]
+        # forced takeover: the former owner's heartbeat must 409 and not refresh the new owner's lock
+        taken = c.post("/api/hosts/desktop-pc/lock", json={"owner": "ws/b", "force": True})
+        assert taken.status_code == 200 and taken.json()["owner"] == "ws/b"
+        hb = c.post("/api/hosts/desktop-pc/heartbeat", json={"owner": "ws/b"})
+        before = hb.json()["heartbeat_at"]
+        assert c.post("/api/hosts/desktop-pc/heartbeat", json={"owner": "ws/a"}).status_code == 409
+        assert c.get("/api/hosts/desktop-pc").json()["lock"]["heartbeat_at"] == before
+
+
+# ------------------------------------------------------- read paths use the reader
+def test_host_reads_do_not_take_the_write_lock(hdb, monkeypatch):
+    """GET-only host paths (list/get) must read through db.reader(), never the writer."""
+    _register(hdb)
+
+    def boom(self):
+        raise AssertionError("a read path took the write lock (db.writer)")
+
+    monkeypatch.setattr(Database, "writer", boom)
+    assert hosts.list_hosts(hdb)[0].id == "desktop-pc"
+    assert hosts.get_host(hdb, "desktop-pc").id == "desktop-pc"
