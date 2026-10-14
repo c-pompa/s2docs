@@ -22,7 +22,7 @@ from s2docs.build import workspace as ws
 from s2docs.build.validate_cfg import validate_cfg as _validate_cfg
 from s2docs.build.validate_script import ToolchainMissing
 from s2docs.build.validate_script import validate_cs_script as _validate_cs_script
-from s2docs.config import GAMES, get_settings
+from s2docs.config import GAMES, get_settings, server_identity
 from s2docs.db.connection import Database, DatabaseNotInitialized
 from s2docs.db.repository import NotFound, Repository
 from s2docs.orchestration.engine import OrchestrationError, Orchestrator, workflow_info
@@ -86,6 +86,14 @@ def create_mcp_server(db: Database, workspace: Path | None = None) -> MCPServer:
     def list_games() -> list[m.GameInfo]:
         """List supported games with their currently indexed build and patch version."""
         return run(lambda r: r.games())
+
+    @server.tool(annotations=READ_ONLY)
+    def server_info() -> m.ServerInfo:
+        """This server's DB identity: db_path, data_dir, pid, started_at and version, plus status.
+
+        Compare it against the other server's `GET /api/health` before writing so two servers pointed
+        at different data dirs (a split store) are caught instead of silently diverging."""
+        return m.ServerInfo(**server_identity())
 
     @server.tool(annotations=READ_ONLY)
     def search_docs(
@@ -430,8 +438,26 @@ def create_mcp_server(db: Database, workspace: Path | None = None) -> MCPServer:
         return _orch(lambda: orch.prompt_text(name, arguments or {}))
 
     # ------------------------------------------------------------------ hosts
+    # Local lock/registry mutations: DB-only writes that are safe to repeat (idempotent upserts).
     HOSTS_WRITE = ToolAnnotations(read_only_hint=False, destructive_hint=False, idempotent_hint=True)
-    HOST_PROBE = ToolAnnotations(read_only_hint=False, destructive_hint=False, open_world_hint=True)
+    # Writers whose retry duplicates a side effect (a second evidence row / a second test session).
+    NON_IDEMPOTENT = ToolAnnotations(read_only_hint=False, destructive_hint=False, idempotent_hint=False)
+    # Tools that act on a remote host over SSH are open-world; the ones that overwrite/terminate there
+    # are destructive. build_start/deploy_push are non-idempotent: a retry launches/copies again.
+    REMOTE_WRITE = ToolAnnotations(
+        read_only_hint=False, destructive_hint=True, idempotent_hint=False, open_world_hint=True
+    )
+    # build_cancel terminates a remote process (destructive) but re-cancelling is idempotent.
+    REMOTE_ACT = ToolAnnotations(
+        read_only_hint=False, destructive_hint=True, idempotent_hint=True, open_world_hint=True
+    )
+    # deploy_verify re-reads MD5s over SSH: open-world, idempotent, non-destructive.
+    REMOTE_CHECK = ToolAnnotations(
+        read_only_hint=False, destructive_hint=False, idempotent_hint=True, open_world_hint=True
+    )
+    HOST_PROBE = ToolAnnotations(
+        read_only_hint=False, destructive_hint=False, idempotent_hint=True, open_world_hint=True
+    )
 
     def _hosts(fn: Callable[[], T]) -> T:
         try:
@@ -529,7 +555,7 @@ def create_mcp_server(db: Database, workspace: Path | None = None) -> MCPServer:
         except (builds.BuildError, deploys.DeployError, hosts.HostError, NotFound) as exc:
             raise ToolError(str(exc)) from exc
 
-    @server.tool(annotations=HOSTS_WRITE)
+    @server.tool(annotations=REMOTE_WRITE)
     def build_start(
         host_id: HostId,
         command: Annotated[
@@ -586,7 +612,7 @@ def create_mcp_server(db: Database, workspace: Path | None = None) -> MCPServer:
             raise ToolError(f"material guard: {counts} — rebuild is not clean (missing/reserved materials)")
         return run
 
-    @server.tool(annotations=HOSTS_WRITE)
+    @server.tool(annotations=REMOTE_ACT)
     def build_cancel(run_id: str) -> m.BuildRun:
         """Cancel a run: mark it cancelled and release its host lease (terminates the process when this
         server owns it)."""
@@ -601,7 +627,7 @@ def create_mcp_server(db: Database, workspace: Path | None = None) -> MCPServer:
         return _runs(lambda: builds.list_runs(db, host_id=host_id, active=active))
 
     # -------------------------------------------------------------- deploys
-    @server.tool(annotations=HOSTS_WRITE)
+    @server.tool(annotations=REMOTE_WRITE)
     def deploy_push(
         host_id: HostId,
         dest_root: Annotated[str, Field(description="Remote destination root, e.g. 'C:/iso_build/addons'")],
@@ -626,7 +652,7 @@ def create_mcp_server(db: Database, workspace: Path | None = None) -> MCPServer:
             )
         )
 
-    @server.tool(annotations=HOSTS_WRITE)
+    @server.tool(annotations=REMOTE_CHECK)
     def deploy_verify(deploy_id: Annotated[str, Field(description="Deploy id from deploy_push")]) -> m.Deployment:
         """Re-check a recorded deployment's MD5s on the host and update its status."""
         return _runs(lambda: deploys.verify(db, deploy_id))
@@ -645,7 +671,7 @@ def create_mcp_server(db: Database, workspace: Path | None = None) -> MCPServer:
         except (evidence.EvidenceError, test_runs.TestRunError, hosts.HostError, NotFound) as exc:
             raise ToolError(str(exc)) from exc
 
-    @server.tool(annotations=HOSTS_WRITE)
+    @server.tool(annotations=NON_IDEMPOTENT)
     def add_evidence(
         project_id: ProjectId,
         step_id: Annotated[str, Field(description="Project step the evidence proves (e.g. 'research')")],
@@ -671,7 +697,7 @@ def create_mcp_server(db: Database, workspace: Path | None = None) -> MCPServer:
         return _ev(lambda: evidence.list_evidence(db, project_id=project_id, step_id=step_id, kind=kind))
 
     # ------------------------------------------------------------- test runs
-    @server.tool(annotations=HOSTS_WRITE)
+    @server.tool(annotations=NON_IDEMPOTENT)
     def test_start(
         name: Annotated[str, Field(description="Label shown on the HUD strip, e.g. 'iso_test'")],
         host_id: Annotated[str | None, Field(description="Host to claim for the session (optional)")] = None,

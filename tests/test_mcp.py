@@ -43,7 +43,21 @@ def test_tools_are_listed_read_only(server):
         "test_clear",
     }
     assert all(t.annotations and t.annotations.read_only_hint for t in tools if t.name not in writers)
-    assert all(t.annotations and t.annotations.destructive_hint is False for t in tools if t.name in writers)
+    # Non-idempotent writers must NOT advertise idempotency: a retry would launch a second compile,
+    # copy the files again, start a second test session or record a duplicate evidence row.
+    non_idempotent = {"build_start", "deploy_push", "test_start", "add_evidence"}
+    assert non_idempotent <= writers
+    for t in tools:
+        if t.name in non_idempotent:
+            assert t.annotations is not None and t.annotations.idempotent_hint is False, t.name
+    # Tools that act on a remote host over SSH are open-world (and the destructive ones say so).
+    remote = {"build_start", "deploy_push", "build_cancel", "deploy_verify", "probe_host"}
+    for t in tools:
+        if t.name in remote:
+            assert t.annotations is not None and t.annotations.open_world_hint is True, t.name
+    for t in tools:
+        if t.name in writers and t.name not in remote:
+            assert t.annotations is not None and t.annotations.destructive_hint is False, t.name
 
 
 def test_tool_calls(server):
