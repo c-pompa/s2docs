@@ -160,6 +160,22 @@ def test_frontend_activity_and_orchestration_markers(client):
     assert ".dag-node" in client.get("/style.css").text
 
 
+def test_frontend_projects_timeline_and_test_run_stuck(client):
+    """The Projects page renders the project's recent_events as a Timeline (newest first) through the
+    Central formatter, and test-run rows carry the host lock's STUCK badge like build rows."""
+    js = client.get("/app.js").text
+    assert "Timeline" in js and "recent_events" in js
+    assert "lockStuckBadge(t.lock)" in js
+
+
+def test_api_build_and_test_lists_carry_lock(client):
+    """The Activity page's lockStuckBadge reads r.lock — build and test-run list rows must carry it."""
+    started = client.post("/api/test-runs", json={"name": "iso_lock", "host_id": "desktop-pc"})
+    assert started.status_code == 201
+    row = client.get("/api/test-runs", params={"host_id": "desktop-pc"}).json()[0]
+    assert row["lock"] is not None and row["lock"]["owner"] == f"test:{started.json()['id']}"
+
+
 # ------------------------------------------------------------------- MCP surface
 def test_mcp_lock_history_via_list_hosts(wdb):
     """The lock state the Hosts page renders is the same object list_hosts returns over MCP."""

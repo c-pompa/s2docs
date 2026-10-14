@@ -9,6 +9,7 @@ from s2docs import evidence
 from s2docs import models as m
 from s2docs.api.app import create_app
 from s2docs.build import workspace as ws
+from s2docs.db.connection import Database
 from s2docs.mcp_server import create_mcp_server
 from s2docs.orchestration.engine import GateFailed, OrchestrationError, Orchestrator, slug_addon
 from s2docs.orchestration.workflows import WORKFLOWS
@@ -121,9 +122,46 @@ def test_skip_block_and_completion(orch):
     orch.update(pid, "draft", "done", notes="sv_cheats 1")
     brief = orch.update(pid, "validate", "skipped", notes="user will validate")
     assert brief.status == "done" and brief.progress == "2/2"
-    with pytest.raises(OrchestrationError, match="is done"):
+    # A notes-only update on a finished project is allowed (ledger as you go): same status, no reopen.
+    after = orch.update(pid, "validate", "skipped", notes="post-check: user confirmed in game")
+    assert after.status == "done"
+    project = orch.get(pid)
+    validate = next(s for s in project.steps if s.id == "validate")
+    assert validate.status == "skipped" and "confirmed in game" in (validate.notes or "")
+    assert any(e.event == "note" and e.step_id == "validate" for e in project.recent_events)
+    # ...but a status-changing update on a done project is still rejected.
+    with pytest.raises(OrchestrationError, match="done"):
         orch.update(pid, "draft", "pending")
+    with pytest.raises(OrchestrationError, match="done"):
+        orch.update(pid, "validate", "in_progress")
     assert orch.list("done")[0].id == pid
+
+
+def test_done_project_accepts_notes_and_evidence(orch, db, tmp_path):
+    pid = orch.start("server_config", "aim practice", game="cs2").project_id
+    orch.update(pid, "draft", "done", notes="sv_cheats 1")
+    orch.update(pid, "validate", "skipped", notes="user validates")
+    assert orch.get(pid).status == "done"
+    # Evidence still records against the finished project (the evidence gate is not re-run).
+    ev = evidence.add(db, kind="console_transcript", project_id=pid, step_id="validate", data={"ok": True})
+    assert ev.id and evidence.get(db, ev.id).project_id == pid
+    # A follow-up note appends without reopening the step.
+    orch.update(pid, "draft", "done", notes="follow-up note")
+    step = next(s for s in orch.get(pid).steps if s.id == "draft")
+    assert step.status == "done" and "follow-up note" in (step.notes or "")
+
+
+def test_engine_reads_do_not_take_the_write_lock(orch, monkeypatch):
+    """GET-only paths (project list/get/brief) must read through db.reader(), not the writer."""
+    pid = orch.start("server_config", "x", game="cs2").project_id
+
+    def boom(self):
+        raise AssertionError("a read path took the write lock (db.writer)")
+
+    monkeypatch.setattr(Database, "writer", boom)
+    assert orch.list()[0].id == pid
+    assert orch.get(pid).id == pid
+    assert orch.brief(pid).project_id == pid
 
 
 def test_custom_workflow_validation(orch):

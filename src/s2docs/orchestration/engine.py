@@ -169,7 +169,7 @@ class Orchestrator:
 
     # ----------------------------------------------------------- read side
     def _load(self, pid: str) -> m.Project:
-        with self.db.writer() as conn:
+        with self.db.reader() as conn:
             p = conn.execute("SELECT * FROM projects WHERE id = ?", (pid,)).fetchone()
             if p is None:
                 raise NotFound(f"no project {pid!r}")
@@ -221,7 +221,7 @@ class Orchestrator:
         return self._load(pid)
 
     def list(self, status: str | None = None) -> list[m.ProjectSummary]:
-        with self.db.writer() as conn:
+        with self.db.reader() as conn:
             rows = conn.execute(
                 """SELECT p.*, sum(s.status IN ('done', 'skipped')) AS settled, count(s.step_id) AS total
                    FROM projects p LEFT JOIN project_steps s ON s.project_id = p.id
@@ -252,7 +252,7 @@ class Orchestrator:
             for s in project.steps
             if s.status in ("pending", "in_progress") and all(status[d] in _SETTLED for d in s.depends_on)
         ]
-        with self.db.writer() as conn:
+        with self.db.reader() as conn:
             raw = {
                 r["step_id"]: r
                 for r in conn.execute("SELECT * FROM project_steps WHERE project_id = ?", (pid,)).fetchall()
@@ -327,12 +327,33 @@ class Orchestrator:
         if status not in STATUSES:
             raise OrchestrationError(f"status must be one of {STATUSES}")
         project = self._load(pid)
-        if project.status != "active":
+        if project.status not in ("active", "done"):
             raise OrchestrationError(f"project {pid} is {project.status}")
         steps = {s.id: s for s in project.steps}
         step = steps.get(step_id)
         if step is None:
             raise OrchestrationError(f"no step {step_id!r}; steps: {', '.join(steps)}")
+
+        merged_artifacts = [*step.artifacts, *(artifacts or [])]
+        merged_notes = "\n\n".join(x for x in (step.notes, notes) if x) or None
+
+        if project.status == "done":
+            # A finished project accepts notes/artifacts-only updates ("ledger as you go"): the step's
+            # status must not change (no reopening) and the gate is not re-run. A status-changing
+            # update is still rejected.
+            if status != step.status:
+                raise OrchestrationError(
+                    f"project {pid} is done; only notes-only updates are allowed "
+                    f"(step {step_id!r} is {step.status!r}), not a change to {status!r}"
+                )
+            with self.db.writer() as conn, conn:
+                conn.execute(
+                    "UPDATE project_steps SET notes = ?, artifacts = ?, "
+                    "updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE project_id = ? AND step_id = ?",
+                    (merged_notes, json.dumps(merged_artifacts), pid, step_id),
+                )
+                self._event(conn, pid, step_id, "note", notes)
+            return self.brief(pid)
 
         if status in ("in_progress", "done"):
             waiting = [d for d in step.depends_on if steps[d].status not in _SETTLED]
@@ -340,9 +361,6 @@ class Orchestrator:
                 raise OrchestrationError(f"step {step_id} depends on unfinished steps: {waiting}")
         if status in ("skipped", "blocked") and not notes:
             raise OrchestrationError(f"status {status} needs `notes` explaining why")
-
-        merged_artifacts = [*step.artifacts, *(artifacts or [])]
-        merged_notes = "\n\n".join(x for x in (step.notes, notes) if x) or None
         if status == "done" and step.gate:
             self._check_gate(project, step_id, step.gate, merged_notes, merged_artifacts)
 

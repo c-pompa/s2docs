@@ -118,6 +118,20 @@ const lockCell = (lock) => {
   }</div>`;
 };
 
+// A project's recent_events as a newest-first Timeline (the engine orders by id DESC). Each row
+// renders through the one Central-time formatter, so milestones read as wall-clock, not just 'ago'.
+const timelineRows = (evs) =>
+  evs && evs.length
+    ? `<ul class="timeline">${evs
+        .map(
+          (e) =>
+            `<li>${badge(e.event)} <span class="muted">${fmtTime(e.ts)}</span>${
+              e.step_id ? ` <span class="mono muted">${esc(e.step_id)}</span>` : ""
+            }${e.detail ? `<div class="muted">${esc(e.detail)}</div>` : ""}</li>`,
+        )
+        .join("")}</ul>`
+    : `<p class="muted">No events yet.</p>`;
+
 const lockRows = (evs) =>
   evs.length
     ? `<table><tr><th>When</th><th>Event</th><th>Owner</th><th>Detail</th></tr>${evs
@@ -171,7 +185,7 @@ const testRows = (ts) =>
     ? `<table><tr><th>Name</th><th>Step</th><th>State</th><th>Started</th><th>Elapsed</th><th>Host</th></tr>${ts
         .map(
           (t) =>
-            `<tr><td class="mono">${esc(t.name)}</td><td>${esc(t.step || "—")}</td><td>${stateBadge(t.state)}</td>` +
+            `<tr><td class="mono">${esc(t.name)}</td><td>${esc(t.step || "—")}</td><td>${stateBadge(t.state)}${lockStuckBadge(t.lock)}</td>` +
             `<td class="muted">${fmtTime(t.started_at || t.created_at)}</td>` +
             `<td class="mono">${human(t.elapsed_sec)}${t.state === "running" ? `<div class="muted">running</div>` : ""}</td><td>${t.host_id ? link(["hosts", t.host_id], t.host_id) : "—"}</td></tr>`,
         )
@@ -677,7 +691,8 @@ const ROUTES = {
         <h2>Step graph</h2>${stepDag(p.steps)}
         <h2>Steps (${esc(b.progress)})</h2>
         <table><tr><th>Step</th><th>State</th><th>Gate</th><th>Evidence</th><th>Updated</th><th>Duration</th><th>Depends on</th><th>Notes / artifacts</th></tr>${stepRowsHtml}</table>
-        ${ready ? `<h2>Ready now</h2>${ready}` : ""}`;
+        ${ready ? `<h2>Ready now</h2>${ready}` : ""}
+        <h2>Timeline</h2>${timelineRows(p.recent_events)}`;
     }
     const [projects, workflows] = await Promise.all([api("/projects"), api("/workflows")]);
     const wfOptions = workflows.filter((w) => w.games.includes(state.game)).map((w) => [w.id, w.title]);
@@ -746,30 +761,35 @@ const ROUTES = {
   // Game-independent: the live view a person watches to answer "what is running right now".
   async activity() {
     const body = async () => {
-      const [builds, tests, deploys, current] = await Promise.all([
+      const [builds, tests, deploys] = await Promise.all([
         api("/builds"),
         api("/test-runs"),
         api("/deploys"),
-        api("/test-runs/current").catch(() => null),
       ]);
       const isActiveBuild = (b) => b.status === "running" || b.status === "queued";
       const activeBuilds = builds.filter(isActiveBuild);
-      const activeTest = current && current.state === "running" ? current : null;
+      // EVERY running session, not just the single /test-runs/current probe: more than one host can
+      // run a test at once, and the page must show all of them.
+      const activeTests = tests.filter((t) => t.state === "running");
       // Drives the poll cadence: fast while anything is live, slow when the system is idle.
-      state.activityActive = activeBuilds.length > 0 || !!activeTest;
+      state.activityActive = activeBuilds.length > 0 || activeTests.length > 0;
 
       if (!builds.length && !tests.length && !deploys.length) return nowLine() + activityEmptyState();
 
       // ---- NOW: everything currently running, freshest first (updated_at = heartbeat-ish for a run).
       const ts = (r) => (r.updated_at || r.created_at || r.started_at || "");
       const nowCards = [];
-      if (activeTest)
-        nowCards.push(
-          `<div class="card" style="margin-bottom:8px">${stateBadge(activeTest.state)} <strong>TEST</strong> ${esc(activeTest.name)} —
-           <span class="mono">${esc(activeTest.step || "(no step)")}</span>
-           <span class="muted">· ${human(activeTest.elapsed_sec)} · host ${
-             activeTest.host_id ? link(["hosts", activeTest.host_id], activeTest.host_id) : "—"
-           }${activeTest.project_id ? ` · ${esc(activeTest.project_id)}` : ""}</span></div>`,
+      activeTests
+        .slice()
+        .sort((a, b) => (ts(a) < ts(b) ? 1 : -1))
+        .forEach((t) =>
+          nowCards.push(
+            `<div class="card" style="margin-bottom:8px">${stateBadge(t.state)} <strong>TEST</strong> ${esc(t.name)} —
+             <span class="mono">${esc(t.step || "(no step)")}</span>
+             <span class="muted">· ${human(t.elapsed_sec)} · host ${
+               t.host_id ? link(["hosts", t.host_id], t.host_id) : "—"
+             }${t.project_id ? ` · ${esc(t.project_id)}` : ""}</span>${lockStuckBadge(t.lock)}</div>`,
+          ),
         );
       activeBuilds
         .slice()
