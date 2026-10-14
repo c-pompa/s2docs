@@ -41,11 +41,32 @@ def test_tools_are_listed_read_only(server):
         "test_step",
         "test_finish",
         "test_clear",
+        "job_enqueue",
+        "job_assign",
+        "job_start",
+        "job_event",
+        "job_attach",
+        "job_request_screenshot",
+        "job_link",
+        "job_finish",
+        "job_cancel",
     }
     assert all(t.annotations and t.annotations.read_only_hint for t in tools if t.name not in writers)
     # Non-idempotent writers must NOT advertise idempotency: a retry would launch a second compile,
     # copy the files again, start a second test session or record a duplicate evidence row.
-    non_idempotent = {"build_start", "deploy_push", "test_start", "add_evidence"}
+    non_idempotent = {
+        "build_start",
+        "deploy_push",
+        "test_start",
+        "add_evidence",
+        "job_enqueue",
+        "job_start",
+        "job_event",
+        "job_attach",
+        "job_request_screenshot",
+        "job_finish",
+        "job_cancel",
+    }
     assert non_idempotent <= writers
     for t in tools:
         if t.name in non_idempotent:
