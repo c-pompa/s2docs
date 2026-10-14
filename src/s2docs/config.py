@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import os
+import re
+import sys
 import time
 from dataclasses import dataclass, field
 from functools import lru_cache
@@ -100,6 +102,45 @@ class Settings:
     stuck_phases: dict[str, int] = field(default_factory=dict)  # per-phase overrides, merged over DEFAULT_STUCK_PHASES
 
 
+def _source_checkout() -> Path | None:
+    """The repo root when this package runs from a source checkout (editable install), else None.
+
+    Detected by src layout: ``<root>/src/s2docs/config.py`` → ``parents[2]`` is ``<root>``, which must
+    hold a ``pyproject.toml`` naming this project. A non-editable installed copy has no such file, so
+    the default falls back to a per-user directory instead of guessing from the cwd.
+    """
+    root = Path(__file__).resolve().parents[2]
+    try:
+        text = (root / "pyproject.toml").read_text(encoding="utf-8")
+    except OSError:
+        return None
+    if re.search(r'^\s*name\s*=\s*["\']s2docs["\']', text, re.MULTILINE):
+        return root
+    return None
+
+
+def _platform_data_dir() -> Path:
+    """A fixed, cwd-independent per-user data dir (Windows: %LOCALAPPDATA%, else XDG-style)."""
+    if sys.platform == "win32":
+        base = os.environ.get("LOCALAPPDATA") or os.environ.get("APPDATA")
+        return (Path(base) if base else Path.home() / "AppData" / "Local") / "s2docs"
+    base = os.environ.get("XDG_DATA_HOME")
+    return (Path(base) if base else Path.home() / ".local" / "share") / "s2docs"
+
+
+def default_data_dir() -> Path:
+    """Where the data dir lives when ``S2DOCS_DATA_DIR`` is unset — *never* relative to the cwd.
+
+    A source checkout (editable install) uses ``<checkout>/data`` so a dev server and its MCP clients
+    share the checkout no matter where each was launched; anything else uses a fixed per-user dir, so a
+    mis-spawned MCP client can never create a shadow DB beside an unrelated working directory.
+    """
+    checkout = _source_checkout()
+    if checkout is not None:
+        return checkout / "data"
+    return _platform_data_dir()
+
+
 def _stuck_phases() -> dict[str, int]:
     """Per-phase stuck thresholds: the built-in defaults merged with S2DOCS_STUCK_PHASES (env wins per key).
 
@@ -132,7 +173,8 @@ def _stuck_sec() -> int:
 
 @lru_cache
 def get_settings() -> Settings:
-    data_dir = Path(os.environ.get("S2DOCS_DATA_DIR", Path.cwd() / "data")).expanduser().resolve()
+    raw_data_dir = os.environ.get("S2DOCS_DATA_DIR")
+    data_dir = Path(raw_data_dir if raw_data_dir else default_data_dir()).expanduser().resolve()
     db_path = Path(os.environ.get("S2DOCS_DB", data_dir / "s2docs.db")).expanduser().resolve()
     workspace = Path(os.environ.get("S2DOCS_WORKSPACE", data_dir / "workspace")).expanduser().resolve()
     return Settings(
