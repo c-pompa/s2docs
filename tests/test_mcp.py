@@ -48,6 +48,7 @@ def test_tools_are_listed_read_only(server):
         "job_attach",
         "job_request_screenshot",
         "job_link",
+        "job_verdict",
         "job_finish",
         "job_cancel",
     }
@@ -64,6 +65,7 @@ def test_tools_are_listed_read_only(server):
         "job_event",
         "job_attach",
         "job_request_screenshot",
+        "job_verdict",
         "job_finish",
         "job_cancel",
     }

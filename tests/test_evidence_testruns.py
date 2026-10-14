@@ -399,3 +399,33 @@ def test_cli_exit_codes(tmp_path, monkeypatch, capsys):
     hosts.claim_host(db, "desktop-pc", "ws/other")
     rc = _run_cli(monkeypatch, tmp_path, ["test", "start", "--name", "iso_test", "--host", "desktop-pc"])
     assert rc == 2 and "LOCKED" in capsys.readouterr().err
+
+
+# ------------------------------------------------- human-confirm verdict/source gate
+def test_api_human_confirm_verdict_and_source_validation(edb, client):
+    """A human-confirm row IS a verdict: data.verdict is required and in {pass, fail, skip} (else 422),
+    and data.source, when present, must be a known source."""
+    run = test_runs.start(edb, "iso_test")
+    # missing / out-of-set verdicts are 422 naming the field
+    for data in ({}, {"verdict": "maybe"}, {"verdict": "PASS"}, {"verdict": True}):
+        r = client.post("/api/evidence", json={"kind": "human-confirm", "test_run_id": run.id, "data": data})
+        assert r.status_code == 422, r.text
+        assert "verdict" in r.json()["fields"]
+    # each allowed verdict is accepted
+    for v in ("pass", "fail", "skip"):
+        r = client.post("/api/evidence", json={"kind": "human-confirm", "test_run_id": run.id, "data": {"verdict": v}})
+        assert r.status_code == 201, r.text
+    # a source outside the set is 422 naming 'source'; each known source is accepted
+    bad = client.post(
+        "/api/evidence",
+        json={"kind": "human-confirm", "test_run_id": run.id, "data": {"verdict": "pass", "source": "telepathy"}},
+    )
+    assert bad.status_code == 422 and "source" in bad.json()["fields"]
+    for s in ("chat", "console", "key", "web", "coordinator", "director"):
+        r = client.post(
+            "/api/evidence",
+            json={"kind": "human-confirm", "test_run_id": run.id, "data": {"verdict": "pass", "source": s}},
+        )
+        assert r.status_code == 201, r.text
+    # a non-confirm kind is not verdict-gated (no verdict required)
+    assert client.post("/api/evidence", json={"kind": "note", "test_run_id": run.id, "data": {}}).status_code == 201

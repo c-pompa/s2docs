@@ -22,6 +22,7 @@ from s2docs.builds import BuildTimeout
 from s2docs.config import get_settings
 from s2docs.db.connection import Database, DatabaseNotInitialized
 from s2docs.db.repository import NotFound
+from s2docs.evidence import EvidenceValidationError
 from s2docs.hosts import HostLocked
 from s2docs.jobs import JobConflict, JobValidationError
 from s2docs.orchestration.engine import GateFailed, Orchestrator
@@ -124,6 +125,12 @@ def create_app(db_path: Path | None = None, *, mount_mcp: bool = True, workspace
     @app.exception_handler(JobConflict)
     async def _job_conflict(_: Request, exc: JobConflict) -> JSONResponse:
         return JSONResponse({"detail": str(exc), "conflict": True}, status_code=409)
+
+    @app.exception_handler(EvidenceValidationError)
+    async def _evidence_invalid(_: Request, exc: EvidenceValidationError) -> JSONResponse:
+        # A human-confirm row with a bad verdict/source is validation (422), not the generic 400 a bare
+        # EvidenceError (e.g. an unknown test run) gets.
+        return JSONResponse({"detail": str(exc), "fields": exc.fields}, status_code=422)
 
     @app.exception_handler(BuildTimeout)
     async def _build_timeout(_: Request, exc: BuildTimeout) -> JSONResponse:

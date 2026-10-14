@@ -10,7 +10,7 @@ from fastapi.responses import PlainTextResponse, Response
 from pydantic import BaseModel, Field
 
 from s2docs import builds as build_svc
-from s2docs import confirms, deploys, evidence, hosts, jobs, test_runs
+from s2docs import deploys, evidence, hosts, jobs, test_runs
 from s2docs import models as m
 from s2docs.build.validate_cfg import validate_cfg
 from s2docs.build.validate_script import validate_cs_script
@@ -512,8 +512,11 @@ class EvidenceIn(BaseModel):
 def add_evidence(body: EvidenceIn, db: Db):
     # The director puts the run inside `data`; accept a top-level `test_run_id` too. The store resolves
     # the project from it, so human-confirm evidence stores without the caller knowing a project.
+    # add_and_publish is the ONE evidence path: a human-confirm row also fires the confirm push files
+    # (data_dir/confirms.jsonl + latest_confirm.json) so a waiting agent can watch a local file, and
+    # POST /jobs/{id}/verdict reuses it so a webapp verdict lands exactly the same way.
     test_run_id = body.test_run_id or body.data.get("test_run_id")
-    row = evidence.add(
+    return evidence.add_and_publish(
         db,
         kind=body.kind,
         project_id=body.project_id,
@@ -522,11 +525,6 @@ def add_evidence(body: EvidenceIn, db: Db):
         data=body.data,
         test_run_id=test_run_id,
     )
-    # Push human-confirm rows to the watchable files (data_dir/confirms.jsonl + latest_confirm.json)
-    # so a waiting agent can watch a local file instead of polling GET /api/evidence every ~5 s.
-    if row.kind == "human-confirm":
-        confirms.publish(row)
-    return row
 
 
 @router.get("/evidence", response_model=list[m.Evidence])
@@ -635,6 +633,13 @@ class JobLinkIn(BaseModel):
     ref_id: str
 
 
+class JobVerdictIn(BaseModel):
+    verdict: m.Verdict = Field(description="pass | fail | skip — the human's call on the current step")
+    notes: str | None = Field(default=None, description="Free-text note recorded with the verdict")
+    step: str | None = Field(default=None, description="Step id/phase the verdict answers (optional)")
+    source: str = Field(default="web", description="chat | console | key | web | coordinator")
+
+
 class JobScreenshotIn(BaseModel):
     note: str | None = None
 
@@ -709,6 +714,16 @@ def get_job_artifact(job_id: str, name: str, db: Db):
 @router.post("/jobs/{job_id}/link", response_model=m.Job)
 def link_job(job_id: str, body: JobLinkIn, db: Db):
     return jobs.link(db, job_id, kind=body.kind, ref_id=body.ref_id)
+
+
+@router.post("/jobs/{job_id}/verdict", response_model=m.Job)
+def job_verdict(job_id: str, body: JobVerdictIn, db: Db):
+    """Answer the running job's current step with a human verdict (the webapp's Pass/Fail/Skip buttons).
+
+    Writes a `human-confirm` evidence row through the same path as `POST /api/evidence` (so the confirm
+    push files fire) and appends a `milestone` event. 409 when the job is not running or links no test run.
+    """
+    return jobs.verdict(db, job_id, verdict=body.verdict, notes=body.notes, step=body.step, source=body.source)
 
 
 @router.post("/jobs/{job_id}/screenshot-request", response_model=m.Job)
