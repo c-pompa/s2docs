@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
+import logging
+import os
 from collections.abc import AsyncIterator
 from importlib import resources
 from pathlib import Path
@@ -11,6 +14,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+from s2docs import builds, test_runs
 from s2docs.api.routes import router
 from s2docs.build.validate_script import ToolchainMissing
 from s2docs.builds import BuildTimeout
@@ -20,6 +24,28 @@ from s2docs.db.repository import NotFound
 from s2docs.hosts import HostLocked
 from s2docs.orchestration.engine import GateFailed, Orchestrator
 from s2docs.prompts import PromptError
+
+logger = logging.getLogger("s2docs")
+DEFAULT_REAP_SEC = 60
+
+
+def _reap_interval() -> int:
+    """Seconds between reaper passes (S2DOCS_REAP_SEC, default 60; <= 0 disables the periodic task)."""
+    try:
+        return int(os.environ.get("S2DOCS_REAP_SEC") or DEFAULT_REAP_SEC)
+    except ValueError:
+        return DEFAULT_REAP_SEC
+
+
+async def _reap_loop(db: Database, interval: int) -> None:
+    """Periodically finalize runs that lost their owner (build watchers and stale test sessions)."""
+    while True:
+        await asyncio.sleep(interval)
+        try:
+            builds.reconcile_orphans(db)
+            test_runs.reap_stale(db)
+        except Exception:  # a failed pass must not kill the task
+            logger.exception("reaper pass failed")
 
 
 def create_app(db_path: Path | None = None, *, mount_mcp: bool = True, workspace: Path | None = None) -> FastAPI:
@@ -37,11 +63,27 @@ def create_app(db_path: Path | None = None, *, mount_mcp: bool = True, workspace
 
     @contextlib.asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-        if mcp_server is not None:
-            async with mcp_server.session_manager.run():
+        reap_task = None
+        # Only touch the store when it exists: a probe against a missing db must stay 503, not create it.
+        if db.path.exists():
+            try:
+                builds.reconcile_orphans(db)  # finalize build runs left 'running' by a dead watcher
+            except Exception:
+                logger.exception("startup build reconcile failed")
+            interval = _reap_interval()
+            if interval > 0:
+                reap_task = asyncio.create_task(_reap_loop(db, interval))
+        try:
+            if mcp_server is not None:
+                async with mcp_server.session_manager.run():
+                    yield
+            else:
                 yield
-        else:
-            yield
+        finally:
+            if reap_task is not None:
+                reap_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await reap_task
 
     app = FastAPI(
         title="Source 2 Docs",

@@ -14,7 +14,7 @@ from s2docs import deploys, evidence, hosts, test_runs
 from s2docs import models as m
 from s2docs.build.validate_cfg import validate_cfg
 from s2docs.build.validate_script import validate_cs_script
-from s2docs.config import GAMES
+from s2docs.config import GAMES, server_identity
 from s2docs.db.connection import Database
 from s2docs.db.repository import Repository
 from s2docs.orchestration.engine import Orchestrator, workflow_info
@@ -47,9 +47,13 @@ Game = Annotated[str, Depends(valid_game)]
 
 
 # ---------------------------------------------------------------- meta
-@router.get("/health")
-def health() -> dict[str, str]:
-    return {"status": "ok"}
+@router.get("/health", response_model=m.ServerInfo)
+def health():
+    """DB identity: which store this process serves, and which process it is.
+
+    Clients compare this against the MCP `server_info` tool before writing, so the split-database
+    class of incident is detectable."""
+    return m.ServerInfo(**server_identity())
 
 
 @router.get("/stats", response_model=m.Stats)

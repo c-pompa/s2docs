@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import re
 import sys
 import time
@@ -43,6 +44,21 @@ def _parse_duration(value: str) -> int:
 def _fail(message: str, code: int) -> int:
     print(f"error: {message}", file=sys.stderr)
     return code
+
+
+def _warn_data_dir() -> None:
+    """Loud WARNING (stderr) when S2DOCS_DATA_DIR is unset — the data dir silently defaults to cwd.
+
+    A server and an MCP client started from different working directories would then read/write two
+    different stores (the split-database incident class); make the default impossible to miss.
+    """
+    if os.environ.get("S2DOCS_DATA_DIR"):
+        return
+    print(
+        f"WARNING: S2DOCS_DATA_DIR is not set — the data dir defaults to {get_settings().data_dir}. "
+        "Set S2DOCS_DATA_DIR so this server and its MCP clients share one store.",
+        file=sys.stderr,
+    )
 
 
 def _emit(args: argparse.Namespace, payload: dict, human: list[str]) -> int:
@@ -110,6 +126,7 @@ def _cmd_serve(args: argparse.Namespace) -> int:
 
     from s2docs.api.app import create_app
 
+    _warn_data_dir()
     uvicorn.run(create_app(), host=args.host, port=args.port, log_level="info")
     return 0
 
@@ -117,6 +134,7 @@ def _cmd_serve(args: argparse.Namespace) -> int:
 def _cmd_mcp(args: argparse.Namespace) -> int:
     from s2docs.mcp_server import create_mcp_server
 
+    _warn_data_dir()
     server = create_mcp_server(Database(get_settings().db_path))
     if args.transport == "stdio":
         server.run("stdio")
