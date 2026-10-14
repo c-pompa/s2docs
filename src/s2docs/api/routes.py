@@ -10,7 +10,7 @@ from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, Field
 
 from s2docs import builds as build_svc
-from s2docs import deploys, evidence, hosts, test_runs
+from s2docs import confirms, deploys, evidence, hosts, test_runs
 from s2docs import models as m
 from s2docs.build.validate_cfg import validate_cfg
 from s2docs.build.validate_script import validate_cs_script
@@ -515,7 +515,7 @@ def add_evidence(body: EvidenceIn, db: Db):
     # The director puts the run inside `data`; accept a top-level `test_run_id` too. The store resolves
     # the project from it, so human-confirm evidence stores without the caller knowing a project.
     test_run_id = body.test_run_id or body.data.get("test_run_id")
-    return evidence.add(
+    row = evidence.add(
         db,
         kind=body.kind,
         project_id=body.project_id,
@@ -524,6 +524,11 @@ def add_evidence(body: EvidenceIn, db: Db):
         data=body.data,
         test_run_id=test_run_id,
     )
+    # Push human-confirm rows to the watchable files (data_dir/confirms.jsonl + latest_confirm.json)
+    # so a waiting agent can watch a local file instead of polling GET /api/evidence every ~5 s.
+    if row.kind == "human-confirm":
+        confirms.publish(row)
+    return row
 
 
 @router.get("/evidence", response_model=list[m.Evidence])

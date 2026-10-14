@@ -432,6 +432,12 @@ class ServerInfo(BaseModel):
     auth_required: bool = Field(
         default=False, description="True when S2DOCS_AUTH_TOKEN is set (mutating /api and /mcp need a token)"
     )
+    confirms_jsonl: str = Field(
+        default="", description="Append-only confirm journal a waiting agent watches (data_dir/confirms.jsonl)"
+    )
+    latest_confirm: str = Field(
+        default="", description="Atomically-rewritten newest human confirm (data_dir/latest_confirm.json)"
+    )
 
 
 class LockSummary(BaseModel):
