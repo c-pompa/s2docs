@@ -168,6 +168,26 @@ def test_frontend_projects_timeline_and_test_run_stuck(client):
     assert "lockStuckBadge(t.lock)" in js
 
 
+def test_frontend_live_refresh_never_clobbers_typing(client):
+    """A live page's auto-refresh replaces its #live region's innerHTML — and the job page's verdict
+    notes + screenshot request live inside that region. The tick must (1) SKIP the render while an
+    input in the region is focused/holds unsubmitted text, and (2) snapshot + restore each input's
+    value/focus/caret across any render it does run, so typing can't be wiped mid-edit."""
+    js = client.get("/app.js").text
+    # (1) skip-while-editing guard sits in the tick before the innerHTML swap
+    assert "function liveBeingEdited" in js and "liveBeingEdited(el)" in js
+    assert "if (liveBeingEdited(el)) { liveTimer = setTimeout(tick, delay()); return; }" in js
+    # the `dirty` flag is set on 'input' and cleared after a successful submit
+    assert "let liveDirty = false" in js and "liveDirty = true" in js and "liveDirty = false" in js
+    assert 'addEventListener("input", liveInputListener)' in js
+    # (2) the value-restore helper wraps the innerHTML replacement
+    assert "function snapshotLiveInputs" in js and "function restoreLiveInputs" in js
+    assert "const saved = snapshotLiveInputs(el)" in js and "restoreLiveInputs(el, saved)" in js
+    # (3) a successful verdict submit clears the note box and re-renders at once
+    verdict = js.split("function bindJobVerdict", 1)[1]
+    assert "form.elements.notes.value = \"\"" in verdict and "route()" in verdict
+
+
 def test_api_build_and_test_lists_carry_lock(client):
     """The Activity page's lockStuckBadge reads r.lock — build and test-run list rows must carry it."""
     started = client.post("/api/test-runs", json={"name": "iso_lock", "host_id": "desktop-pc"})
