@@ -120,3 +120,92 @@ def test_mcp_server_info_reports_auth_required(adb, monkeypatch):
         assert TOKEN not in json.dumps(info)
     finally:
         get_settings.cache_clear()
+
+
+# ------------------------------------------------ non-ASCII headers must be 401, never 500
+# hmac.compare_digest raises TypeError on a str with non-ASCII characters, so a header value that
+# decodes to non-ASCII (any latin-1 byte >= 0x80) turned a bad token into an HTTP 500. httpx refuses
+# to *send* such a header from the client, so drive the ASGI app with a hand-built scope.
+def _raw_request(app, method: str, path: str, headers: list[tuple[bytes, bytes]]) -> int:
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0", "spec_version": "2.3"},
+        "http_version": "1.1",
+        "method": method,
+        "scheme": "http",
+        "path": path,
+        "raw_path": path.encode("latin-1"),
+        "query_string": b"",
+        "root_path": "",
+        "headers": headers,
+        "server": ("testserver", 80),
+        "client": ("127.0.0.1", 12345),
+    }
+    status: dict[str, int] = {}
+
+    async def receive():
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    async def send(message):
+        if message["type"] == "http.response.start":
+            status["code"] = message["status"]
+
+    async def main():
+        await app(scope, receive, send)
+
+    anyio.run(main)
+    return status.get("code", 0)
+
+
+@pytest.mark.parametrize(
+    "headers",
+    [
+        [(b"authorization", b"Bearer caf\xe9")],  # 'café' once latin-1-decoded
+        [(b"x-s2docs-token", b"\xff\xfe bogus")],
+    ],
+)
+def test_non_ascii_header_is_401_not_500(client_factory, headers):
+    with client_factory(TOKEN) as c:
+        assert _raw_request(c.app, "POST", "/api/hosts/desktop-pc/lock", headers) == 401
+
+
+def test_non_ascii_header_via_mcp_is_401(client_factory):
+    with client_factory(TOKEN) as c:
+        assert _raw_request(c.app, "POST", "/mcp", [(b"authorization", b"Bearer na\xefve")]) == 401
+
+
+# ---------------------------------------------------------------- path gating boundaries
+def test_apifoo_is_not_gated_as_api(client_factory):
+    """/apifoo must not be treated as an /api route: it is unrouted, so never a 401."""
+    with client_factory(TOKEN) as c:
+        assert c.post("/apifoo", json={}).status_code != 401
+
+
+def test_mcp_trailing_slash_alias_is_gated(client_factory):
+    with client_factory(TOKEN) as c:
+        assert c.post("/mcp/", json={}).status_code == 401
+
+
+def test_mcpfoo_is_not_gated(client_factory):
+    with client_factory(TOKEN) as c:
+        assert c.post("/mcpfoo", json={}).status_code != 401
+
+
+@pytest.mark.parametrize("method", ["PUT", "DELETE", "PATCH"])
+def test_other_mutating_methods_are_gated(client_factory, method):
+    with client_factory(TOKEN) as c:
+        r = c.request(method, LOCK, json=LOCK_BODY)
+        assert r.status_code == 401
+
+
+@pytest.mark.parametrize("method", ["OPTIONS", "HEAD"])
+def test_safe_methods_stay_open(client_factory, method):
+    with client_factory(TOKEN) as c:
+        # not gated -> whatever the router/static layer returns, but never a 401
+        assert c.request(method, "/api/health").status_code != 401
+
+
+def test_exact_api_path_is_gated(client_factory):
+    with client_factory(TOKEN) as c:
+        assert c.post("/api", json={}).status_code == 401
+

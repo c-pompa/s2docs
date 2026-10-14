@@ -143,26 +143,32 @@ class _AuthGate:
     Disabled unless S2DOCS_AUTH_TOKEN is set. GET/HEAD/OPTIONS under /api and the static web UI stay
     open (the UI is read-only); every /api mutation and every /mcp request needs a matching token, sent
     either as ``Authorization: Bearer <token>`` or ``X-S2docs-Token: <token>``. Compared in constant
-    time so a wrong token cannot be probed byte-by-byte.
+    time on the raw header **bytes** — hmac.compare_digest raises TypeError on a str with non-ASCII
+    characters, so a non-ASCII header must yield a clean 401, never a 500.
     """
 
     _SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 
     def __init__(self, app, token: str | None):
         self.app = app
-        self.token = token or ""
+        self.token = (token or "").encode("utf-8")
 
     @staticmethod
-    def _presented(scope) -> str | None:
-        headers = {k.decode("latin-1").lower(): v.decode("latin-1") for k, v in scope["headers"]}
-        auth = headers.get("authorization", "")
-        if auth.lower().startswith("bearer "):
+    def _presented(scope) -> bytes | None:
+        headers = {k.lower(): v for k, v in scope["headers"]}
+        auth = headers.get(b"authorization", b"")
+        if auth[:7].lower() == b"bearer ":
             return auth[7:].strip()
-        return headers.get("x-s2docs-token")
+        return headers.get(b"x-s2docs-token")
 
     def _gated(self, scope) -> bool:
+        # Match on a path boundary: exactly '/api'/'/mcp' or a '/api/…'/'/mcp/…' child. A prefix
+        # match ('/apifoo', '/mcpfoo') would gate a path the app never routes — fail closed on the
+        # real surfaces, not on lookalikes.
         path, method = scope["path"], scope["method"]
-        return path.startswith("/mcp") or (path.startswith("/api") and method not in self._SAFE_METHODS)
+        if path == "/mcp" or path.startswith("/mcp/"):
+            return True
+        return (path == "/api" or path.startswith("/api/")) and method not in self._SAFE_METHODS
 
     async def __call__(self, scope, receive, send):
         if scope["type"] != "http" or not self.token or not self._gated(scope):
