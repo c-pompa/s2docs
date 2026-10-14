@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hmac
 import logging
 import os
 from collections.abc import AsyncIterator
@@ -127,9 +128,52 @@ def create_app(db_path: Path | None = None, *, mount_mcp: bool = True, workspace
     if mcp_asgi is not None:
         app.mount("/mcp", mcp_asgi)
         app.add_middleware(_McpPathAlias)
+    # Opt-in auth, added last so it is the outermost middleware (it must gate every request first).
+    _token = get_settings().auth_token
+    if _token:
+        app.add_middleware(_AuthGate, token=_token)
     web_dir = resources.files("s2docs") / "web"
     app.mount("/", StaticFiles(directory=str(web_dir), html=True), name="web")
     return app
+
+
+class _AuthGate:
+    """Opt-in bearer-token gate for mutating /api requests and the whole /mcp endpoint (ASGI, pure).
+
+    Disabled unless S2DOCS_AUTH_TOKEN is set. GET/HEAD/OPTIONS under /api and the static web UI stay
+    open (the UI is read-only); every /api mutation and every /mcp request needs a matching token, sent
+    either as ``Authorization: Bearer <token>`` or ``X-S2docs-Token: <token>``. Compared in constant
+    time so a wrong token cannot be probed byte-by-byte.
+    """
+
+    _SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+
+    def __init__(self, app, token: str | None):
+        self.app = app
+        self.token = token or ""
+
+    @staticmethod
+    def _presented(scope) -> str | None:
+        headers = {k.decode("latin-1").lower(): v.decode("latin-1") for k, v in scope["headers"]}
+        auth = headers.get("authorization", "")
+        if auth.lower().startswith("bearer "):
+            return auth[7:].strip()
+        return headers.get("x-s2docs-token")
+
+    def _gated(self, scope) -> bool:
+        path, method = scope["path"], scope["method"]
+        return path.startswith("/mcp") or (path.startswith("/api") and method not in self._SAFE_METHODS)
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http" or not self.token or not self._gated(scope):
+            await self.app(scope, receive, send)
+            return
+        presented = self._presented(scope)
+        if presented is None or not hmac.compare_digest(presented, self.token):
+            response = JSONResponse({"detail": "missing or invalid auth token"}, status_code=401)
+            await response(scope, receive, send)
+            return
+        await self.app(scope, receive, send)
 
 
 class _McpPathAlias:

@@ -100,6 +100,11 @@ class Settings:
     workspace_dir: Path  # local addon sources (scaffolded/written by the build tools)
     stuck_sec: int = DEFAULT_STUCK_SEC  # phase age (s) after which a fresh lock reads STUCK
     stuck_phases: dict[str, int] = field(default_factory=dict)  # per-phase overrides, merged over DEFAULT_STUCK_PHASES
+    auth_token: str | None = None  # S2DOCS_AUTH_TOKEN; None = auth disabled (default)
+
+    @property
+    def auth_required(self) -> bool:
+        return bool(self.auth_token)
 
 
 def _source_checkout() -> Path | None:
@@ -184,6 +189,7 @@ def get_settings() -> Settings:
         workspace_dir=workspace,
         stuck_sec=_stuck_sec(),
         stuck_phases=_stuck_phases(),
+        auth_token=os.environ.get("S2DOCS_AUTH_TOKEN") or None,
     )
 
 
@@ -201,6 +207,7 @@ def server_identity() -> dict:
         "pid": os.getpid(),
         "started_at": STARTED_AT,
         "version": VERSION,
+        "auth_required": settings.auth_required,
     }
 
 

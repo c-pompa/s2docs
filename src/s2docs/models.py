@@ -429,6 +429,9 @@ class ServerInfo(BaseModel):
     pid: int
     started_at: str
     version: str
+    auth_required: bool = Field(
+        default=False, description="True when S2DOCS_AUTH_TOKEN is set (mutating /api and /mcp need a token)"
+    )
 
 
 class LockSummary(BaseModel):
