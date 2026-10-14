@@ -82,17 +82,20 @@ def test_deploy_gate(orch, ldb):
     hosts.claim_host(ldb, "desktop-pc", f"project:{pid}")
     orch.update(pid, "claim", "done", notes="ok")
     orch.update(pid, "probe", "done", notes="probed")
-    # nothing deployed yet
-    with pytest.raises(GateFailed, match="no deployment"):
+    # no deploy id artifact -> the gate needs one (no latest-for-host fallback any more)
+    with pytest.raises(GateFailed, match="artifact"):
         orch.update(pid, "deploy", "done", notes="pushed")
-    # a pushed-but-unverified deployment (latest-for-host fallback) does not pass
+    # a pushed-but-unverified deployment named as the artifact does not pass
     _insert_deploy(ldb, "d-00000001", "pushed")
     with pytest.raises(GateFailed, match="not 'verified'"):
-        orch.update(pid, "deploy", "done", notes="pushed")
+        orch.update(pid, "deploy", "done", notes="pushed", artifacts=["d-00000001"])
+    # the host's latest (verified) deployment is NOT used: the id must still be named
     _insert_deploy(ldb, "d-00000002", "verified")
-    # the id named in the artifacts is checked, NOT the host's latest (verified) deployment
-    with pytest.raises(GateFailed, match="not 'verified'"):
-        orch.update(pid, "deploy", "done", notes="x", artifacts=["d-00000001"])
+    with pytest.raises(GateFailed, match="artifact"):
+        orch.update(pid, "deploy", "done", notes="pushed")
+    # an unknown id is reported as missing
+    with pytest.raises(GateFailed, match="no deployment"):
+        orch.update(pid, "deploy", "done", notes="x", artifacts=["d-deadbeef"])
     brief = orch.update(pid, "deploy", "done", notes="verified", artifacts=["d-00000002"])
     assert [s.step_id for s in brief.next_steps] == ["test"]
 

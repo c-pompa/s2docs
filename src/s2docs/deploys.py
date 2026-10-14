@@ -13,6 +13,7 @@ documented invocation, faked in tests.
 from __future__ import annotations
 
 import base64
+import contextlib
 import json
 import re
 import secrets
@@ -97,6 +98,7 @@ def _row_to_deployment(row: sqlite3.Row) -> m.Deployment:
         dest_root=row["dest_root"],
         entries=[m.DeployEntry(**e) for e in json.loads(row["entries"])],
         status=row["status"],
+        owner=row["owner"],
         notes=row["notes"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
@@ -148,6 +150,35 @@ def _normalize(files: Sequence[m.DeployFile | dict], dest_root: str) -> list[tup
     return out
 
 
+def _take_lease(db: Database, host: m.Host, host_id: str, owner: str | None, did: str) -> tuple[str, bool]:
+    """Decide the effective host-lock owner for a deploy and take the lease when needed.
+
+    Returns ``(effective_owner, took_lease)``. If ``owner`` already holds a *fresh* lock we reuse it and
+    do not release it; if the host is free (or held only by a stale lock) we claim it as ``deploy:<id>``
+    for the copy+verify window; a fresh lock held by anyone else is a hard conflict (HostLocked → 409).
+    """
+    lease_owner = f"deploy:{did}"
+    lock = host.lock
+    if lock is not None and lock.fresh:
+        if owner is not None and lock.owner == owner:
+            return owner, False
+        raise hosts.HostLocked(
+            f"host {host_id} is locked by {lock.owner!r} (heartbeat {lock.age_sec}s ago, ttl {lock.ttl_sec}s); "
+            "wait for it to expire, ask the owner to release it, or deploy as that owner"
+        )
+    # free, or held only by a stale lock that may be taken over
+    hosts.claim_host(db, host_id, lease_owner, phase="deploy")
+    return lease_owner, True
+
+
+def _release_lease(db: Database, host_id: str, owner: str) -> None:
+    """Release the deploy lease iff it is still ours — never delete a lock someone else took over."""
+    with contextlib.suppress(hosts.HostError):
+        lock = hosts.get_host(db, host_id).lock
+        if lock is not None and lock.owner == owner:
+            hosts.release_host(db, host_id, owner)
+
+
 def push(
     db: Database,
     host_id: str,
@@ -159,8 +190,14 @@ def push(
     dry_run: bool = False,
     verify: bool = True,
     notes: str | None = None,
+    owner: str | None = None,
 ) -> m.Deployment:
-    """Copy files to the host per the manifest, then verify MD5s server-side over SSH."""
+    """Copy files to the host per the manifest, then verify MD5s server-side over SSH.
+
+    The push holds the host lease for the copy+verify window: a fresh lock held by another owner is a
+    conflict (HostLocked → 409), a lock held by ``owner`` is reused, and a free host is claimed as
+    ``deploy:<id>`` and released at the end (owner-conditional, even on failure).
+    """
     if not files:
         raise DeployError("no files to deploy")
     if not dest_root.strip():
@@ -178,47 +215,56 @@ def push(
             dest_root=dest_root,
             entries=[e for _, _, e in resolved],
             status="pushed",
+            owner=owner,
             notes="dry-run: nothing copied",
             created_at=now,
             updated_at=now,
         )
 
-    errors: list[str] = []
+    effective_owner, took_lease = _take_lease(db, host, host_id, owner, did)
+    try:
+        errors: list[str] = []
 
-    def _copy(item: tuple[m.DeployFile, str, m.DeployEntry]) -> None:
-        spec, remote, _ = item
-        try:
-            if not spec.local:
-                raise DeployError(f"{spec.path}: no local source to copy")
-            _copy_file(host, Path(spec.local), remote)
-        except DeployError as exc:
-            errors.append(str(exc))
+        def _copy(item: tuple[m.DeployFile, str, m.DeployEntry]) -> None:
+            spec, remote, _ = item
+            try:
+                if not spec.local:
+                    raise DeployError(f"{spec.path}: no local source to copy")
+                _copy_file(host, Path(spec.local), remote)
+            except DeployError as exc:
+                errors.append(str(exc))
 
-    items = resolved
-    if parallel and parallel > 1 and len(items) > 1:
-        with ThreadPoolExecutor(max_workers=parallel) as pool:
-            list(pool.map(_copy, items))
-    else:
-        for item in items:
-            _copy(item)
+        items = resolved
+        if parallel and parallel > 1 and len(items) > 1:
+            with ThreadPoolExecutor(max_workers=parallel) as pool:
+                list(pool.map(_copy, items))
+        else:
+            for item in items:
+                _copy(item)
 
-    if errors:
-        # Keep a record even on failure so `deploy list`/`verify` see what was attempted; a
-        # partial batch returns the record (CLI exit 6), a total failure raises (exit 1).
-        note = (f"{notes}\n" if notes else "") + "copy errors: " + "; ".join(errors[:25])
-        deployment = _store(db, did, host_id, addon, dest_root, [e for _, _, e in resolved], "failed", note)
-        if len(errors) == len(items):
-            raise DeployError(f"deploy {did} to {host_id}: all copies failed:\n" + "\n".join(errors[:25]))
+        if errors:
+            # Keep a record even on failure so `deploy list`/`verify` see what was attempted; a
+            # partial batch returns the record (CLI exit 6), a total failure raises (exit 1).
+            note = (f"{notes}\n" if notes else "") + "copy errors: " + "; ".join(errors[:25])
+            deployment = _store(
+                db, did, host_id, addon, dest_root, [e for _, _, e in resolved], "failed", note, effective_owner
+            )
+            if len(errors) == len(items):
+                raise DeployError(f"deploy {did} to {host_id}: all copies failed:\n" + "\n".join(errors[:25]))
+            return deployment
+
+        entries = [e for _, _, e in resolved]
+        status = "pushed"
+        if verify:
+            status = _verify_entries(host, dest_root, entries)
+        deployment = _store(db, did, host_id, addon, dest_root, entries, status, notes, effective_owner)
+        if status == "failed":
+            raise DeployError(f"deploy {did} to {host_id}: MD5 verification failed for some files")
         return deployment
-
-    entries = [e for _, _, e in resolved]
-    status = "pushed"
-    if verify:
-        status = _verify_entries(host, dest_root, entries)
-    deployment = _store(db, did, host_id, addon, dest_root, entries, status, notes)
-    if status == "failed":
-        raise DeployError(f"deploy {did} to {host_id}: MD5 verification failed for some files")
-    return deployment
+    finally:
+        # Always release the lease the server took for this push — including on failure.
+        if took_lease:
+            _release_lease(db, host_id, effective_owner)
 
 
 def _verify_entries(host: m.Host, dest_root: str, entries: list[m.DeployEntry]) -> str:
@@ -256,11 +302,12 @@ def _store(
     entries: list[m.DeployEntry],
     status: str,
     notes: str | None,
+    owner: str | None = None,
 ) -> m.Deployment:
     with db.writer() as conn, conn:
         conn.execute(
-            "INSERT INTO deployments (id, host_id, addon, dest_root, entries, status, notes) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (did, host_id, addon, dest_root, json.dumps([e.model_dump() for e in entries]), status, notes),
+            "INSERT INTO deployments (id, host_id, addon, dest_root, entries, status, notes, owner) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (did, host_id, addon, dest_root, json.dumps([e.model_dump() for e in entries]), status, notes, owner),
         )
     return get_deployment(db, did)

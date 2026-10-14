@@ -636,9 +636,17 @@ def create_mcp_server(db: Database, workspace: Path | None = None) -> MCPServer:
         parallel: Annotated[int, Field(ge=1, le=16)] = 1,
         dry_run: bool = False,
         verify: Annotated[bool, Field(description="Re-check MD5s on the host after copying")] = True,
+        owner: Annotated[
+            str | None,
+            Field(description="Your host-lock owner if you already hold the lease (the push reuses it)"),
+        ] = None,
     ) -> m.Deployment:
         """Copy files to a host and verify what landed (Get-FileHash over SSH). Returns a deploy id whose
-        entries carry the server-checked md5 + verified flags. Call deploy_verify later to re-check."""
+        entries carry the server-checked md5 + verified flags. Call deploy_verify later to re-check.
+
+        The push takes the host lease for the copy+verify window: a host held by another owner is a
+        conflict (pass that owner if it is you), a free host is claimed as 'deploy:<id>' and released
+        when the copy finishes."""
         return _runs(
             lambda: deploys.push(
                 db,
@@ -649,6 +657,7 @@ def create_mcp_server(db: Database, workspace: Path | None = None) -> MCPServer:
                 parallel=parallel,
                 dry_run=dry_run,
                 verify=verify,
+                owner=owner,
             )
         )
 

@@ -308,6 +308,59 @@ def test_deploy_missing_local_file(bdb):
         deploys.push(bdb, "desktop-pc", "C:/dst", [{"path": "x", "local": "/no/such/file"}])
 
 
+# ------------------------------------------------------------- deploy leases
+def test_deploy_push_blocked_by_another_owner_copies_nothing(bdb, tmp_path, monkeypatch):
+    """A host a fresh lock already holds is a conflict: no lease is taken, nothing is copied."""
+    local = _local(tmp_path, "a.js", b"code")
+    calls: list = []
+    monkeypatch.setattr(deploys.subprocess, "run", fake_ssh({}, calls=calls))
+    hosts.claim_host(bdb, "desktop-pc", "ws/other")
+    with pytest.raises(hosts.HostLocked):
+        deploys.push(bdb, "desktop-pc", "C:/dst", [{"path": "a.js", "local": str(local)}])
+    assert calls == []  # the copy never ran
+    assert hosts.get_host(bdb, "desktop-pc").lock.owner == "ws/other"  # untouched
+    assert deploys.list_deployments(bdb) == []
+
+
+def test_deploy_push_free_host_takes_and_releases_the_lease(bdb, tmp_path, monkeypatch):
+    local = _local(tmp_path, "b.js", b"code")
+    remote = "C:/dst/b.js"
+    monkeypatch.setattr(deploys.subprocess, "run", fake_ssh({remote: md5_file(local)}))
+    seen: dict = {}
+    real_claim = hosts.claim_host
+
+    def spy_claim(db, host_id, owner, **kw):
+        seen["owner"] = owner
+        return real_claim(db, host_id, owner, **kw)
+
+    monkeypatch.setattr(deploys.hosts, "claim_host", spy_claim)
+    deploy = deploys.push(bdb, "desktop-pc", "C:/dst", [{"path": "b.js", "local": str(local)}])
+    assert deploy.status == "verified"
+    assert seen["owner"].startswith("deploy:") and deploy.owner == seen["owner"]
+    assert hosts.get_host(bdb, "desktop-pc").lock is None  # released after the copy window
+
+
+def test_deploy_push_owner_holding_the_lease_proceeds_without_releasing(bdb, tmp_path, monkeypatch):
+    local = _local(tmp_path, "c.js", b"code")
+    remote = "C:/dst/c.js"
+    monkeypatch.setattr(deploys.subprocess, "run", fake_ssh({remote: md5_file(local)}))
+    hosts.claim_host(bdb, "desktop-pc", "ws/tester")
+    deploy = deploys.push(
+        bdb, "desktop-pc", "C:/dst", [{"path": "c.js", "local": str(local)}], owner="ws/tester"
+    )
+    assert deploy.status == "verified" and deploy.owner == "ws/tester"
+    lock = hosts.get_host(bdb, "desktop-pc").lock
+    assert lock is not None and lock.owner == "ws/tester"  # the caller's lease is kept
+
+
+def test_deploy_push_releases_the_lease_even_on_failure(bdb, tmp_path, monkeypatch):
+    local = _local(tmp_path, "d.js", b"code")
+    monkeypatch.setattr(deploys.subprocess, "run", fake_ssh({}, fail_scp=True))
+    with pytest.raises(deploys.DeployError):
+        deploys.push(bdb, "desktop-pc", "C:/dst", [{"path": "d.js", "local": str(local)}])
+    assert hosts.get_host(bdb, "desktop-pc").lock is None
+
+
 # ------------------------------------------------------------------ facades: MCP
 def test_mcp_build_and_deploy_flow(bdb, tmp_path, monkeypatch):
     payload = "7 compiled, 0 failed\r\n".encode("utf-16")
@@ -353,6 +406,36 @@ def test_mcp_build_start_unknown_host(bdb):
     assert result.is_error and "unknown host" in result.content[0].text
 
 
+def test_mcp_deploy_push_respects_the_host_lease(bdb, tmp_path, monkeypatch):
+    local = _local(tmp_path, "m.js", b"code")
+    remote = "C:/dst/m.js"
+    monkeypatch.setattr(deploys.subprocess, "run", fake_ssh({remote: md5_file(local)}))
+    hosts.claim_host(bdb, "desktop-pc", "ws/tester")
+    server = create_mcp_server(bdb)
+
+    async def main():
+        async with Client(server) as c:
+            blocked = await c.call_tool(
+                "deploy_push",
+                {"host_id": "desktop-pc", "dest_root": "C:/dst", "files": [{"path": "m.js", "local": str(local)}]},
+            )
+            ok = await c.call_tool(
+                "deploy_push",
+                {
+                    "host_id": "desktop-pc",
+                    "dest_root": "C:/dst",
+                    "files": [{"path": "m.js", "local": str(local)}],
+                    "owner": "ws/tester",
+                },
+            )
+            return blocked, ok
+
+    blocked, ok = anyio.run(main)
+    assert blocked.is_error and "locked" in blocked.content[0].text.lower()
+    assert not ok.is_error and ok.structured_content["status"] == "verified"
+    assert ok.structured_content["owner"] == "ws/tester"
+
+
 # ------------------------------------------------------------------ facades: HTTP
 @pytest.fixture
 def client(bdb):
@@ -389,6 +472,19 @@ def test_api_build_locked_is_409(bdb, client, monkeypatch):
     monkeypatch.setattr(builds.subprocess, "Popen", fake_popen(rc=0))
     r = client.post("/api/hosts/desktop-pc/builds", json={"command": "compile"})
     assert r.status_code == 409 and r.json()["host_locked"]
+
+
+def test_api_deploy_locked_is_409(bdb, client, tmp_path, monkeypatch):
+    local = _local(tmp_path, "z.js", b"x")
+    calls: list = []
+    monkeypatch.setattr(deploys.subprocess, "run", fake_ssh({}, calls=calls))
+    hosts.claim_host(bdb, "desktop-pc", "ws/other")
+    r = client.post(
+        "/api/deploys",
+        json={"host_id": "desktop-pc", "dest_root": "C:/dst", "files": [{"path": "z.js", "local": str(local)}]},
+    )
+    assert r.status_code == 409 and r.json()["host_locked"]
+    assert calls == [] and deploys.list_deployments(bdb) == []
 
 
 # ------------------------------------------------------------------ facades: CLI

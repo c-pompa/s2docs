@@ -458,6 +458,11 @@ class DeployIn(BaseModel):
     dry_run: bool = False
     verify: bool = True
     notes: str | None = None
+    owner: str | None = Field(
+        default=None,
+        description="Your host-lock owner if you already hold the lease; a free host is claimed as "
+        "'deploy:<id>' for the copy and released afterwards",
+    )
 
 
 @router.post("/deploys", response_model=m.Deployment, status_code=201)
@@ -472,6 +477,7 @@ def push_deploy(body: DeployIn, db: Db):
         dry_run=body.dry_run,
         verify=body.verify,
         notes=body.notes,
+        owner=body.owner,
     )
 
 

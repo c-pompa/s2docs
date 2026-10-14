@@ -18,8 +18,8 @@ GATES = {
     "(console_transcript / file_hash / pixel_diff / screenshot / other) — notes alone don't pass",
     "host_claimed": "the project's `host_id` input is locked by this project's owner "
     "('project:<id>') — claimed with claim_host, checked server-side",
-    "deploy_verified": "the deployment recorded for the project's `host_id` (the id in the step's "
-    "artifacts, else the host's latest deployment) is `verified` — MD5s re-checked on the host by deploy_push",
+    "deploy_verified": "the deployment named as an artifact of the step (the id from deploy_push) belongs "
+    "to the project's `host_id` and is `verified` — MD5s re-checked on the host by deploy_push",
 }
 
 

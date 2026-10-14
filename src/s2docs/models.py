@@ -534,6 +534,11 @@ class Deployment(BaseModel):
     dest_root: str
     entries: list[DeployEntry] = []
     status: DeployStatus
+    owner: str | None = Field(
+        default=None,
+        description="host-lock owner effective for this push: 'deploy:<id>' when the server took the "
+        "lease itself, else the caller's owner whose lease was reused",
+    )
     notes: str | None = None
     created_at: str
     updated_at: str

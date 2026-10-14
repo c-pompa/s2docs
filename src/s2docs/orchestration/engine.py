@@ -424,24 +424,31 @@ class Orchestrator:
                 )
             return
         if gate == "deploy_verified":
-            # Wire the gate to the deploy registry: a deployment to the project's host must be `verified`
-            # (deploy_push re-checked the MD5s on the host). The deploy id is taken from the step's
-            # artifacts when present, else the host's latest deployment.
+            # Wire the gate to the deploy registry: the deployment named as an artifact of this step
+            # must exist, belong to the project's host and be `verified` (deploy_push re-checked the
+            # MD5s on the host). There is no latest-for-host fallback — the id from deploy_push must be
+            # recorded on the step, so a stale or unrelated deployment can never satisfy the gate.
             host_id = (project.inputs or {}).get("host_id")
             if not host_id:
                 raise GateFailed("gate deploy_verified needs a `host_id` input on the project")
             deploy_id = next((a for a in artifacts if _DEPLOY_ID_RE.match(a)), None)
-            try:
-                deployment = (
-                    deploys.get_deployment(self.db, deploy_id)
-                    if deploy_id
-                    else deploys.latest_for_host(self.db, host_id)
+            if deploy_id is None:
+                raise GateFailed(
+                    "gate deploy_verified needs the deployment id from deploy_push recorded as an artifact "
+                    "of this step (e.g. artifacts=['d-1a2b3c4d'])"
                 )
+            try:
+                deployment = deploys.get_deployment(self.db, deploy_id)
             except NotFound as exc:
                 raise GateFailed(
-                    f"no deployment to verify for host {host_id}: push one with deploy_push and record its "
-                    "id as an artifact of this step"
+                    f"no deployment {deploy_id!r}: push one with deploy_push and record its id as an "
+                    "artifact of this step"
                 ) from exc
+            if deployment.host_id != host_id:
+                raise GateFailed(
+                    f"deployment {deployment.id} is on host {deployment.host_id!r}, not this project's "
+                    f"{host_id!r}"
+                )
             if deployment.status != "verified":
                 raise GateFailed(
                     f"deployment {deployment.id} on {host_id} is {deployment.status!r}, not 'verified' — "

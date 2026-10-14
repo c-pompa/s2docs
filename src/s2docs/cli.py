@@ -433,6 +433,7 @@ def _cmd_deploy(args: argparse.Namespace) -> int:
                 parallel=args.parallel,
                 dry_run=args.dry_run,
                 verify=not args.no_verify,
+                owner=args.owner,
             )
             _emit(args, {"deployment": deploy.model_dump()}, _human_deploy(deploy))
             return EXIT_PARTIAL if deploy.status == "failed" else EXIT_OK
@@ -675,6 +676,10 @@ def main(argv: list[str] | None = None) -> int:
     q.add_argument("--parallel", type=int, default=1, help="Concurrent transfers")
     q.add_argument("--dry-run", action="store_true", help="Resolve entries without copying")
     q.add_argument("--no-verify", action="store_true", help="Skip the post-copy MD5 check")
+    q.add_argument(
+        "--owner",
+        help="Your host-lock owner if you already hold the lease (a free host is claimed as deploy:<id>)",
+    )
     q = dc.add_parser("verify", help="Re-check a deployment's MD5s on the host")
     q.add_argument("deploy_id", nargs="?", help="Deploy id (or use --host for the latest)")
     q.add_argument("--host")
