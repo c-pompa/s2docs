@@ -157,6 +157,22 @@ def _cmd_stats(_: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_review(args: argparse.Namespace) -> int:
+    """Scope a branch diff into per-area reviewer briefs (read-only git client)."""
+    from s2docs import review
+
+    try:
+        specs = review.parse_area_specs(args.area or [])
+        scope = review.build_scope(repo=args.repo or os.getcwd(), base=args.base, branch=args.branch, area_specs=specs)
+    except review.ReviewError as exc:
+        return _fail(str(exc), EXIT_ERROR)
+    if getattr(args, "json", False):
+        print(json.dumps({"schema": "s2docs/v1", **scope.as_dict()}))
+    else:
+        print(review.render_markdown(scope))
+    return EXIT_OK
+
+
 def _cmd_prompt(args: argparse.Namespace) -> int:
     from s2docs.db.repository import Repository
     from s2docs.prompts import render_prompt
@@ -733,6 +749,19 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("name")
     p.add_argument("arg", nargs="*", help="key=value")
     p.set_defaults(fn=_cmd_prompt)
+
+    p = sub.add_parser("review", help="Scope a branch diff into per-area reviewer briefs (read-only git client)")
+    p.add_argument("branch", help="Branch to review, e.g. ws/my-feature")
+    p.add_argument("--repo", help="Repository path (default: cwd)")
+    p.add_argument("--base", default="main", help="Base branch to diff against (default: main)")
+    p.add_argument(
+        "--area",
+        action="append",
+        metavar="NAME:GLOB",
+        help="Assign files matching GLOB to area NAME (repeatable; last match wins)",
+    )
+    p.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="Emit JSON instead of markdown")
+    p.set_defaults(fn=_cmd_review)
 
     p = sub.add_parser("host", help="Test/build host registry and locks (JSON output)")
     hc = p.add_subparsers(dest="host_cmd", required=True)
