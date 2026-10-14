@@ -576,7 +576,7 @@ def _human_job(job) -> list[str]:
     out.append(f"  events: {len(job.events)}  links: {len(job.links)}  artifacts: {len(job.artifacts)}")
     if job.summary:
         for key in ("what", "why", "learned", "next"):
-            out.append(f"  {key}: {job.summary.get(key, '')}")
+            out.append(f"  {key}: {getattr(job.summary, key, '')}")
     return out
 
 
