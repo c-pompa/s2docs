@@ -74,6 +74,7 @@ uv run s2docs mcp                     # MCP over stdio
 - **Hosts** (`#/hosts`) — the registry plus live lock state: shell, GPU (from the last probe), how long ago it was probed, and the current lock owner with fresh/stale + heartbeat age, its **phase** (what the owner is doing) and a **STUCK** badge. A lock is STUCK when its heartbeat is fresh but its phase has not moved for longer than the server's threshold — liveness is not progress, so a worker that heartbeats faithfully while its compile hangs still shows up. Clicking a host opens `#/hosts/<id>` with its facts JSON, **lock history** (claim / takeover / release / phase-change events) and its recent builds, deployments and test runs. Read-only; auto-refreshes every 5 s while open.
 - **Activity** (`#/activity`) — the page to watch instead of tailing logs: a **Now** section (the running test run — the same `name / step / state / elapsed` fields as the in-game TEST STATUS HUD strip — and active/queued build runs, freshest first), a **By host** section grouping every recent build run, test run and deployment under the host it ran on, and a collapsed full history. Auto-refreshes every 5 s while a run is active, 15 s when idle.
 - **Orchestration** (`#/<game>/projects`) — the multi-step **orchestration DAGs** (distinct from runs): each project opens to a step-level view with a dependency graph, and per step its state, gate, evidence counts, updated time and notes. For the build/test/deploy runs those steps drive, use Activity.
+- **Jobs** (`#/jobs`) — the job ledger + queue: one record per requested `test`/`demo`/`final` run (intake, timeline, screenshots/logs, links, and a mandatory close-out summary). A per-host queue board (running on top, then queued by position, error/crash counts in red); `#/jobs/<id>` shows the intake, the screenshot gallery, linked records and the summary card (first on a finished job). Jobs never claim the host lease — the build/test/deploy tools still do; a job links to them. See `docs/TEST_JOBS.md`.
 
 **Activity is service-fed.** A row appears on that page only when work goes through the s2docs build / test / deploy services (`build_start` / `test_start` / `deploy_push` over MCP, or the equivalent `s2docs` CLI) — it is *not* a view of any CS2 that happens to be running anywhere, so an empty page means nothing has been recorded yet, not that the page is broken; the empty state says so and points at the commands to start something. All these pages read the existing JSON API (`/api/hosts`, `/api/hosts/{id}/locks`, `/api/builds`, `/api/deploys`, `/api/test-runs`, `/api/projects`, `/api/projects/{id}`, `/api/evidence`); nothing there can mutate a host or a run.
 
@@ -161,6 +162,16 @@ CLI: `s2docs build start|status|log|wait|cancel|list` and `s2docs deploy push|ve
 | `test_status`, `list_test_runs` | One run (or the current active run) and recent runs, optionally by state |
 
 CLI: `s2docs evidence add|list|show` and `s2docs test start|step|finish|clear|status|list`. HTTP: `/api/evidence`, `/api/evidence/{id}`, `/api/test-runs` (+ `/current`, `/{id}/step|finish|clear`).
+
+| Job tools | |
+|---|---|
+| `job_enqueue` | Enqueue a job (validated intake) — the `test`/`demo`/`final` run record with its pass criterion |
+| `job_list`, `job_get`, `job_next` | Jobs (newest first, with error/crash counts), one job with its timeline/links/artifacts, and the head of a host's queue when its lease is free |
+| `job_assign`, `job_start`, `job_event` | Set host/queue order, queued → running, and append timeline events (a `phase` updates the job; `crash`/`error` carry a log tail) |
+| `job_attach`, `job_request_screenshot` | Copy a local file into the job's artifacts (append-only), or ask the runner for a screenshot |
+| `job_link`, `job_finish`, `job_cancel` | Attach a test run/build/deploy/evidence/project, close out (all four summary fields required), or cancel |
+
+CLI: `s2docs job enqueue|list|show|next|start|event|attach|shot-request|finish|cancel|watch` (its own exit codes: 2 validation, 3 conflict, 4 not found). HTTP: `/api/jobs` (+ `/next`, `/{id}`, `/{id}/assign|start|event|link|screenshot-request|finish|cancel`, `/{id}/artifacts/{name}`), `GET /api/artifacts/{job}/{name}`. Every job event also appends `<data_dir>/job_events.jsonl` (`/api/health` → `job_events_jsonl`). Full notes: `docs/TEST_JOBS.md`.
 
 | Orchestration tools | |
 |---|---|
