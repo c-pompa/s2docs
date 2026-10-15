@@ -536,7 +536,7 @@ function jobDetail(j) {
     ? `<h2>Screenshots</h2><div class="grid">${shots
         .map(
           (a) =>
-            `<figure class="card" style="margin:0"><img src="${esc(a.url)}" alt="${esc(a.name)}" style="width:100%;border-radius:var(--r-sm)">` +
+            `<figure class="card" style="margin:0"><img src="${esc(a.url)}" alt="${esc(a.name)}" style="width:100%;border-radius:var(--r)">` +
             `<figcaption class="muted mono shot-cap">${esc(a.name)}<br>${esc(a.md5)}</figcaption></figure>`,
         )
         .join("")}</div>`
@@ -607,23 +607,26 @@ async function api(path, params = {}) {
 
 // ------------------------------------------------------------------ routing
 // The sidebar, clustered by intent instead of one flat list of 17 links:
+//   Reference — the indexed game data you look things up in (the app's primary purpose)
 //   Workflow  — the run pipeline, read top-down as its lifecycle (plan → queue → run → machines)
-//   Reference — the indexed game data you look things up in
 //   Authoring — offline helpers used while writing scripts/configs
 //   Index     — install-wide numbers
-// Ordering the Workflow stages as a lifecycle is the point: Orchestration plans the work, Jobs is the
-// human-facing queue/ledger for it, Activity is the live record of the runs it produced, and Hosts are
-// the machines those runs hold. Validate is NOT a stage — it checks a script/cfg offline, before
-// anything is planned or queued — so it lives under Authoring and is offered from the pipeline strip.
+// Reference leads on purpose: this install is first of all a docs index, and leading with it also keeps
+// the top of the sidebar where it has always been, so grouping is additive rather than a re-learn. The
+// Workflow stages are ordered as a lifecycle because that IS their relation: Orchestration plans the
+// work, Jobs is the human-facing queue/ledger for it, Activity is the live record of the runs it
+// produced, and Hosts are the machines those runs hold. Validate is NOT a stage — it checks a
+// script/cfg offline, before anything is planned or queued — so it sits under Authoring and is offered
+// from the pipeline strip on the workflow pages.
 const NAV_GROUPS = [
-  ["Workflow", [
-    ["projects", "Orchestration"], ["jobs", "Jobs"], ["activity", "Activity"], ["hosts", "Hosts"],
-  ], "plan → queue → live runs → machines"],
   ["Reference", [
     ["search", "Search"], ["convars", "ConVars & Commands"], ["entities", "Entities (Hammer)"],
     ["schema", "Schema"], ["events", "Game Events"], ["script", "cs_script API"], ["examples", "Examples"],
     ["pulse", "Pulse"], ["docs", "Docs (source2.wiki)"], ["diff", "Build Diff"],
   ]],
+  ["Workflow", [
+    ["projects", "Orchestration"], ["jobs", "Jobs"], ["activity", "Activity"], ["hosts", "Hosts"],
+  ], "plan → queue → live runs → machines"],
   ["Authoring", [
     ["validate", "Validate"], ["prompts", "Prompts"],
   ]],
