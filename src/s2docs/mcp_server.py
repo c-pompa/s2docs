@@ -267,8 +267,11 @@ def create_mcp_server(db: Database, workspace: Path | None = None) -> MCPServer:
         """Show what changed between two ingested builds, at member granularity: one row per added/
         removed/changed schema field, entity member, game-event field, script symbol, convar, Pulse
         binding or Hammer class. Each entry carries `group` (the parent class/entity/event/library) so
-        members cluster under it; `before`/`after` hold only that member's own value. Use it after a
-        game patch to find code or configs that might break."""
+        members cluster under it; `before`/`after` hold only that member's own value. `counts` gives the
+        exact per-section added/removed/changed breakdown ({section: {added, removed, changed}}), taken
+        BEFORE the per-section `limit` cap, so it stays true even when `sections` is truncated to the
+        first `limit` entries; `totals[section]` is the sum of that section's three counts. Use it after
+        a game patch to find code or configs that might break."""
         check_game(game)
         return run(lambda r: r.diff_builds(game, from_build, to_build))
 
