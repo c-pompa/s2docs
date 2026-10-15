@@ -536,7 +536,7 @@ function jobDetail(j) {
     ? `<h2>Screenshots</h2><div class="grid">${shots
         .map(
           (a) =>
-            `<figure class="card" style="margin:0"><img src="${esc(a.url)}" alt="${esc(a.name)}" style="width:100%;border-radius:6px">` +
+            `<figure class="card" style="margin:0"><img src="${esc(a.url)}" alt="${esc(a.name)}" style="width:100%;border-radius:var(--r-sm)">` +
             `<figcaption class="muted mono shot-cap">${esc(a.name)}<br>${esc(a.md5)}</figcaption></figure>`,
         )
         .join("")}</div>`
@@ -606,15 +606,54 @@ async function api(path, params = {}) {
 }
 
 // ------------------------------------------------------------------ routing
-const SECTIONS = [
-  ["search", "Search"], ["convars", "ConVars & Commands"], ["entities", "Entities (Hammer)"],
-  ["schema", "Schema"], ["events", "Game Events"], ["script", "cs_script API"], ["examples", "Examples"],
-  ["pulse", "Pulse"], ["docs", "Docs (source2.wiki)"], ["validate", "Validate"], ["projects", "Orchestration"],
-  ["hosts", "Hosts"], ["jobs", "Jobs"], ["activity", "Activity"], ["diff", "Build Diff"], ["prompts", "Prompts"],
-  ["stats", "Stats"],
+// The sidebar, clustered by intent instead of one flat list of 17 links:
+//   Workflow  — the run pipeline, read top-down as its lifecycle (plan → queue → run → machines)
+//   Reference — the indexed game data you look things up in
+//   Authoring — offline helpers used while writing scripts/configs
+//   Index     — install-wide numbers
+// Ordering the Workflow stages as a lifecycle is the point: Orchestration plans the work, Jobs is the
+// human-facing queue/ledger for it, Activity is the live record of the runs it produced, and Hosts are
+// the machines those runs hold. Validate is NOT a stage — it checks a script/cfg offline, before
+// anything is planned or queued — so it lives under Authoring and is offered from the pipeline strip.
+const NAV_GROUPS = [
+  ["Workflow", [
+    ["projects", "Orchestration"], ["jobs", "Jobs"], ["activity", "Activity"], ["hosts", "Hosts"],
+  ], "plan → queue → live runs → machines"],
+  ["Reference", [
+    ["search", "Search"], ["convars", "ConVars & Commands"], ["entities", "Entities (Hammer)"],
+    ["schema", "Schema"], ["events", "Game Events"], ["script", "cs_script API"], ["examples", "Examples"],
+    ["pulse", "Pulse"], ["docs", "Docs (source2.wiki)"], ["diff", "Build Diff"],
+  ]],
+  ["Authoring", [
+    ["validate", "Validate"], ["prompts", "Prompts"],
+  ]],
+  ["Index", [
+    ["stats", "Stats"],
+  ]],
 ];
+// Flat, in sidebar order — the route default and the active highlight use this.
+const SECTIONS = NAV_GROUPS.flatMap(([, items]) => items);
 // Pages that are about the whole install (hosts/runs/jobs), not one game — routed as #/<section>, no game prefix.
 const GLOBAL_SECTIONS = new Set(["hosts", "jobs", "activity"]);
+
+// The workflow pages are stages of ONE loop, so each of them carries this strip: the whole pipeline in
+// order with the current stage lit, plus the offline Validate check on the side. It answers "how do
+// these relate?" on the page itself, and every stage is one click from every other.
+const WORKFLOW_STAGES = [
+  ["projects", "Plan", "Orchestration", "multi-step DAG + quality gates; the agent works it step by step"],
+  ["jobs", "Queue", "Jobs", "one record per requested run: intake, timeline, verdicts, close-out summary"],
+  ["activity", "Run", "Activity", "live build/test/deploy runs across all hosts, service-fed"],
+  ["hosts", "Machines", "Hosts", "the hosts themselves and who holds each one's lease right now"],
+];
+const sectionHref = (id) => (GLOBAL_SECTIONS.has(id) ? `#/${id}` : `#/${enc(state.game)}/${id}`);
+function pipelineStrip(active) {
+  const stages = WORKFLOW_STAGES.map(([id, step, label, tip], i) =>
+    `<a class="pipe-a ${id === active ? "active" : ""}" href="${sectionHref(id)}" title="${esc(tip)}">` +
+    `<span class="pipe-n">${i + 1}</span> ${esc(step)} · ${esc(label)}</a>`).join("");
+  const check = `<a class="pipe-a ${active === "validate" ? "active" : ""}" href="${sectionHref("validate")}" ` +
+    `title="check a cs_script / .cfg against this build offline — before it is planned or queued">✓ Validate</a>`;
+  return `<div class="pipe"><span class="pipe-t">Workflow</span>${stages}<span class="pipe-sep"></span>${check}</div>`;
+}
 
 function parseHash() {
   const [path, query = ""] = location.hash.replace(/^#\/?/, "").split("?");
@@ -632,11 +671,17 @@ const link = (parts, label, params = {}) => {
 
 function renderNav(active) {
   const g = state.games.find((x) => x.id === state.game);
-  $("#nav").innerHTML = SECTIONS.map(([id, label]) => {
+  const item = ([id, label]) => {
     const disabled = (id === "script" || id === "examples") && !g?.script_api;
-    const href = GLOBAL_SECTIONS.has(id) ? `#/${id}` : `#/${enc(state.game)}/${id}`;
+    const href = sectionHref(id);
     return `<a href="${href}" class="${id === active ? "active" : ""} ${disabled ? "disabled" : ""}">${esc(label)}</a>`;
-  }).join("");
+  };
+  $("#nav").innerHTML = NAV_GROUPS.map(
+    ([title, items, hint]) =>
+      `<div class="nav-group">${esc(title)}</div>${hint ? `<div class="nav-hint">${esc(hint)}</div>` : ""}${items
+        .map(item)
+        .join("")}`,
+  ).join("");
   $("#build").textContent = g?.current_build ? `build ${g.current_build} · ${g.patch_version || ""}` : "not indexed";
 }
 
@@ -1249,7 +1294,7 @@ const ROUTES = {
             <textarea name="notes" rows="2" placeholder="notes / evidence"></textarea>
             <p>${["in_progress", "done", "blocked", "skipped"].map((st) => `<button name="status" value="${st}">${st}</button>`).join(" ")}</p>
             <div class="result"></div></form></div>`).join("");
-      return `<p>${link([state.game, "projects"], "← Orchestration")}</p><h1>${esc(p.title)}</h1>
+      return `<p>${link([state.game, "projects"], "← Orchestration")}</p><h1>${esc(p.title)}</h1>${pipelineStrip("projects")}
         <p>${statusBadge(p.status)}${badge(p.workflow)}${badge(p.game)}${p.addon ? badge("addon: " + p.addon) : ""} <span class="mono muted">${esc(p.id)}</span></p>
         <p class="muted">This is an <strong>orchestration DAG</strong> — the server's multi-step plan — not a build/test run.
           For the runs these steps drive on hosts, see ${link(["activity"], "Activity")}.</p>
@@ -1263,7 +1308,7 @@ const ROUTES = {
     }
     const [projects, workflows] = await Promise.all([api("/projects"), api("/workflows")]);
     const wfOptions = workflows.filter((w) => w.games.includes(state.game)).map((w) => [w.id, w.title]);
-    return `<h1>Orchestration</h1><p class="muted">Multi-step <strong>orchestration DAGs</strong>: the server holds the plan and the
+    return `<h1>Orchestration</h1>${pipelineStrip("projects")}<p class="muted">Multi-step <strong>orchestration DAGs</strong>: the server holds the plan and the
       quality gates, your agent does the work. These are plans, not runs — for the build/test/deploy runs they drive, see
       ${link(["activity"], "Activity")}. Start one here or from an MCP client (prompt <code>orchestrate</code>), then hand
       the project id to your agent. Click a project to open its step-level view: step states, gates, evidence and notes.</p>
@@ -1305,7 +1350,7 @@ const ROUTES = {
           <h2>Recent test runs (${tests.length})</h2>${testRows(tests.slice(0, 15))}`;
       };
       liveBody("#live", body);
-      return `<p>${link(["hosts"], "← Hosts")}</p><h1 class="mono">${esc(hostId)}</h1><div id="live">${await body()}</div>`;
+      return `<p>${link(["hosts"], "← Hosts")}</p><h1 class="mono">${esc(hostId)}</h1>${pipelineStrip("hosts")}<div id="live">${await body()}</div>`;
     }
     const body = async () => {
       const hosts = await api("/hosts");
@@ -1322,7 +1367,7 @@ const ROUTES = {
         .join("")}</table>`;
     };
     liveBody("#live", body);
-    return `<h1>Hosts</h1><p class="muted">Test/build hosts and who is driving each right now (owner, fresh vs stale, heartbeat age). Auto-refreshes every 5 s. Click a host for its facts, lock history and recent activity.</p><div id="live">${await body()}</div>`;
+    return `<h1>Hosts</h1>${pipelineStrip("hosts")}<p class="muted">Test/build hosts and who is driving each right now (owner, fresh vs stale, heartbeat age). Auto-refreshes every 5 s. Click a host for its facts, lock history and recent activity.</p><div id="live">${await body()}</div>`;
   },
 
   // Game-independent: the live view a person watches to answer "what is running right now".
@@ -1408,7 +1453,7 @@ const ROUTES = {
     };
     // Fast (5 s) while a run is active; slow (15 s) when idle so an idle install isn't hammered.
     liveBody("#live", body, () => (state.activityActive ? 5000 : 15000));
-    return `<h1>Activity</h1><p class="muted">What is running right now across all hosts — build runs, test runs and deployments, without SSHing anywhere.
+    return `<h1>Activity</h1>${pipelineStrip("activity")}<p class="muted">What is running right now across all hosts — build runs, test runs and deployments, without SSHing anywhere.
       This view is <strong>service-fed</strong>: rows appear when work goes through the s2docs build/test/deploy services
       (MCP <code>build_start</code>/<code>test_start</code>/<code>deploy_push</code>, or the CLI), <em>not</em> from any CS2 running anywhere.
       Test-run rows mirror the in-game HUD strip (name / step / state / elapsed). Every row also carries its
@@ -1420,7 +1465,7 @@ const ROUTES = {
     if (jobId) {
       const body = async () => jobDetail(await api(`/jobs/${enc(jobId)}`));
       liveBody("#live", body, () => 5000);
-      return `<p>${link(["jobs"], "← Jobs")}</p><div id="live">${await body()}</div>`;
+      return `<p>${link(["jobs"], "← Jobs")}</p>${pipelineStrip("jobs")}<div id="live">${await body()}</div>`;
     }
     const body = async () => {
       const [allJobs, hosts] = await Promise.all([api("/jobs"), api("/hosts")]);
@@ -1429,7 +1474,7 @@ const ROUTES = {
     };
     // Fast (5 s) while any job is running; slow (15 s) when the queue is idle.
     liveBody("#live", body, () => (state.jobsActive ? 5000 : 15000));
-    return `<h1>Jobs</h1><p class="muted">One record per requested run: the intake is the gate, the timeline is the
+    return `<h1>Jobs</h1>${pipelineStrip("jobs")}<p class="muted">One record per requested run: the intake is the gate, the timeline is the
       record, screenshots/logs are artifacts, and a job closes out with a mandatory summary (what / why / learned /
       next). Jobs <strong>never</strong> claim the host lease — the build/test/deploy tools still do; a job links to
       those records. The queue is per host: running on top, then queued by position. Auto-refreshes every 5 s while a
@@ -1442,7 +1487,11 @@ const ROUTES = {
       <p class="muted">Type-checked by the TypeScript compiler against this build's <code>point_script.d.ts</code>.</p>
       <form data-validate="cs-script"><textarea name="code" rows="14" class="mono" placeholder='import { Instance } from "cs_script/point_script";'></textarea>
       <p><button type="submit">Check script</button></p><div class="result"></div></form>` : "";
-    return `<h1>Validate</h1>${scriptForm}
+    return `<h1>Validate</h1>${pipelineStrip("validate")}
+      <p class="muted">Validate is the <strong>offline gate</strong>, not a stage of the run pipeline: it type-checks a
+      cs_script or a .cfg against this build's own index before anything is planned (${link([state.game, "projects"], "Orchestration")}),
+      queued (${link(["jobs"], "Jobs")}) or run on a host (${link(["activity"], "Activity")}). It touches no host and starts
+      nothing.</p>${scriptForm}
       <h2>Config (.cfg)</h2><p class="muted">Every command is checked against the indexed convars/commands for ${esc(g?.name || state.game)}.</p>
       <form data-validate="cfg"><textarea name="text" rows="10" class="mono" placeholder="sv_cheats 1&#10;mp_roundtime 3"></textarea>
       <p>${select("context", "server", [["server", "server cfg"], ["client", "client cfg"], ["any", "any"]])} <button type="submit">Check cfg</button></p>
