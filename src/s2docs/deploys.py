@@ -23,7 +23,7 @@ from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from s2docs import hosts
+from s2docs import hosts, weburls
 from s2docs import models as m
 from s2docs.builds import md5_file
 from s2docs.db.connection import Database
@@ -102,6 +102,7 @@ def _row_to_deployment(row: sqlite3.Row) -> m.Deployment:
         notes=row["notes"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
+        web_url=weburls.deploy_url(weburls.public_base_url(), row["id"]),
     )
 
 
@@ -219,6 +220,7 @@ def push(
             notes="dry-run: nothing copied",
             created_at=now,
             updated_at=now,
+            web_url=weburls.deploy_url(weburls.public_base_url(), did),
         )
 
     effective_owner, took_lease = _take_lease(db, host, host_id, owner, did)

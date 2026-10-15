@@ -10,7 +10,7 @@ from fastapi.responses import PlainTextResponse, Response
 from pydantic import BaseModel, Field
 
 from s2docs import builds as build_svc
-from s2docs import deploys, evidence, hosts, jobs, test_runs
+from s2docs import deploys, evidence, hosts, jobs, test_runs, weburls
 from s2docs import models as m
 from s2docs.build.validate_cfg import validate_cfg
 from s2docs.build.validate_script import validate_cs_script
@@ -46,14 +46,31 @@ Repo = Annotated[Repository, Depends(get_repo)]
 Game = Annotated[str, Depends(valid_game)]
 
 
+def public_base(request: Request) -> str:
+    """The web UI base URL for THIS request (S2DOCS_PUBLIC_URL, else scheme://host of the request)."""
+    return weburls.public_base_url(request)
+
+
+Base = Annotated[str, Depends(public_base)]
+
+
+def _rebased(obj, base: str, fn):
+    """Set `web_url` on a model (or every model in a list) with the request-derived base URL."""
+    for it in obj if isinstance(obj, list) else [obj]:
+        it.web_url = fn(base, it)
+    return obj
+
+
 # ---------------------------------------------------------------- meta
 @router.get("/health", response_model=m.ServerInfo)
-def health():
+def health(request: Request):
     """DB identity: which store this process serves, and which process it is.
 
     Clients compare this against the MCP `server_info` tool before writing, so the split-database
-    class of incident is detectable."""
-    return m.ServerInfo(**server_identity())
+    class of incident is detectable. `public_url` is the web UI base URL for this request."""
+    info = m.ServerInfo(**server_identity())
+    info.public_url = weburls.public_base_url(request)
+    return info
 
 
 @router.get("/stats", response_model=m.Stats)
@@ -299,8 +316,8 @@ def list_workflows():
 
 
 @router.get("/projects", response_model=list[m.ProjectSummary])
-def list_projects(orch: Orch, status: Literal["active", "done", "abandoned"] | None = None):
-    return orch.list(status)
+def list_projects(orch: Orch, base: Base, status: Literal["active", "done", "abandoned"] | None = None):
+    return _rebased(orch.list(status), base, lambda b, r: weburls.project_url(b, r.game, r.id))
 
 
 @router.post("/projects", response_model=m.ProjectBrief, status_code=201)
@@ -317,8 +334,8 @@ def start_project(body: StartProjectIn, orch: Orch):
 
 
 @router.get("/projects/{project_id}", response_model=m.Project)
-def get_project(project_id: str, orch: Orch):
-    return orch.get(project_id)
+def get_project(project_id: str, orch: Orch, base: Base):
+    return _rebased(orch.get(project_id), base, lambda b, r: weburls.project_url(b, r.game, r.id))
 
 
 @router.get("/projects/{project_id}/brief", response_model=m.ProjectBrief)
@@ -424,13 +441,15 @@ def start_build(host_id: str, body: BuildIn, db: Db):
 
 
 @router.get("/builds", response_model=list[m.BuildRun])
-def list_builds(db: Db, host_id: str | None = None, active: bool = False):
-    return build_svc.list_runs(db, host_id=host_id, active=active)
+def list_builds(db: Db, base: Base, host_id: str | None = None, active: bool = False):
+    return _rebased(
+        build_svc.list_runs(db, host_id=host_id, active=active), base, lambda b, r: weburls.build_url(b, r.id)
+    )
 
 
 @router.get("/builds/{run_id}", response_model=m.BuildRun)
-def get_build(run_id: str, db: Db):
-    return build_svc.get_run(db, run_id)
+def get_build(run_id: str, db: Db, base: Base):
+    return _rebased(build_svc.get_run(db, run_id), base, lambda b, r: weburls.build_url(b, r.id))
 
 
 @router.get("/builds/{run_id}/log", response_model=m.BuildLogTail)
@@ -482,13 +501,13 @@ def push_deploy(body: DeployIn, db: Db):
 
 
 @router.get("/deploys", response_model=list[m.Deployment])
-def list_deploys(db: Db, host_id: str | None = None):
-    return deploys.list_deployments(db, host_id=host_id)
+def list_deploys(db: Db, base: Base, host_id: str | None = None):
+    return _rebased(deploys.list_deployments(db, host_id=host_id), base, lambda b, r: weburls.deploy_url(b, r.id))
 
 
 @router.get("/deploys/{deploy_id}", response_model=m.Deployment)
-def get_deploy(deploy_id: str, db: Db):
-    return deploys.get_deployment(db, deploy_id)
+def get_deploy(deploy_id: str, db: Db, base: Base):
+    return _rebased(deploys.get_deployment(db, deploy_id), base, lambda b, r: weburls.deploy_url(b, r.id))
 
 
 @router.post("/deploys/{deploy_id}/verify", response_model=m.Deployment)
@@ -559,21 +578,23 @@ def start_test_run(body: TestRunIn, db: Db):
 
 
 @router.get("/test-runs", response_model=list[m.TestRun])
-def list_test_runs(db: Db, state: m.TestRunState | None = None, host_id: str | None = None):
-    return test_runs.list_runs(db, state=state, host_id=host_id)
+def list_test_runs(db: Db, base: Base, state: m.TestRunState | None = None, host_id: str | None = None):
+    return _rebased(
+        test_runs.list_runs(db, state=state, host_id=host_id), base, lambda b, r: weburls.test_run_url(b, r.id)
+    )
 
 
 @router.get("/test-runs/current", response_model=m.TestRun)
-def current_test_run(db: Db):
+def current_test_run(db: Db, base: Base):
     run = test_runs.current(db)
     if run is None:
         raise HTTPException(404, "no active test run")
-    return run
+    return _rebased(run, base, lambda b, r: weburls.test_run_url(b, r.id))
 
 
 @router.get("/test-runs/{run_id}", response_model=m.TestRun)
-def get_test_run(run_id: str, db: Db):
-    return test_runs.get(db, run_id)
+def get_test_run(run_id: str, db: Db, base: Base):
+    return _rebased(test_runs.get(db, run_id), base, lambda b, r: weburls.test_run_url(b, r.id))
 
 
 @router.post("/test-runs/{run_id}/step", response_model=m.TestRun)
@@ -668,11 +689,14 @@ def enqueue_job(body: JobEnqueueIn, db: Db):
 @router.get("/jobs", response_model=list[m.Job])
 def list_jobs(
     db: Db,
+    base: Base,
     status: Annotated[str | None, Query(description="A status, or 'active' = queued+running")] = None,
     host_id: str | None = None,
     limit: Annotated[int, Query(ge=1, le=500)] = 100,
 ):
-    return jobs.list_jobs(db, status=status, host_id=host_id, limit=limit)
+    return _rebased(
+        jobs.list_jobs(db, status=status, host_id=host_id, limit=limit), base, lambda b, r: weburls.job_url(b, r.id)
+    )
 
 
 @router.get("/jobs/next", response_model=m.Job)
@@ -682,8 +706,23 @@ def next_job(db: Db, host_id: Annotated[str, Query(description="Host whose queue
 
 
 @router.get("/jobs/{job_id}", response_model=m.Job)
-def get_job(job_id: str, db: Db):
-    return jobs.get(db, job_id)
+def get_job(job_id: str, db: Db, base: Base):
+    return _rebased(jobs.get(db, job_id), base, lambda b, r: weburls.job_url(b, r.id))
+
+
+@router.get("/jobs/{job_id}/screenshots", response_model=list[m.JobScreenshot])
+def job_screenshots(
+    job_id: str,
+    db: Db,
+    base: Base,
+    step: Annotated[str | None, Query(description="Filter by step id ('s4'); 'unassigned' = untagged shots")] = None,
+    reason: Annotated[str | None, Query(description="ready | periodic | verdict | request | verify")] = None,
+):
+    """The job's screenshots tied to their step and verdict, with the fields a reviewer needs."""
+    shots = jobs.screenshots(db, job_id, step=step, reason=reason)
+    for s in shots:
+        s.web_url = weburls.screenshot_url(base, job_id)
+    return shots
 
 
 @router.post("/jobs/{job_id}/assign", response_model=m.Job)

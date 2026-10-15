@@ -15,7 +15,7 @@ import secrets
 from pathlib import Path
 from string import Template
 
-from s2docs import deploys, evidence, hosts
+from s2docs import deploys, evidence, hosts, weburls
 from s2docs import models as m
 from s2docs.build import workspace as ws
 from s2docs.build.validate_cfg import validate_cfg
@@ -215,6 +215,7 @@ class Orchestrator:
                 for s in steps
             ],
             recent_events=[m.ProjectEvent(**dict(e)) for e in events],
+            web_url=weburls.project_url(weburls.public_base_url(), p["game"], p["id"]),
         )
 
     def get(self, pid: str) -> m.Project:
@@ -240,6 +241,7 @@ class Orchestrator:
                 progress=f"{r['settled'] or 0}/{r['total']}",
                 created_at=r["created_at"],
                 updated_at=r["updated_at"],
+                web_url=weburls.project_url(weburls.public_base_url(), r["game"], r["id"]),
             )
             for r in rows
         ]

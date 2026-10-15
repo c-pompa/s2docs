@@ -40,7 +40,7 @@ import time
 from pathlib import Path
 from typing import IO
 
-from s2docs import hosts
+from s2docs import hosts, weburls
 from s2docs import models as m
 from s2docs.config import get_settings
 from s2docs.db.connection import Database
@@ -193,6 +193,7 @@ def _row_to_run(row: sqlite3.Row) -> m.BuildRun:
         artifacts=[m.BuildArtifact(**a) for a in json.loads(row["artifacts"])],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
+        web_url=weburls.build_url(weburls.public_base_url(), row["id"]),
     )
 
 

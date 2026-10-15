@@ -568,9 +568,9 @@ def test_web_jobs_route_and_static_assets(client):
     assert "data-job-verdict" in js and "function bindJobVerdict(" in js
     assert "/verdict" in js and "data-deadline" in js and "function updateCountdowns(" in js
     assert 'name="verdict" value="pass"' in js and 'value="fail"' in js and 'value="skip"' in js
-    # non-image artifacts render as a "Files" list with download links, under the gallery
-    assert "<h2>Files</h2>" in js and "download>" in js
-    assert js.index("<h2>Screenshots</h2>") < js.index("<h2>Files</h2>")
+    # non-image artifacts render as a "Files" list with download links, under the evidence gallery
+    assert "<h2>Files " in js and "download>" in js
+    assert js.index("<h2>Evidence ") < js.index("<h2>Files ")
     # the screenshot caption wraps its md5 and the request-screenshot input is a themed input
     css = client.get("/style.css").text
     assert ".shot-cap" in css

@@ -340,7 +340,7 @@ function jobVerifications(j) {
     }
     if (!id) continue;
     if (e.level === "milestone" && VERDICT_SET.has(e.data.verdict)) {
-      verdictBy.set(id, { verdict: e.data.verdict, source: e.data.source, notes: e.data.notes, late: e.data.late, at: e.created_at });
+      verdictBy.set(id, { verdict: e.data.verdict, source: e.data.source, notes: e.data.notes, late: e.data.late, at: e.created_at, evidence_id: e.data.evidence_id });
     } else if (e.data.verdict === "none") {
       timedOut.add(id);
     }
@@ -405,6 +405,71 @@ function jobVerifications(j) {
   });
 }
 
+// ---- Screenshots tied to steps and verdicts ----------------------------------
+// A screenshot is a `screenshot` job event. The demo driver adds data {step, step_index, step_total,
+// reason, seq, verdict:{verdict,source,confirm_id,late}, full_res, width, height}; older events carry
+// only {url, md5, bytes} and are grouped under 'unassigned' by time. This folds both shapes into one
+// list the RESULTS table, the EVIDENCE grid and the NOW card all read.
+const SHOT_REASONS = ["ready", "periodic", "verdict", "request", "verify"];
+function shotReason(s) {
+  return s.reason && SHOT_REASONS.includes(s.reason) ? s.reason : "shot";
+}
+// 24-hour HH:MM:SS in Central, for the compact captions.
+function hms(utcIso) {
+  const t = parseTs(utcIso);
+  if (Number.isNaN(t)) return "";
+  return new Intl.DateTimeFormat("en-GB", { timeZone: CT_ZONE, hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false }).format(new Date(t));
+}
+function jobScreenshots(j) {
+  const out = [];
+  let auto = 0;
+  for (const e of j.events || []) {
+    if (e.level !== "screenshot") continue;
+    const d = e.data || {};
+    if (!d.url) continue;
+    auto += 1;
+    out.push({
+      seq: typeof d.seq === "number" ? d.seq : auto,
+      step: d.step || e.phase || null,
+      step_index: typeof d.step_index === "number" ? d.step_index : null,
+      step_total: typeof d.step_total === "number" ? d.step_total : null,
+      reason: d.reason || null,
+      url: d.url,
+      md5: d.md5 || null,
+      bytes: d.bytes,
+      verdict: d.verdict && d.verdict.verdict ? d.verdict : null,
+      full_res: d.full_res,
+      width: d.width,
+      height: d.height,
+      at: e.created_at,
+      id: e.id,
+    });
+  }
+  return out;
+}
+// The full caption spec: '#seq · reason · HH:MM:SS · step', plus the verdict it was captured with.
+function shotCaption(s) {
+  const parts = [`#${s.seq}`, shotReason(s)];
+  if (s.at) parts.push(hms(s.at));
+  parts.push(s.step || "unassigned");
+  if (s.verdict) parts.push(`${s.verdict.verdict}${s.verdict.source ? " via " + s.verdict.source : ""}`);
+  return parts.join(" · ");
+}
+// One screenshot: a click-to-enlarge thumbnail. `small` drops the caption (for inline step rows).
+function shotThumb(s, small = false) {
+  const cap = shotCaption(s);
+  const cls = `shot${small ? " shot-sm" : ""}${s.reason === "verdict" ? " shot-verdict" : ""}`;
+  const title = `${cap} — click to enlarge`;
+  const img = `<img src="${esc(s.url)}" alt="${esc(cap)}" loading="lazy">`;
+  if (small) {
+    return `<button type="button" class="shot-btn ${cls}" data-shot="${esc(s.url)}" data-caption="${esc(cap)}" title="${esc(title)}" aria-label="expand screenshot #${esc(s.seq)}">${img}</button>`;
+  }
+  return `<figure class="${cls}"><button type="button" class="shot-btn" data-shot="${esc(s.url)}" data-caption="${esc(cap)}" title="${esc(title)}" aria-label="expand screenshot #${esc(s.seq)}">${img}</button>
+    <figcaption class="muted mono shot-cap">${esc(cap)}</figcaption></figure>`;
+}
+// The step a screenshot belongs to, matched to a step id (None renders as 'unassigned').
+const shotsForStep = (j, stepId) => jobScreenshots(j).filter((s) => s.step === stepId);
+
 // One stepper chip: 'k. name' + the verdict badge and its source; the current test gets a pulsing
 // accent border, a done chip carries its outcome colour, an unanswered one an amber outline.
 function vxChip(it) {
@@ -443,6 +508,47 @@ function vxCountdown(it) {
   )}" data-vx-fill${start}></span></div><span class="vx-cd mono" data-deadline="${esc(it.deadline_utc)}">…</span></div>`;
 }
 
+// ---- SETTING UP / CLEANING UP countdown phases --------------------------------
+// The demo driver posts one `info` event per setup/cleanup window while it stages the next test:
+//   { level:'info', phase:'setup'|'cleanup', message:'SETTING UP TEST k/n NAME (10 s)',
+//     data:{ countdown_s, until:'<UTC ISO>', step, step_index, step_total, name, next } }
+// jobActivePhase() returns that event only while it is the newest activity — a later step prompt or
+// a verdict supersedes it. The banner ticks down CLIENT-side from `until` (the 1 s updateCountdowns
+// ticker), so it stays live between the 5 s region re-renders.
+function jobActivePhase(j) {
+  const evs = j.events || [];
+  let last = null;
+  for (const e of evs) {
+    const prompt = e.level === "info" && e.data && "prompt" in e.data;
+    const verdict = e.level === "milestone" && e.data && VERDICT_SET.has(e.data.verdict);
+    const phase = e.level === "info" && e.data && e.data.until && (e.phase === "setup" || e.phase === "cleanup");
+    if (prompt || verdict || phase) last = { e, phase };
+  }
+  return last && last.phase ? last.e : null;
+}
+
+// The state banner: 'SETTING UP: TEST k/n NAME  8s' / 'CLEANING UP: TEST k/n -> next: …  6s'.
+function vxPhaseBanner(j) {
+  const e = jobActivePhase(j);
+  if (!e) return "";
+  const d = e.data || {};
+  const k = d.step_index != null ? d.step_index : d.step != null ? d.step : "";
+  const n = d.step_total;
+  const name = d.name || "";
+  const of = `${esc(k)}${n ? `/${esc(n)}` : ""}`;
+  const cd = `<span class="vx-phase-cd mono" data-cd-sec="${esc(d.until)}">…</span>`;
+  if (e.phase === "setup") {
+    return `<div class="vx-phase vx-phase-setup" data-vx-phase="setup" data-until="${esc(d.until)}">
+      <span class="vx-phase-kind">SETTING UP</span>
+      <span class="vx-phase-main">TEST ${of}${name ? ` <strong>${esc(name)}</strong>` : ""}</span>${cd}</div>`;
+  }
+  const tail = d.next ? `→ next: ${esc(d.next)}` : "→ finishing";
+  return `<div class="vx-phase vx-phase-cleanup" data-vx-phase="cleanup" data-until="${esc(d.until)}">
+    <span class="vx-phase-kind">CLEANING UP</span>
+    <span class="vx-phase-main">TEST ${of}</span>
+    <span class="vx-phase-next">${tail}</span>${cd}</div>`;
+}
+
 // The NOW TESTING card: the current test rendered big and distinct, with the verdict buttons.
 function nowTestingCard(j) {
   const cs = j.current_step;
@@ -455,6 +561,18 @@ function nowTestingCard(j) {
   const expect = cur.expect || cs.look_for || "";
   const hint = cs.respond_hint || "in game: type !pass / !fail / !skip plus a note in chat";
   const verdict = cur.verdict || cs.verdict || null;
+  // Screenshots for THIS test: a shot belongs to the step named by cs.phase.
+  const shots = jobScreenshots(j).filter((s) => (s.step || null) === (cs.phase || null));
+  const lastShot = shots.length ? shots[shots.length - 1] : null;
+  const camera = lastShot
+    ? `<div class="vx-camera">📷 <strong>${shots.length}</strong> shot${shots.length === 1 ? "" : "s"} this test — last ${hms(lastShot.at)} (${shotReason(lastShot)}) ${shotThumb(lastShot, true)}</div>`
+    : `<div class="vx-camera muted">📷 no screenshots yet for this test</div>`;
+  // When a verdict is recorded, link the verdict screenshot once its event arrives (match on the
+  // confirm id, else the step); until then, say one WILL be saved with the verdict.
+  const matchingShot = verdict
+    ? shots.slice().reverse().find((s) => s.verdict && verdict.evidence_id && s.verdict.confirm_id === verdict.evidence_id) ||
+      shots.slice().reverse().find((s) => s.reason === "verdict" || s.verdict)
+    : null;
   // A recorded verdict (from this page, chat, console or the coordinator) reads the same either way.
   const recorded = verdict
     ? `<div class="vx-recorded">${badge(
@@ -462,19 +580,41 @@ function nowTestingCard(j) {
         verdict.verdict === "pass" ? "kind" : verdict.verdict === "fail" ? "warn" : "",
       )}${verdict.source ? ` <span class="muted">(via ${esc(verdict.source)})</span>` : ""}${
         verdict.notes ? ` — “${esc(verdict.notes)}”` : ""
-      }</div>`
+      }</div>` +
+      `<div class="vx-verdict-shot">${matchingShot
+        ? `${shotThumb(matchingShot, true)} <span class="muted">screenshot at verdict (${hms(matchingShot.at)})</span>`
+        : `<span class="muted">a screenshot will be saved with your verdict</span>`}</div>`
     : "";
   const waiting = verdict
     ? `<div class="vx-waiting"><span class="vx-spin"></span> Waiting for the demo to move to the next test…</div>`
     : "";
-  const form = `<form data-job-verdict="${esc(j.id)}" class="vx-form">
-      <p><input name="notes" placeholder="note (optional)"></p>
+  // While the driver is staging (setup) or tearing down (cleanup) the next test the verdict window is
+  // NOT open — the buttons are disabled and read 'opens in Ns' / 'recorded · window closed'.
+  const phase = jobActivePhase(j);
+  const blocked = !!phase;
+  let gate = "";
+  if (phase && phase.phase === "setup") {
+    gate = `<p class="vx-gate">Verdict window opens in <span class="mono" data-cd-sec="${esc((phase.data || {}).until)}">…</span> — setting up.</p>`;
+  } else if (phase && phase.phase === "cleanup") {
+    gate = `<p class="vx-gate">${verdict ? "Verdict recorded · " : ""}window closed — cleaning up this test.</p>`;
+  }
+  const dis = blocked ? " disabled" : "";
+  const form = `<form data-job-verdict="${esc(j.id)}" method="post" action="javascript:void 0" class="vx-form">
+      <p><input name="notes" placeholder="note (optional)"${dis}></p>
       <p class="vx-btns">
-        <button type="submit" name="verdict" value="pass" class="vx-btn vx-btn-pass">✓ Pass</button>
-        <button type="submit" name="verdict" value="fail" class="vx-btn vx-btn-fail">✗ Fail</button>
-        <button type="submit" name="verdict" value="skip" class="vx-btn vx-btn-skip">– Skip</button>
+        <button type="submit" name="verdict" value="pass" class="vx-btn vx-btn-pass"${dis}>✓ Pass</button>
+        <button type="submit" name="verdict" value="fail" class="vx-btn vx-btn-fail"${dis}>✗ Fail</button>
+        <button type="submit" name="verdict" value="skip" class="vx-btn vx-btn-skip"${dis}>– Skip</button>
       </p>
+      ${gate}
       <div class="result"></div></form>`;
+  // The screenshot-request control lives in the NOW card (per the user). A pending request (set when
+  // the button was pressed, cleared when the driver uploads) reads 'requested — waiting for the driver'.
+  const pending = !!(j.params && j.params.pending_shot);
+  const shotForm = `<form data-job-shot="${esc(j.id)}" method="post" action="javascript:void 0" class="vx-shotform">
+      ${pending ? `<p class="vx-pending">📷 screenshot requested — waiting for the driver</p>` : ""}
+      <p><input name="note" placeholder="request a screenshot (optional note)"></p>
+      <button type="submit">Request screenshot</button><div class="result"></div></form>`;
   return `<div class="card vx-card" data-vx-card data-vx-step="${esc(cs.phase || "")}" data-vx-name="${esc(
     name,
   )}" data-vx-index="${esc(k)}" data-vx-total="${esc(n)}">
@@ -483,70 +623,160 @@ function nowTestingCard(j) {
     ${tested ? `<p class="vx-field"><span class="vx-lbl">What is tested</span> ${esc(tested)}</p>` : ""}
     ${expect ? `<p class="vx-field"><span class="vx-lbl">What you should see</span> ${esc(expect)}</p>` : ""}
     ${vxCountdown(cur)}
+    ${camera}
     <p class="muted vx-hint">${esc(hint)}</p>
-    ${recorded}${waiting}${form}</div>`;
+    ${recorded}${waiting}${form}${shotForm}</div>`;
 }
 
-// When the job is finished the card is replaced by the results: a 'Run complete' banner, the stepper
-// and one row per test with its verdict, source and note.
-function jobResults(j) {
+// ---- Job detail page: an organized hierarchy ---------------------------------
+// HEADER (title/status/meta/URL) -> NOW (phase banner + stepper + card, or a compact finished
+// summary) -> RESULTS (per-step table) -> SUMMARY (4 blocks) -> EVIDENCE (thumbnail grid) ->
+// TIMELINE (grouped by step, collapsible, noisy lines folded) -> LINKS (test run / project /
+// related jobs). Everything the old page showed is still here, just grouped so a long run scans.
+const jobCounts = (j) => {
   const items = jobVerifications(j);
-  if (!items.length) return "";
   const count = (v) => items.filter((x) => x.verdict && x.verdict.verdict === v).length;
   const pass = count("pass"), fail = count("fail"), skip = count("skip");
-  const none = items.length - pass - fail - skip;
+  return { pass, fail, skip, none: items.length - pass - fail - skip, total: items.length };
+};
+
+// A clipboard button whose value is handled by the DELEGATED click listener in boot() (so it keeps
+// working across live re-renders).
+const copyBtn = (value, label) => `<button type="button" class="copy-btn" data-copy="${esc(value)}">${esc(label)}</button>`;
+
+function jobHeader(j) {
+  const p = j.params || {};
+  const cell = (label, val) => (val ? `<div class="jh-cell"><div class="jh-k">${esc(label)}</div><div class="jh-v">${val}</div></div>` : "");
+  const cells = [
+    cell("Host", j.host_id ? link(["hosts", j.host_id], j.host_id) : null),
+    cell("Kind", badge(j.kind)),
+    cell("Worker", j.worker ? `<span class="mono">${esc(j.worker)}</span>` : null),
+    cell("Phase", j.phase ? esc(j.phase) : null),
+    cell("Started", fmtTime(j.started_at || j.created_at)),
+    cell("Finished", j.finished_at ? fmtTime(j.finished_at) : `<span class="muted">${isLive(j) ? "running" : "—"}</span>`),
+    cell("Duration", `${runTime(j)}${isLive(j) ? ` <span class="muted">(running)</span>` : ""}`),
+    cell("Project", j.project_id ? link([state.game, "projects", j.project_id], j.project_id) : null),
+  ].filter(Boolean).join("");
+  const url = j.web_url || "";
+  return `<div class="card job-header">
+    <div class="jh-top">
+      <div class="jh-title">
+        <h1>${esc(j.title)}</h1>
+        <div class="jh-tags">${jobStatusBadge(j.status)}${badge(j.kind)}${jobFlags(j)} <span class="mono muted">${esc(j.id)}</span></div>
+      </div>
+      <div class="jh-actions">${url ? copyBtn(url, "Copy job URL") : ""}</div>
+    </div>
+    <p class="jh-target mono muted">${esc(j.target)}</p>
+    <div class="jh-meta">${cells}</div>
+    <div class="jh-intake2">
+      <p><span class="jh-k">Purpose</span> ${esc(p.purpose || "—")}</p>
+      <p><span class="jh-k">Expected</span> ${esc(p.expected || "—")}</p>
+    </div>
+  </div>`;
+}
+
+// The NOW / STATE region. While running: the SETTING UP / CLEANING UP banner, the stepper and the
+// current-test card. When terminal: a compact 'finished' summary (counts + the stepper).
+function jobNow(j) {
+  if (j.status === "running") {
+    return `<div class="job-now" id="job-now">${vxPhaseBanner(j)}${jobStepper(j)}${nowTestingCard(j)}</div>`;
+  }
+  const items = jobVerifications(j);
+  const c = jobCounts(j);
+  const cls = j.status === "passed" ? "ok" : j.status === "failed" ? "bad" : j.status === "cancelled" ? "muted" : "warn";
+  const word = {
+    passed: "Run passed", failed: "Run failed", cancelled: "Run cancelled",
+    inconclusive: "Run ended with no pass/fail verdict", error: "Run errored",
+  }[j.status] || "Run ended";
+  const line = c.total
+    ? `<strong>${c.pass}</strong> pass · <strong>${c.fail}</strong> fail · <strong>${c.skip}</strong> skip · <strong>${c.none}</strong> no verdict`
+    : `<span class="muted">no verification steps recorded</span>`;
+  return `<div class="job-now job-done">
+    <div class="vx-complete vx-complete-${cls}">${word} — ${line}</div>
+    ${items.length ? jobStepper(j) : ""}
+  </div>`;
+}
+
+// RESULTS: one row per step — verdict, source, note, late flag, when, and its screenshots (the
+// verdict shot marked right beside the verdict badge).
+function jobResultsTable(j) {
+  const items = jobVerifications(j);
+  if (!items.length) return "";
   const vb = (v) => badge(v, v === "pass" ? "kind" : v === "fail" ? "warn" : "");
-  return `<div class="card vx-results" data-vx-results>
-    <div class="vx-complete">Run complete — <strong>${pass}</strong> pass · <strong>${fail}</strong> fail · <strong>${skip}</strong> skip · <strong>${none}</strong> no verdict</div>
-    ${jobStepper(j)}
-    <table class="vx-rtable"><tr><th>#</th><th>Test</th><th>Verdict</th><th>Source</th><th>Note</th></tr>
+  return `<h2>Results <span class="muted">${items.length} step${items.length === 1 ? "" : "s"}</span></h2>
+    <div class="card"><table class="vx-rtable">
+    <tr><th>#</th><th>Test</th><th>Verdict</th><th>Source</th><th>Note</th><th>Late</th><th>When</th><th>Shots</th></tr>
     ${items
-      .map(
-        (it) => `<tr><td class="mono">${esc(it.index)}</td>
+      .map((it) => {
+        const v = it.verdict;
+        const shots = shotsForStep(j, it.id);
+        const verdictShot = shots.find((s) => s.reason === "verdict" || s.verdict);
+        const verdictCell = (v ? vb(v.verdict) : `<span class="muted">no verdict</span>`) +
+          (verdictShot ? `<div class="vx-vshot">${shotThumb(verdictShot, true)} <span class="muted">screenshot at verdict</span></div>` : "");
+        return `<tr><td class="mono">${esc(it.index)}</td>
       <td>${esc(it.name)}<div class="muted mono">${esc(it.id)}</div></td>
-      <td>${it.verdict ? vb(it.verdict.verdict) : `<span class="muted">no verdict</span>`}</td>
-      <td>${it.verdict && it.verdict.source ? badge("via " + it.verdict.source) : `<span class="muted">—</span>`}</td>
-      <td class="muted">${esc((it.verdict && it.verdict.notes) || "—")}</td></tr>`,
-      )
+      <td>${verdictCell}</td>
+      <td>${v && v.source ? badge("via " + v.source) : `<span class="muted">—</span>`}</td>
+      <td class="muted">${esc((v && v.notes) || "—")}</td>
+      <td>${v && v.late ? badge("late", "warn") : `<span class="muted">—</span>`}</td>
+      <td class="muted">${v && v.at ? fmtTime(v.at) : `<span class="muted">—</span>`}</td>
+      <td>${shots.length ? `<div class="vx-shotcell">${shots.map((s) => shotThumb(s, true)).join("")}</div>` : `<span class="muted">—</span>`}</td></tr>`;
+      })
       .join("")}</table></div>`;
 }
 
+// SUMMARY: the four close-out blocks, labelled.
+function jobSummaryBlocks(j) {
+  if (!j.summary) return "";
+  const s = j.summary;
+  const b = (l, t) => `<div class="sm-block"><div class="sm-k">${esc(l)}</div><div class="sm-v">${esc(t || "—")}</div></div>`;
+  return `<h2>Close-out summary</h2><div class="card sm-grid">${b("What", s.what)}${b("Why", s.why)}${b("Learned", s.learned)}${b("Next", s.next)}</div>`;
+}
 
-function jobDetail(j) {
+// INTAKE: the run config + cleanup list (purpose/expected already read in the header).
+function jobIntake(j) {
   const p = j.params || {};
-  const summary = j.summary
-    ? `<div class="card"><h2 style="margin-top:0">Close-out summary</h2>
-        <p><strong>What:</strong> ${esc(j.summary.what)}</p>
-        <p><strong>Why:</strong> ${esc(j.summary.why)}</p>
-        <p><strong>Learned:</strong> ${esc(j.summary.learned)}</p>
-        <p><strong>Next:</strong> ${esc(j.summary.next)}</p></div>`
-    : "";
-  const intake = `<div class="card"><h2 style="margin-top:0">Intake</h2>
-      <p><strong>Purpose:</strong> ${esc(p.purpose || "—")}</p>
-      <p><strong>Expected:</strong> ${esc(p.expected || "—")}</p>
-      <p class="muted">Cap ${esc(p.max_minutes)} min · screenshots ${esc(p.screenshots)} · confirm gate ${
-        p.needs_confirm ? "on" : "off"
-      } · watching ${p.watching ? "yes" : "no"}${p.branch ? ` · branch ${esc(p.branch)}` : ""}${
-        p.commit ? ` · ${esc(p.commit)}` : ""
-      }</p>${p.cleanup && p.cleanup.length ? `<p class="muted">Cleanup: ${p.cleanup.map(esc).join(", ")}</p>` : ""}</div>`;
-  const shotForm = `<form data-job-shot="${esc(j.id)}" class="card">
-      <p class="muted">Request a screenshot — the runner answers by uploading; the flag clears on upload.</p>
-      <p><input name="note" placeholder="what to capture (optional)"></p>
-      <button type="submit">Request screenshot</button><div class="result"></div></form>`;
+  const cell = (label, val) => `<div class="jh-cell"><div class="jh-k">${esc(label)}</div><div class="jh-v">${val}</div></div>`;
+  return `<h2>Intake &amp; cleanup</h2><div class="card"><div class="jh-meta">
+    ${cell("Cap", `${esc(p.max_minutes)} min`)}
+    ${cell("Screenshots", esc(p.screenshots || "—"))}
+    ${cell("Confirm gate", p.needs_confirm ? "on" : "off")}
+    ${cell("Watching", p.watching ? "yes" : "no")}
+    ${p.branch ? cell("Branch", `<span class="mono">${esc(p.branch)}</span>`) : ""}
+    ${p.commit ? cell("Commit", `<span class="mono">${esc(p.commit)}</span>`) : ""}
+    ${p.reason ? cell("Cap reason", esc(p.reason)) : ""}
+  </div>${p.cleanup && p.cleanup.length ? `<p class="muted">Cleanup: ${p.cleanup.map(esc).join(", ")}</p>` : ""}</div>`;
+}
+
+// EVIDENCE: screenshots grouped by step (with '#seq · reason · HH:MM:SS · step' captions), and a
+// download table for non-image artifacts. Old (untagged) shots group under 'unassigned'.
+function jobEvidence(j) {
   const isImg = (a) => /\.(png|jpe?g)$/i.test(a.name);
-  const shots = j.artifacts.filter(isImg);
-  const gallery = shots.length
-    ? `<h2>Screenshots</h2><div class="grid">${shots
-        .map(
-          (a) =>
-            `<figure class="card" style="margin:0"><img src="${esc(a.url)}" alt="${esc(a.name)}" style="width:100%;border-radius:var(--r)">` +
-            `<figcaption class="muted mono shot-cap">${esc(a.name)}<br>${esc(a.md5)}</figcaption></figure>`,
-        )
-        .join("")}</div>`
-    : "";
+  const shots = jobScreenshots(j);
   const others = j.artifacts.filter((a) => !isImg(a));
-  const otherArts = others.length
-    ? `<h2>Files</h2><table><tr><th>Name</th><th>Size</th><th>MD5</th></tr>${others
+  const groups = new Map();
+  for (const s of shots) {
+    const key = s.step || "unassigned";
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(s);
+  }
+  // Any image artifact with no matching screenshot event still appears (old pages, manual uploads).
+  const known = new Set(shots.map((s) => s.url));
+  const orphanImgs = j.artifacts.filter((a) => isImg(a) && !known.has(a.url));
+  const total = shots.length + orphanImgs.length;
+  const orphanHtml = orphanImgs
+    .map((a) => `<figure class="shot"><a href="${esc(a.url)}" download><img src="${esc(a.url)}" alt="${esc(a.name)}" loading="lazy"></a><figcaption class="muted mono shot-cap">${esc(a.name)}</figcaption></figure>`)
+    .join("");
+  const gallery = total
+    ? `<h2>Evidence <span class="muted">${total} screenshot${total === 1 ? "" : "s"} · grouped by step</span></h2>
+      ${[...groups.entries()]
+        .map(([step, list]) => `<div class="ev-group"><h3 class="ev-step mono">${esc(step)} <span class="muted">${list.length}</span></h3>
+          <div class="shot-grid">${list.map((s) => shotThumb(s)).join("")}</div></div>`)
+        .join("")}
+      ${orphanHtml ? `<div class="ev-group"><h3 class="ev-step mono">unassigned <span class="muted">${orphanImgs.length}</span></h3><div class="shot-grid">${orphanHtml}</div></div>` : ""}`
+    : "";
+  const files = others.length
+    ? `<h2>Files <span class="muted">${others.length}</span></h2><table><tr><th>Name</th><th>Size</th><th>MD5</th></tr>${others
         .map(
           (a) =>
             `<tr><td><a href="${esc(a.url)}" download>${esc(a.name)}</a></td>` +
@@ -554,21 +784,127 @@ function jobDetail(j) {
         )
         .join("")}</table>`
     : "";
-  const links = j.links.length
-    ? `<h2>Linked records</h2><table><tr><th>Kind</th><th>Ref</th></tr>${j.links
-        .map((l) => `<tr><td>${badge(l.kind)}</td><td class="mono">${esc(l.ref_id)}</td></tr>`)
-        .join("")}</table>`
+  return gallery + files;
+}
+
+// LINKS: the linked canonical records, clickable, plus any RELATED jobs that share a link (so a
+// re-run of the same test is one hop away). Related jobs are computed by the caller (best effort).
+function jobLinks(j, related = []) {
+  const href = (kind, ref) => {
+    if (kind === "project") return `#/${enc(state.game)}/projects/${enc(ref)}`;
+    if (kind === "test_run" || kind === "build" || kind === "deploy" || kind === "evidence") return `#/activity`;
+    return null;
+  };
+  const recordRows = j.links
+    .map((l) => {
+      const h = href(l.kind, l.ref_id);
+      return `<tr><td>${badge(l.kind)}</td><td class="mono">${h ? `<a href="${h}">${esc(l.ref_id)}</a>` : esc(l.ref_id)}</td></tr>`;
+    })
+    .join("");
+  const recs = j.links.length
+    ? `<table><tr><th>Kind</th><th>Ref</th></tr>${recordRows}</table>`
+    : `<p class="muted">No linked records.</p>`;
+  const rel = related.length
+    ? `<div class="muted" style="margin-top:8px">Related jobs</div><ul class="rel-jobs">${related
+        .map((o) => `<li>${link(["jobs", o.id], o.id)} ${jobStatusBadge(o.status)} <span class="muted">· ${esc(o.title)}</span></li>`)
+        .join("")}</ul>`
     : "";
-  const timeline = `<h2>Timeline</h2>${j.events.length ? jobTimeline(j.events) : `<p class="muted">No events yet.</p>`}`;
-  const when = `created ${fmtTime(j.created_at)}${j.started_at ? ` · started ${fmtTime(j.started_at)}` : ""}${
-    j.finished_at ? ` · finished ${fmtTime(j.finished_at)}` : ""
-  }`;
-  const vxItems = jobVerifications(j);
-  const stepper = vxItems.length && j.status === "running" ? jobStepper(j) : "";
-  const results = j.status !== "running" ? jobResults(j) : "";
-  return `${nowLine()}<div>${jobHeadline(j)}</div>
-    <p>${jobMeta(j)}<span class="muted"> · ${when}</span></p>
-    ${stepper}${nowTestingCard(j)}${results}${summary}${intake}${shotForm}${gallery}${otherArts}${links}${timeline}`;
+  return `<h2>Links</h2><div class="card">${recs}${rel}</div>`;
+}
+
+// TIMELINE: grouped by phase/step into collapsible blocks, level-coloured. Routine info lines
+// (heartbeats, repeated screenshot/poll lines) fold into a 'show N more' toggle; warn / error /
+// crash / milestone / learning and user-feedback / ledger-correction events are ALWAYS visible.
+const TIMELINE_NOISE = /heartbeat|still running|no new output|screenshot:|^shot shot-|director (up|alive|launched)|polling|^\s*$/i;
+const TIMELINE_IMPORTANT_LEVELS = new Set(["warn", "error", "crash", "milestone", "learning"]);
+const TIMELINE_IMPORTANT_PHASES = new Set(["user-feedback", "ledger-correction"]);
+const isTimelineNoise = (e) => e.level === "info" && TIMELINE_NOISE.test(e.message || "");
+const timelineRow = (e) => {
+  const tail =
+    e.data && e.data.log_tail
+      ? `<details><summary class="muted">log tail</summary><pre>${esc(e.data.log_tail)}</pre></details>`
+      : "";
+  const vd = e.data && e.data.verdict
+    ? ` ${badge(e.data.verdict, e.data.verdict === "pass" ? "kind" : e.data.verdict === "fail" ? "warn" : "")}` +
+      `${e.data.source ? ` ${badge("via " + e.data.source)}` : ""}`
+    : "";
+  return `<li class="tl-ev tl-${esc(e.level)}"${e.phase ? ` data-vx-step="${esc(e.phase)}"` : ""}>${badge(e.level, JOB_LEVEL_CLASS[e.level] || "")}${vd} ` +
+    `<span class="muted">${fmtTime(e.created_at)}</span>${e.phase ? ` <span class="mono muted">${esc(e.phase)}</span>` : ""}` +
+    `<div>${esc(e.message)}</div>${tail}</li>`;
+};
+function jobTimelineGrouped(events) {
+  if (!events || !events.length) return `<h2>Timeline</h2><p class="muted">No events yet.</p>`;
+  const groups = new Map();
+  for (const e of events) {
+    const key = e.phase || "(general)";
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(e);
+  }
+  const blocks = [...groups.entries()]
+    .sort((a, b) => a[1][0].id - b[1][0].id)
+    .map(([key, evs]) => {
+      const important = evs.filter((e) => !isTimelineNoise(e));
+      const noise = evs.filter(isTimelineNoise);
+      const open = evs.some((e) => TIMELINE_IMPORTANT_LEVELS.has(e.level) || TIMELINE_IMPORTANT_PHASES.has(e.phase));
+      const count = `${important.length}${noise.length ? ` <span class="muted">(+${noise.length} routine)</span>` : ""}`;
+      const rows = important.map(timelineRow).join("");
+      const folded = noise.length
+        ? `<details class="tl-noise"><summary class="muted">show ${noise.length} more routine line${noise.length === 1 ? "" : "s"}</summary><ul class="timeline">${noise.map(timelineRow).join("")}</ul></details>`
+        : "";
+      return `<details class="tl-group"${open ? " open" : ""}><summary><span class="mono">${esc(key)}</span> <span class="muted">${count}</span></summary>
+        ${rows ? `<ul class="timeline">${rows}</ul>` : ""}${folded}</details>`;
+    })
+    .join("");
+  return `<h2>Timeline <span class="muted">${events.length} events</span></h2>${blocks}`;
+}
+
+function jobDetail(j, related = []) {
+  const vx = jobVerifications(j);
+  const results = j.status !== "running" || vx.some((x) => x.verdict) ? jobResultsTable(j) : "";
+  return `${nowLine()}${jobHeader(j)}${jobNow(j)}${results}${jobSummaryBlocks(j)}${jobIntake(j)}${jobEvidence(j)}${jobLinks(j, related)}${jobTimelineGrouped(j.events)}`;
+}
+
+// Load a job plus the RELATED jobs that share one of its linked records (a re-run of the same test is
+// then one hop away). Best effort: a failure just renders without the related list.
+async function loadJobDetail(jobId) {
+  const j = await api(`/jobs/${enc(jobId)}`);
+  let related = [];
+  try {
+    const refs = new Set((j.links || []).map((l) => `${l.kind}:${l.ref_id}`));
+    if (refs.size) {
+      const all = await api("/jobs", { limit: 200 });
+      related = all.filter((o) => o.id !== j.id && (o.links || []).some((l) => refs.has(`${l.kind}:${l.ref_id}`)));
+    }
+  } catch { /* related jobs are best effort */ }
+  return jobDetail(j, related);
+}
+
+// Clipboard + screenshot lightbox helpers. Wired through ONE delegated click listener (boot), so
+// they survive the periodic #live re-render.
+function copyText(el) {
+  const v = el.dataset.copy || "";
+  const restore = el.textContent;
+  const done = () => { el.textContent = "Copied ✓"; setTimeout(() => (el.textContent = restore), 1500); };
+  if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(v).then(done, done);
+  else done();
+}
+function openLightbox(url, caption) {
+  let box = document.getElementById("lightbox");
+  if (!box) {
+    box = document.createElement("div");
+    box.id = "lightbox";
+    box.className = "lightbox";
+    box.innerHTML = `<figure><img alt=""><figcaption class="muted"></figcaption></figure>`;
+    box.addEventListener("click", closeLightbox);
+    document.body.appendChild(box);
+  }
+  box.querySelector("img").src = url;
+  box.querySelector("figcaption").textContent = caption || "";
+  box.classList.add("open");
+}
+function closeLightbox() {
+  const box = document.getElementById("lightbox");
+  if (box) box.classList.remove("open");
 }
 
 // Minimal Markdown renderer for docs: escape first, then add a small safe subset of formatting.
@@ -691,8 +1027,32 @@ function renderNav(active) {
   $("#build").textContent = g?.current_build ? `build ${g.current_build} · ${g.patch_version || ""}` : "not indexed";
 }
 
+// A stale tab loaded with `?verdict=…` in location.search is the signature of the old native-GET
+// submit bug (`/?notes=&verdict=pass#/jobs/…`). We must NEVER auto-submit it: strip the query from
+// the address bar (history.replaceState, no reload) and surface a dismissible notice asking the
+// user to re-send, since the verdict may never have reached the server.
+let staleVerdictNotice = null;
+function stripStaleVerdictQuery() {
+  try {
+    const qs = new URLSearchParams(location.search);
+    if (!qs.has("verdict")) return;
+    staleVerdictNotice = qs.get("verdict") || "";
+    history.replaceState(null, "", location.pathname + location.hash);
+  } catch { /* no URLSearchParams/history: nothing to strip */ }
+}
+function showStaleVerdictNotice(verdict) {
+  const el = document.createElement("div");
+  el.className = "card stale-verdict";
+  el.innerHTML = `<span class="stale-ico">⚠</span> <strong>A verdict from an old page</strong>` +
+    `${verdict ? ` (${esc(verdict)})` : ""} may not have been recorded — please re-send it on the current test.` +
+    ` <button type="button" class="stale-dismiss">Dismiss</button>`;
+  el.querySelector(".stale-dismiss").addEventListener("click", () => el.remove());
+  view.prepend(el);
+}
+
 async function route() {
   let { parts, params } = parseHash();
+  stripStaleVerdictQuery();
   if (parts[0] && state.games.some((g) => g.id === parts[0])) {
     state.game = parts.shift();
     localStorage.setItem("s2docs.game", state.game);
@@ -711,6 +1071,8 @@ async function route() {
     view.innerHTML = await handler(rest, params);
     bindFilters(section, rest, params);
     jobPostRender(view); // stepper->card transition detection + document.title for a job page
+    // Surface (once) the notice for a stale ?verdict= query captured at the top of route().
+    if (staleVerdictNotice != null) { showStaleVerdictNotice(staleVerdictNotice); staleVerdictNotice = null; }
     // A live page (Hosts/Activity) parked a render fn in pendingLive; refill its #live region on a timer
     // so the strip updates without re-rendering the header or jumping the scroll position.
     // `ms` may be a function (e.g. poll fast while a run is active, slow when idle); a recursive
@@ -826,8 +1188,11 @@ function bindFilters(section, rest, params) {
   view.querySelectorAll("[data-copy-md]").forEach(bindCopyMd);
   view.querySelectorAll("form[data-start-project]").forEach(bindStartProject);
   view.querySelectorAll("form[data-step]").forEach(bindStepForm);
-  view.querySelectorAll("form[data-job-shot]").forEach(bindJobShot);
-  view.querySelectorAll("form[data-job-verdict]").forEach(bindJobVerdict);
+  // The dynamic JOB forms (data-job-verdict / data-job-shot) are NOT bound here. They live inside
+  // the #live region, whose innerHTML is replaced on every auto-refresh, and a per-form listener is
+  // destroyed by that swap — leaving the Pass/Fail/Skip buttons to do a NATIVE GET submit and lose
+  // the verdict. One delegated listener (bindJobFormDelegation, wired once in boot) handles them
+  // for the life of the page, so a re-render can never unbind them.
 }
 
 // Copy the current (filtered) diff as a Markdown table. The table is built into a hidden <textarea>
@@ -852,50 +1217,68 @@ function bindCopyMd(btn) {
   });
 }
 
-function bindJobShot(form) {
-  form.addEventListener("submit", async (ev) => {
-    ev.preventDefault();
-    const note = form.elements.note.value.trim() || null;
-    const r = await postJson(`/api/jobs/${enc(form.dataset.jobShot)}/screenshot-request`, { note });
-    if (!r.ok) {
-      form.querySelector(".result").innerHTML = `<p class="err">${esc(r.body.detail)}</p>`;
-      return;
-    }
-    liveDirty = false; // request recorded: let auto-refresh resume and re-render immediately
-    route();
-  });
+// job-form-delegation:start
+// Delegated handlers: ONE `submit` listener on the document (bindJobFormDelegation, wired in boot)
+// routes every dynamic job form here, so a live re-render that swaps the form's innerHTML can never
+// leave it without a handler. The old per-form binding did exactly that — after the first refresh
+// the Pass/Fail/Skip buttons had no listener and did a NATIVE GET submit to
+// `/?notes=…&verdict=pass#/jobs/…`, silently losing the verdict (reported 2026-10-15, job
+// j-cfce382e). Each handler still calls preventDefault itself, so a native submit is impossible.
+async function bindJobShot(form, ev) {
+  if (ev) ev.preventDefault();
+  const note = form.elements.note.value.trim() || null;
+  const r = await postJson(`/api/jobs/${enc(form.dataset.jobShot)}/screenshot-request`, { note });
+  if (!r.ok) {
+    form.querySelector(".result").innerHTML = `<p class="err">${esc(r.body.detail)}</p>`;
+    return;
+  }
+  liveDirty = false; // request recorded: let auto-refresh resume and re-render immediately
+  route();
 }
 
 // The NOW TESTING card's Pass/Fail/Skip buttons: the pressed button's value is the verdict; the note
 // rides along. On click all three disable and the pressed one shows a spinner + 'Sending…'; on success
 // the card re-renders into the recorded + waiting state; on error the buttons come back with the error
 // inline. A verdict that arrives from chat/console shows the same recorded state on the next refresh.
-function bindJobVerdict(form) {
-  form.addEventListener("submit", async (ev) => {
-    ev.preventDefault();
-    const pressed = ev.submitter;
-    const verdict = pressed && pressed.value;
-    if (!verdict) return;
-    const notes = form.elements.notes.value.trim() || null;
-    const btns = [...form.querySelectorAll("button[name=verdict]")];
-    const label = pressed ? pressed.innerHTML : "";
-    btns.forEach((b) => (b.disabled = true)); // pressed state: every button locks
-    if (pressed) pressed.innerHTML = `<span class="vx-spin"></span> Sending…`;
-    const r = await postJson(`/api/jobs/${enc(form.dataset.jobVerdict)}/verdict`, { verdict, notes, source: "web" });
-    if (!r.ok) {
-      // Re-enable so the user can retry, and show the failure inline in red.
-      btns.forEach((b) => (b.disabled = false));
-      if (pressed) pressed.innerHTML = label;
-      form.querySelector(".result").innerHTML = `<p class="err vx-error">${esc(r.body.detail || "could not record the verdict")}</p>`;
-      return;
-    }
-    // The verdict is recorded: clear the note box and refresh the card at once into the recorded +
-    // 'waiting for the demo to move on' state. Clearing liveDirty lets auto-refresh take over again.
-    liveDirty = false;
-    form.elements.notes.value = "";
-    await refreshJobLive(form.dataset.jobVerdict);
+async function bindJobVerdict(form, ev) {
+  if (ev) ev.preventDefault();
+  const pressed = ev && ev.submitter;
+  const verdict = pressed && pressed.value;
+  if (!verdict) return;
+  const notes = form.elements.notes.value.trim() || null;
+  const btns = [...form.querySelectorAll("button[name=verdict]")];
+  const label = pressed ? pressed.innerHTML : "";
+  btns.forEach((b) => (b.disabled = true)); // pressed state: every button locks
+  if (pressed) pressed.innerHTML = `<span class="vx-spin"></span> Sending…`;
+  const r = await postJson(`/api/jobs/${enc(form.dataset.jobVerdict)}/verdict`, { verdict, notes, source: "web" });
+  if (!r.ok) {
+    // Re-enable so the user can retry, and show the failure inline in red.
+    btns.forEach((b) => (b.disabled = false));
+    if (pressed) pressed.innerHTML = label;
+    form.querySelector(".result").innerHTML = `<p class="err vx-error">${esc(r.body.detail || "could not record the verdict")}</p>`;
+    return;
+  }
+  // The verdict is recorded: clear the note box and refresh the card at once into the recorded +
+  // 'waiting for the demo to move on' state. Clearing liveDirty lets auto-refresh take over again.
+  liveDirty = false;
+  form.elements.notes.value = "";
+  await refreshJobLive(form.dataset.jobVerdict);
+}
+
+// ONE delegated `submit` listener for the dynamic job forms. Attached to the document (not to the
+// forms), so replacing a form's markup on the 5 s live re-render can never unbind it — this is the
+// fix for the silently-lost-verdict bug. Any form marked as a job form is ALWAYS preventDefault'd,
+// so even a form we do not recognise can never navigate the page away.
+function bindJobFormDelegation() {
+  document.addEventListener("submit", (ev) => {
+    const form = ev.target;
+    if (!form || form.tagName !== "FORM" || typeof form.matches !== "function") return;
+    if (form.matches("form[data-job-verdict]")) bindJobVerdict(form, ev);
+    else if (form.matches("form[data-job-shot]")) bindJobShot(form, ev);
+    else if (form.matches("form[data-job-form]")) ev.preventDefault();
   });
 }
+// job-form-delegation:end
 
 // Re-render just the job page's #live region from the server (keeps the scroll position and any
 // transition animating in place) — used after a verdict lands so the card shows the recorded state.
@@ -903,7 +1286,7 @@ async function refreshJobLive(jobId) {
   const live = view.querySelector("#live");
   if (!live) return;
   try {
-    live.innerHTML = jobDetail(await api(`/jobs/${enc(jobId)}`));
+    live.innerHTML = await loadJobDetail(jobId);
     jobPostRender(live);
   } catch {
     /* keep the last good view */
@@ -966,6 +1349,13 @@ function updateCountdowns() {
       return;
     }
     el.textContent = left <= 0 ? "0:00 (expired)" : `${Math.floor(left / 60)}:${String(left % 60).padStart(2, "0")} left`;
+  });
+  // The SETTING UP / CLEANING UP countdowns tick in whole seconds ('8s'), not 'm:ss left'.
+  document.querySelectorAll("[data-cd-sec]").forEach((el) => {
+    const t = Date.parse(el.dataset.cdSec);
+    if (Number.isNaN(t)) return;
+    const left = Math.max(0, Math.ceil((t - Date.now()) / 1000));
+    el.textContent = left > 0 ? `${left}s` : "0s";
   });
 }
 
@@ -1791,7 +2181,7 @@ const ROUTES = {
   // Game-independent: the job ledger + queue — one record per requested test/demo/final run.
   async jobs([jobId]) {
     if (jobId) {
-      const body = async () => jobDetail(await api(`/jobs/${enc(jobId)}`));
+      const body = async () => loadJobDetail(jobId);
       liveBody("#live", body, () => 5000);
       return `<p>${link(["jobs"], "← Jobs")}</p>${pipelineStrip("jobs")}<div id="live">${await body()}</div>`;
     }
@@ -1962,12 +2352,23 @@ async function boot() {
       $("#q").focus();
     }
   });
-  // Clicking a stepper chip scrolls the page to that test's timeline entry (delegated, so it survives
-  // the 5 s re-render of the whole #live region).
+  // Delegated CLICK handling for everything inside the periodically re-rendered #live region: the
+  // stepper chips scroll to a step, the job-URL copy buttons copy, and a screenshot opens the
+  // full-resolution lightbox. Delegated so a re-render can never unbind them.
   document.addEventListener("click", (ev) => {
-    const chip = ev.target && ev.target.closest ? ev.target.closest("[data-vx-goto]") : null;
-    if (chip) gotoStepTimeline(chip.dataset.vxGoto);
+    const t = ev.target;
+    if (!t || !t.closest) return;
+    const chip = t.closest("[data-vx-goto]");
+    if (chip) { gotoStepTimeline(chip.dataset.vxGoto); return; }
+    const copy = t.closest("[data-copy]");
+    if (copy) { copyText(copy); return; }
+    const shot = t.closest("[data-shot]");
+    if (shot) { openLightbox(shot.dataset.shot, shot.dataset.caption); return; }
+    if (t.id === "lightbox") closeLightbox();
   });
+  // ONE delegated submit listener for the dynamic job forms (verdict / screenshot request). Wired
+  // here, on the document, so a live re-render of the #live region can never unbind them.
+  bindJobFormDelegation();
   window.addEventListener("hashchange", route);
   setInterval(updateCountdowns, 1000); // ticks the NOW TESTING deadline regardless of which page is up
   route();
