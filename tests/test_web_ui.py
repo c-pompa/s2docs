@@ -766,3 +766,111 @@ def test_verification_render_executes_in_node(client):
                                  ["s4", "pass"], ["s5", "pass"], ["s6", "pass"]]
     assert "Run complete" in out["results"] and "vx-rtable" in out["results"]
     assert "4</strong> pass" in out["results"] and "via chat" in out["results"]
+
+
+# ------------------------------------------ Activity page: the unified timeline
+# The user ask: the Activity page was hard to read IN SEQUENCE — the three types were split into
+# separate lists and a reaped run jumped to the top via a late updated_at touch an hour after it
+# died. The fix is ONE chronological timeline (sorted by each run's OWN start, never updated_at),
+# with consecutive same-job rows nested, an honest 'reaped' tag, and the by-host grouping kept below.
+def test_frontend_activity_timeline_markers(client):
+    """One timeline replaces the three Full-history lists; the sorts/merges/nesting and the reaped tag
+    exist in the shipped app.js, and the by-host grouping stays."""
+    js = client.get("/app.js").text
+    css = client.get("/style.css").text
+    # the timeline helper block, marked like the other liftable blocks
+    assert "activity-timeline:start" in js and "activity-timeline:end" in js
+    # sorted by each run's OWN start — NOT updated_at (the reaped-run jump-in bug)
+    assert "const activityStart = (r) => r.started_at || r.created_at" in js
+    assert "const activityRows" in js and "const activityChains" in js and "const activityTimelineHtml" in js
+    assert "const activityRowHtml" in js and "const isReaped" in js and "const reapedTag" in js
+    # all three feeds merged, and job linkage resolved from the job ledger (a run row carries no job id)
+    assert 'api("/jobs", { limit: 200 })' in js
+    assert "owner.get(`build:${b.id}`)" in js and "owner.get(`test_run:${t.id}`)" in js and "owner.get(`deploy:${d.id}`)" in js
+    # a row carries time | type chip | state | name | duration | host | job
+    assert "<th>Job</th>" in js and '"tl-row tl-${r.type}"' in js
+    # job nesting: a heading + indented rows for 2+ consecutive same-job rows
+    assert "tl-job-head" in js and "tl-nested" in js and "activityChains(rows)" in js
+    # the three old Full-history lists are GONE; the by-host grouping stays
+    assert '"Full history"' not in js
+    assert "By host" in js
+    # the honest reaped tag replaces the bare idle badge, and its tooltip keeps the note
+    assert 'badge("reaped", "muted reaped")' not in js  # the tag is built inline with a title tooltip
+    assert 'class="badge muted reaped" title=' in js and "REAPED_RE" in js
+    # the CSS the timeline relies on
+    assert "table.timeline" in css and ".tl-nested" in css and ".badge.reaped" in css
+    assert ".badge.tl-build" in css and ".badge.tl-test" in css and ".badge.tl-deploy" in css
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_activity_timeline_executes_in_node(client):
+    """Lift the shipped timeline helpers out of app.js and run them on three feeds + a job ledger:
+    all three types merge into one list sorted by started_at (so a reaped run with a NEWER updated_at
+    stays at the bottom), the reaped row shows the tag instead of 'idle', and three consecutive
+    same-job rows nest under one heading."""
+    assert NODE is not None  # skipif above
+    js = client.get("/app.js").text
+    dur = js.split("// duration-helpers:start", 1)[1].split("// duration-helpers:end", 1)[0]
+    block = js.split("// activity-timeline:start", 1)[1].split("// activity-timeline:end", 1)[0]
+    prologue = """const ESC_MAP = {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"};
+const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (c) => ESC_MAP[c]);
+const enc = encodeURIComponent;
+const badge = (t, cls = "") => `<span class="badge ${cls}">${esc(t)}</span>`;
+const firstLine = (s) => (s || "").split(String.fromCharCode(10))[0];
+const stateBadge = (s) => badge(s, "");
+const lockStuckBadge = () => "";
+const fmtTime = (iso) => String(iso ?? "—");
+const link = (parts, label) => `<a href="#/${parts.map(enc).join("/")}">${esc(label)}</a>`;
+"""
+    # builds on desktop-pc start at 10:00; the deploy at 10:08, the live test at 10:05; a REAPED test
+    # started at 09:00 (oldest) but its updated_at is 10:30 (newest) — the late reaper touch that used
+    # to float it to the top. A job links the three newest runs (deploy/test/build), so they nest.
+    builds = [{"id": "b-1", "host_id": "desktop-pc", "kind": "compile", "status": "succeeded",
+               "created_at": "2026-10-13T10:00:00Z", "updated_at": "2026-10-13T10:02:00Z"}]
+    tests = [
+        {"id": "t-1", "host_id": "desktop-pc", "name": "iso_tunnel", "state": "pass",
+         "started_at": "2026-10-13T10:05:00Z", "created_at": "2026-10-13T10:05:00Z",
+         "updated_at": "2026-10-13T10:07:00Z", "elapsed_sec": 120},
+        {"id": "t-reap", "host_id": "desktop-pc", "name": "iso_dead", "state": "idle",
+         "note": "reaped: lease lost", "started_at": "2026-10-13T09:00:00Z",
+         "created_at": "2026-10-13T09:00:00Z", "finished_at": "2026-10-13T10:30:00Z",
+         "updated_at": "2026-10-13T10:30:00Z", "elapsed_sec": 0},
+    ]
+    deploys = [{"id": "d-1", "host_id": "desktop-pc", "addon": None, "status": "verified",
+                "created_at": "2026-10-13T10:08:00Z", "updated_at": "2026-10-13T10:08:30Z", "entries": []}]
+    jobs = [{"id": "j-a", "links": [{"kind": "build", "ref_id": "b-1"},
+                                    {"kind": "test_run", "ref_id": "t-1"},
+                                    {"kind": "deploy", "ref_id": "d-1"}]}]
+    script = (
+        prologue + dur + block
+        + "\nconst B = " + json.dumps(builds) + ";\n"
+        + "const T = " + json.dumps(tests) + ";\n"
+        + "const D = " + json.dumps(deploys) + ";\n"
+        + "const J = " + json.dumps(jobs) + ";\n"
+        + "const rows = activityRows(B, T, D, J);\n"
+        + "const HTML = activityTimelineHtml(rows);\n"
+        + "const marks = [['compile','b-1'],['iso_tunnel','t-1'],['d-1','d-1'],['iso_dead','t-reap']];\n"
+        + "const order = marks.map(([m,k]) => [HTML.indexOf(m), k]).sort((a,b) => a[0]-b[0]).map((x) => x[1]);\n"
+        + "const ri = HTML.indexOf('iso_dead');\n"
+        + "const reapedRow = HTML.slice(HTML.lastIndexOf('<tr class=\"tl-row', ri), HTML.indexOf('</tr>', ri)+5);\n"
+        + "const chain = (HTML.match(/tl-chain\">([^<]*)</) || [])[1] || null;\n"
+        + "console.log(JSON.stringify({order, types: rows.map((r) => r.type), jobs: rows.map((r) => r.job),"
+        + " reapedRow, chain, nested: (HTML.match(/tl-nested/g) || []).length,"
+        + " heads: (HTML.match(/tl-job-head/g) || []).length, jobLinks: (HTML.match(/#\\/jobs\\/j-a/g) || []).length}));\n"
+    )
+    proc = subprocess.run([NODE, "-e", script], capture_output=True, text=True, encoding="utf-8", timeout=60)
+    assert proc.returncode == 0, proc.stderr
+    out = json.loads(proc.stdout)
+    # merged + newest-first by STARTED_AT: deploy 10:08, test 10:05, build 10:00 — and the reaped run,
+    # despite the newest updated_at (10:30), sits LAST because it STARTED at 09:00.
+    assert out["order"] == ["d-1", "t-1", "b-1", "t-reap"]
+    assert sorted(out["types"]) == ["build", "deploy", "test", "test"]
+    assert out["jobs"] == ["j-a", "j-a", "j-a", None]
+    # three consecutive same-job rows nest under ONE heading, the heading names the top-down chain
+    # 3 nested rows + the one job heading = 4 links to the job
+    assert out["heads"] == 1 and out["nested"] == 3 and out["jobLinks"] == 4
+    assert out["chain"] == "deploy → test → build"
+    # the reaped row is honest: a muted 'reaped' tag, NOT a bare 'idle' badge, and no job link ('—')
+    assert "reaped" in out["reapedRow"] and ">idle<" not in out["reapedRow"]
+    assert "reaped: lease lost" in out["reapedRow"]  # the note rides in the tooltip
+    assert "—" in out["reapedRow"] and "#/jobs/" not in out["reapedRow"]
