@@ -1194,6 +1194,86 @@ function stepDag(steps) {
 const stepTime = (s) => (runSeconds(s) == null ? `<span class="muted">—</span>` : `${runTime(s)}${isLive(s) ? " (running)" : ""}`);
 
 // --------------------------------------------------------------------- Activity
+// ONE chronological sequence across the three services. The three feeds arrive as separate lists
+// (builds / test runs / deploys), each sorted by updated_at — but a run's updated_at is a heartbeat,
+// and the reaper bounces it when it finalizes a dead session, so an hour-old reaped run would jump
+// to the top. The timeline therefore sorts on each run's OWN start (started_at, else created_at).
+// A run that belongs to a job (via the job ledger's links) carries a job link; consecutive rows for
+// the same job nest under one heading, so build -> test -> deploy reads top-down as a single unit.
+// activity-timeline:start
+// A run's start time — NEVER updated_at (see above). Test runs carry their own started_at; a build
+// or deploy starts at created_at.
+const activityStart = (r) => r.started_at || r.created_at || "";
+// A reaped run: finalized by the reaper after its host lease was lost. Its state is a plain 'idle',
+// which reads like a healthy idle run — the note ('reaped: lease lost') is the honest signal.
+const REAPED_RE = /reap|lease lost/i;
+const runNote = (r) => (r && (r.note || r.notes)) || "";
+const isReaped = (r) => REAPED_RE.test(runNote(r));
+// The muted 'reaped' tag that replaces the bare 'idle' badge on a reaped row; the run's own note
+// rides in the tooltip so the reason is still reachable.
+const reapedTag = (r) =>
+  `<span class="badge muted reaped" title="${esc(firstLine(runNote(r)) || "reaped: lease lost")}">reaped</span>`;
+
+// Normalize the three feeds into ONE row shape, and attach the job that owns each row (looked up
+// from the job ledger's links: {kind, ref_id} -> job id). Sort newest-first on the run's OWN start.
+const activityRows = (builds, tests, deploys, jobs) => {
+  const owner = new Map();
+  (jobs || []).forEach((j) => (j.links || []).forEach((l) => owner.set(`${l.kind}:${l.ref_id}`, j.id)));
+  const rows = [];
+  (builds || []).forEach((b) =>
+    rows.push({ type: "build", at: activityStart(b), state: b.status, name: b.kind || "build", id: b.id, host: b.host_id, run: b, job: owner.get(`build:${b.id}`) || null }));
+  (tests || []).forEach((t) =>
+    rows.push({ type: "test", at: activityStart(t), state: t.state, name: t.name, id: t.id, host: t.host_id, run: t, job: owner.get(`test_run:${t.id}`) || null }));
+  (deploys || []).forEach((d) =>
+    rows.push({ type: "deploy", at: activityStart(d), state: d.status, name: d.addon || d.id, id: d.id, host: d.host_id, run: d, job: owner.get(`deploy:${d.id}`) || null }));
+  const key = (r) => { const t = parseTs(r.at); return Number.isNaN(t) ? -Infinity : t; };
+  return rows.sort((a, b) => key(b) - key(a));
+};
+
+// Collapse consecutive same-job rows into one chain, so a job's build -> test -> deploy reads as a
+// single unit. A row with no job, or a lone one, stays a standalone chain of length 1.
+const activityChains = (rows) => {
+  const out = [];
+  rows.forEach((r) => {
+    const last = out[out.length - 1];
+    if (r.job && last && last.job === r.job) last.rows.push(r);
+    else out.push({ job: r.job, rows: [r] });
+  });
+  return out;
+};
+
+// One timeline row: time | type chip | state (+reaped) | name/kind (with any note) | duration |
+// host link | job link ('—' when the run carries no job linkage).
+const activityRowHtml = (r) => {
+  const st = isReaped(r.run) ? reapedTag(r.run) : stateBadge(r.state);
+  const note = runNote(r.run);
+  return `<tr class="tl-row tl-${r.type}"><td class="muted">${fmtTime(r.at)}</td>` +
+    `<td>${badge(r.type, "tl-" + r.type)}</td>` +
+    `<td>${st}${r.run.lock ? lockStuckBadge(r.run.lock) : ""}</td>` +
+    `<td class="mono">${esc(r.name)}${note ? `<div class="muted">${esc(firstLine(note))}</div>` : ""}</td>` +
+    `<td class="muted">${runTime(r.run)}</td>` +
+    `<td>${r.host ? link(["hosts", r.host], r.host) : "—"}</td>` +
+    `<td>${r.job ? link(["jobs", r.job], r.job) : "—"}</td></tr>`;
+};
+
+// The whole timeline table: standalone rows inline, 2+ consecutive same-job rows nested under a
+// job heading (the heading names the chain, e.g. 'build → test → deploy').
+const activityTimelineHtml = (rows) => {
+  if (!rows.length) return `<p class="muted">No runs recorded yet.</p>`;
+  const head =
+    `<tr><th>Time</th><th>Type</th><th>State</th><th>Name / kind</th><th>Duration</th><th>Host</th><th>Job</th></tr>`;
+  const body = activityChains(rows)
+    .map((c) => {
+      if (!c.job || c.rows.length === 1) return activityRowHtml(c.rows[0]);
+      const types = c.rows.map((r) => r.type).join(" → ");
+      const nest = c.rows.map((r) => activityRowHtml(r).replace(`<tr class="tl-row`, `<tr class="tl-row tl-nested`)).join("");
+      return `<tr class="tl-job-head"><td colspan="7" class="muted">job ${link(["jobs", c.job], c.job)} <span class="mono tl-chain">${esc(types)}</span></td></tr>${nest}`;
+    })
+    .join("");
+  return `<table class="timeline">${head}${body}</table>`;
+};
+// activity-timeline:end
+
 // Shown when nothing has flowed through the build/test/deploy services yet — the failure mode that
 // read as 'the page is broken' when in fact no work had been recorded.
 const activityEmptyState = () => `<div class="card">
@@ -1593,10 +1673,13 @@ const ROUTES = {
   // Game-independent: the live view a person watches to answer "what is running right now".
   async activity() {
     const body = async () => {
-      const [builds, tests, deploys] = await Promise.all([
+      const [builds, tests, deploys, jobs] = await Promise.all([
         api("/builds"),
         api("/test-runs"),
         api("/deploys"),
+        // The job ledger: a run's job linkage lives here (job_links), not on the run row — see the
+        // activity-timeline helpers. A failed fetch degrades to 'no job links', never a blank page.
+        api("/jobs", { limit: 200 }).catch(() => []),
       ]);
       const isActiveBuild = (b) => b.status === "running" || b.status === "queued";
       const activeBuilds = builds.filter(isActiveBuild);
@@ -1664,20 +1747,29 @@ const ROUTES = {
         })
         .join("");
 
+      // ---- TIMELINE: one chronological sequence, all three types, sorted by each run's OWN start.
+      const rows = activityRows(builds, tests, deploys, jobs);
+      const linked = rows.filter((r) => r.job).length;
+      const timeline = `<h2>Timeline <span class="muted">${rows.length} run${rows.length === 1 ? "" : "s"} · newest first · all types in one sequence</span></h2>
+        <p class="muted">One row per run, ordered by when it <strong>started</strong> — never its last heartbeat, so a run the reaper
+        finalized after an hour cannot jump back to the top. Consecutive runs that belong to the same job nest under a job heading
+        (build → test → deploy). ${linked ? `${linked} row${linked === 1 ? "" : "s"} linked to a job.` : "No run is linked to a job yet."}
+        Job links come from the job ledger (a run row itself carries no job field); a run no job has linked reads "—".</p>
+        ${activityTimelineHtml(rows)}`;
+
       return `${nowLine()}<h2>Now${state.activityActive ? ` ${badge("live", "kind")}` : ""}</h2>${now}
-        <h2>By host</h2>${hostBlocks}
-        <h2>Full history</h2>
-        <details><summary class="muted">Build runs (${builds.length})</summary>${buildRows(builds.slice(0, 30))}</details>
-        <details><summary class="muted">Test runs (${tests.length})</summary>${testRows(tests.slice(0, 30))}</details>
-        <details><summary class="muted">Deployments (${deploys.length})</summary>${deployRows(deploys.slice(0, 30))}</details>`;
+        ${timeline}
+        <h2>By host</h2>${hostBlocks}`;
     };
     // Fast (5 s) while a run is active; slow (15 s) when idle so an idle install isn't hammered.
     liveBody("#live", body, () => (state.activityActive ? 5000 : 15000));
     return `<h1>Activity</h1>${pipelineStrip("activity")}<p class="muted">What is running right now across all hosts — build runs, test runs and deployments, without SSHing anywhere.
       This view is <strong>service-fed</strong>: rows appear when work goes through the s2docs build/test/deploy services
       (MCP <code>build_start</code>/<code>test_start</code>/<code>deploy_push</code>, or the CLI), <em>not</em> from any CS2 running anywhere.
-      Test-run rows mirror the in-game HUD strip (name / step / state / elapsed). Every row also carries its
-      <strong>run time</strong>: live while a run is going, the final duration once it finishes. Auto-refreshes every 5 s while a run is active, 15 s when idle.</p><div id="live">${await body()}</div>`;
+      The <strong>Timeline</strong> below is ONE chronological sequence across all three types, ordered by when each run
+      <strong>started</strong> (a run's late heartbeat never reorders it), with consecutive runs for the same job nested together.
+      Test-run rows mirror the in-game HUD strip. Every row also carries its <strong>run time</strong>: live while a run is going, the
+      final duration once it finishes. Auto-refreshes every 5 s while a run is active, 15 s when idle.</p><div id="live">${await body()}</div>`;
   },
 
   // Game-independent: the job ledger + queue — one record per requested test/demo/final run.
