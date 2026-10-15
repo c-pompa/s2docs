@@ -128,6 +128,39 @@ def test_diff_is_field_level_and_grouped(db, tmp_path):
     # the value is the member's own type, not a flattened dump of the whole class
     assert rows[0].after == "float32" and rows[0].before is None
     assert diff.totals["schema"] == 1 and diff.limit == 500
+    assert diff.counts["schema"] == {"added": 1, "removed": 0, "changed": 0}
+
+
+def test_diff_counts_are_pre_limit(db, tmp_path):
+    """`counts` is the per-section, per-change-type breakdown taken BEFORE the row cap, so a section
+    capped by `limit` still reports the exact totals; `totals` stays the sum of the three counts."""
+    extra = "float32 m_flA;\n\tfloat32 m_flB;\n\tfloat32 m_flC;"
+    with db.writer() as conn:
+        load_build(conn, GAMES["cs2"], write_tree(tmp_path / "k1", build=2601))
+        load_build(conn, GAMES["cs2"], write_tree(tmp_path / "k2", build=2602, pawn_extra_field=extra))
+    with db.reader() as conn:
+        diff = Repository(conn).diff_builds("cs2", 2601, 2602, limit=2)
+    assert len(diff.sections["schema"]) == 2  # capped to `limit`
+    assert diff.totals["schema"] == 3 and diff.counts["schema"] == {"added": 3, "removed": 0, "changed": 0}
+    # every section carries all three change types, and totals is their sum
+    assert all(set(c) == {"added", "removed", "changed"} for c in diff.counts.values())
+    for sec, c in diff.counts.items():
+        assert diff.totals[sec] == c["added"] + c["removed"] + c["changed"]
+    # the capped rows are a strict subset of what the counts describe
+    assert sum(len(r) for r in diff.sections.values()) < sum(diff.totals.values())
+
+
+def test_diff_counts_equal_rows_when_uncapped(db, tmp_path):
+    """With no cap the counts and the returned rows agree exactly (the pre-limit math is the same)."""
+    with db.writer() as conn:
+        load_build(conn, GAMES["cs2"], write_tree(tmp_path / "u1", build=2611))
+        load_build(conn, GAMES["cs2"], write_tree(tmp_path / "u2", build=2612, extra_convar="sv_new"))
+    with db.reader() as conn:
+        diff = Repository(conn).diff_builds("cs2", 2611, 2612)
+    rows = [e for sec in diff.sections.values() for e in sec]
+    by_type = {k: sum(1 for e in rows if e.change == k) for k in ("added", "removed", "changed")}
+    summed = {k: sum(c[k] for c in diff.counts.values()) for k in ("added", "removed", "changed")}
+    assert summed == by_type
 
 
 def test_diff_reports_removed_field_with_full_name(db, tmp_path):

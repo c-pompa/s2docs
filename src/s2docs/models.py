@@ -220,6 +220,14 @@ class BuildDiff(BaseModel):
         default_factory=dict,
         description="Full change count per section, before the per-section `limit` truncation",
     )
+    counts: dict[str, dict[str, int]] = Field(
+        default_factory=dict,
+        description=(
+            "Per-section change-type breakdown `{section: {'added': n, 'removed': n, 'changed': n}}`, "
+            "counted BEFORE the per-section `limit` cap — exact even when `sections` is truncated. "
+            "`totals[section]` is the sum of that section's three counts."
+        ),
+    )
     limit: int = Field(default=500, description="Row cap applied to each section")
 
 

@@ -54,6 +54,10 @@ def test_diff_field_level_shape(db, tmp_path):
         d = c.get("/api/games/cs2/diff", params={"from": 3001, "to": 3002}).json()
     assert d["from_build"] == 3001 and d["to_build"] == 3002
     assert d["limit"] == 500 and d["totals"]["schema"] == 1
+    # the pre-limit per-change-type breakdown rides the response, all three keys present
+    assert d["counts"]["schema"] == {"added": 1, "removed": 0, "changed": 0}
+    assert all(set(c) == {"added", "removed", "changed"} for c in d["counts"].values())
+    assert set(d["counts"]) == set(d["sections"]) == set(d["totals"])
     assert d["sections"]["schema"] == [
         {
             "name": "CCSPlayerPawn.m_flNew",
