@@ -74,3 +74,83 @@ button:disabled { opacity: .4; cursor: default; }
 .err { color: var(--bad); }
 .inherited td { opacity: .78; }
 @media (max-width: 760px) { .layout { grid-template-columns: 1fr; } nav { display: flex; overflow-x: auto; border: 0; } }
+
+/* ---- Job page: verification stepper, NOW TESTING card, results ---------------- */
+/* The stepper across the top of the job page: one chip per test, coloured by outcome. */
+.vx-stepper { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; margin: 12px 0 14px; }
+.vx-slabel { font-size: 12px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); }
+.vx-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.vx-chip { display: inline-flex; align-items: center; gap: 4px; padding: 5px 10px; border-radius: 999px;
+           border: 1px solid var(--border); background: var(--panel); color: var(--muted); cursor: pointer;
+           font-size: 13px; transition: background .15s, border-color .15s, color .15s; }
+.vx-chip:hover { border-color: var(--muted); }
+.vx-cnum { font-variant-numeric: tabular-nums; opacity: .8; }
+.vx-cname { color: var(--fg); }
+.vx-chip.vx-upcoming { opacity: .45; }
+.vx-chip.vx-upcoming .vx-cname { color: var(--muted); }
+/* done-pass (green) / done-fail (red) / done-skip (grey); no-verdict is an amber outline. */
+.vx-chip.vx-pass { border-color: var(--ok); }
+.vx-chip.vx-pass .vx-cname { color: var(--ok); }
+.vx-chip.vx-fail { border-color: var(--bad); }
+.vx-chip.vx-fail .vx-cname { color: var(--bad); }
+.vx-chip.vx-skip { border-color: var(--border); opacity: .75; }
+.vx-chip.vx-noverdict { border-color: var(--accent); border-style: dashed; }
+.vx-chip.vx-noverdict .vx-cname { color: var(--accent); }
+/* The CURRENT test: a pulsing accent border, so the eye lands on it first. */
+.vx-chip.vx-current { border-color: var(--accent); border-width: 2px; background: color-mix(in srgb, var(--accent) 12%, var(--panel));
+                      animation: vx-pulse 1.4s ease-in-out infinite; }
+@keyframes vx-pulse { 0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent) 55%, transparent); }
+                      50% { box-shadow: 0 0 0 6px color-mix(in srgb, var(--accent) 0%, transparent); } }
+
+/* The NOW TESTING card: the current test, big and distinct. */
+.vx-card { border-color: var(--accent); border-width: 2px; }
+.vx-card-head { display: flex; align-items: center; gap: 10px; margin-bottom: 2px; }
+.vx-live { color: var(--bad); font-weight: 700; font-size: 12px; letter-spacing: .08em; animation: vx-blink 1.6s steps(2, start) infinite; }
+@keyframes vx-blink { 50% { opacity: .35; } }
+.vx-testof { font-size: 13px; font-weight: 700; letter-spacing: .06em; color: var(--accent); }
+.vx-title { font-size: 20px; margin: 2px 0 10px; border: 0; padding: 0; }
+.vx-field { margin: 6px 0; }
+.vx-lbl { display: inline-block; min-width: 132px; font-size: 11px; text-transform: uppercase; letter-spacing: .05em;
+          color: var(--muted); }
+.vx-count { display: flex; align-items: center; gap: 10px; margin: 12px 0 4px; }
+.vx-bar { flex: 1; height: 8px; border-radius: 999px; background: var(--code); overflow: hidden; border: 1px solid var(--border); }
+.vx-bar-fill { display: block; height: 100%; width: 100%; border-radius: 999px;
+               background: linear-gradient(90deg, var(--accent), var(--ok)); transition: width 1s linear; }
+.vx-cd { min-width: 96px; text-align: right; color: var(--muted); }
+.vx-hint { font-size: 13px; }
+.vx-recorded { margin: 10px 0 4px; font-weight: 600; }
+.vx-recorded .badge { font-size: 12px; }
+.vx-waiting { display: flex; align-items: center; gap: 8px; color: var(--muted); margin: 6px 0 2px; }
+/* Spinner: a small rotating ring, used by 'Sending…' and the 'waiting for the demo' line. */
+.vx-spin { display: inline-block; width: 13px; height: 13px; border-radius: 50%; vertical-align: -2px;
+           border: 2px solid color-mix(in srgb, var(--accent) 35%, transparent); border-top-color: var(--accent);
+           animation: vx-rot .7s linear infinite; }
+@keyframes vx-rot { to { transform: rotate(360deg); } }
+
+/* The verdict buttons: named colours, and a real :active press. */
+.vx-btns { display: flex; gap: 8px; }
+.vx-btn { font-weight: 600; border-width: 1px; transition: transform .06s, filter .12s; }
+.vx-btn:not(:disabled):hover { filter: brightness(1.12); }
+.vx-btn:not(:disabled):active { transform: translateY(2px); filter: brightness(.85); box-shadow: inset 0 2px 6px rgba(0, 0, 0, .45); }
+.vx-btn-pass { background: color-mix(in srgb, var(--ok) 22%, var(--code)); border-color: var(--ok); color: var(--ok); }
+.vx-btn-fail { background: color-mix(in srgb, var(--bad) 22%, var(--code)); border-color: var(--bad); color: var(--bad); }
+.vx-btn-skip { background: var(--code); border-color: var(--muted); color: var(--muted); }
+.vx-btn:disabled { opacity: .55; }
+.vx-error { font-weight: 600; }
+
+/* The card fades/slides in when the run moved to the next test. */
+.vx-enter { animation: vx-slide .7s ease-out; }
+@keyframes vx-slide { from { opacity: 0; transform: translateY(-14px); } to { opacity: 1; transform: none; } }
+
+/* Transient 'Moved on to TEST k' banner (appended to <body>, fixed, self-removing). */
+.vx-banner { position: fixed; top: 14px; left: 50%; transform: translateX(-50%); z-index: 50;
+             padding: 10px 18px; border-radius: 999px; font-weight: 700; color: #10131a;
+             background: var(--accent); box-shadow: 0 6px 24px rgba(0, 0, 0, .45);
+             transition: opacity .6s, transform .6s; }
+.vx-banner.vx-gone { opacity: 0; transform: translate(-50%, -12px); }
+
+/* Finished job: the results summary. */
+.vx-results { border-color: var(--ok); }
+.vx-complete { font-size: 16px; font-weight: 700; padding: 8px 12px; border-radius: 8px; margin-bottom: 10px;
+               background: color-mix(in srgb, var(--ok) 16%, var(--panel)); border: 1px solid var(--ok); color: var(--ok); }
+.vx-rtable { margin-top: 4px; }

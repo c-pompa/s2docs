@@ -183,9 +183,10 @@ def test_frontend_live_refresh_never_clobbers_typing(client):
     # (2) the value-restore helper wraps the innerHTML replacement
     assert "function snapshotLiveInputs" in js and "function restoreLiveInputs" in js
     assert "const saved = snapshotLiveInputs(el)" in js and "restoreLiveInputs(el, saved)" in js
-    # (3) a successful verdict submit clears the note box and re-renders at once
+    # (3) a successful verdict submit clears the note box and refreshes the card in place (a
+    # transition-aware refresh, not a full route() re-render, so the recorded state and the scroll stay put)
     verdict = js.split("function bindJobVerdict", 1)[1]
-    assert "form.elements.notes.value = \"\"" in verdict and "route()" in verdict
+    assert "form.elements.notes.value = \"\"" in verdict and "refreshJobLive(" in verdict
 
 
 def test_api_build_and_test_lists_carry_lock(client):
@@ -467,3 +468,151 @@ def test_central_time_rendering_executes_in_node(client):
     assert out["unparseableStamp"] is None and out["unparseableHtml"] == "dry-run"  # kept, escaped
     assert out["nullHtml"] == "—"
     assert re.fullmatch(r"\d{1,2}:\d{2} [AP]M (CST|CDT)", out["now"]), out["now"]  # '4:42 PM CST'
+
+
+# ------------------------------------------------- Job page: verification UX
+# The user ask: "make it clear we have changed to the next verification — all look the same and the
+# button doesn't look pressed and nothing looks like it's loading or moving to the next". These tests
+# pin the stepper, the NOW TESTING card and the results summary — the render functions by executing
+# them, the transition/banner/countdown/ticker wiring as markers in the shipped file.
+def test_frontend_verification_stepper_and_card_markers(client):
+    """Stepper + NOW TESTING card + results summary + transition/ticker wiring all exist in app.js."""
+    js = client.get("/app.js").text
+    css = client.get("/style.css").text
+    # (1) the stepper model + chip renderer + the state vocabulary
+    assert "function jobVerifications" in js and "function jobStepper" in js and "function vxChip" in js
+    assert "VX_STATE_CLASS" in js and '"no-verdict": "vx-noverdict"' in js
+    assert "vx-testing" in js and "vx-upcoming" in js
+    assert 'data-vx-goto=' in js and "aria-current" in js
+    # chips anchor to a timeline entry (jobTimeline tags its rows) and a delegated click scrolls there
+    assert 'data-vx-step="${esc(e.phase)}"' in js and "function gotoStepTimeline" in js
+    assert 'closest("[data-vx-goto]")' in js
+    # (2) the card: 'TEST k of n', both explainer fields, the countdown bar, the respond hint
+    assert "function nowTestingCard" in js and "TEST ${esc(k)} of ${esc(n)}" in js
+    assert "What is tested" in js and "What you should see" in js and "function vxCountdown" in js
+    assert "vx-bar-fill" in js and 'data-vx-fill' in js
+    # current-step transition: animate the card, transient banner, and the document.title mirror
+    assert "function jobPostRender" in js and "function showTransitionBanner" in js
+    assert "Moved on to TEST ${k}: ${name}" in js and "vx-enter" in js
+    assert "document.title = `TEST ${k}/${n} — ${name}`" in js
+    # (3) pressed/sending/recorded states on the verdict form
+    assert "vx-btn vx-btn-pass" in js and "vx-btn vx-btn-fail" in js and "vx-btn vx-btn-skip" in js
+    assert "Sending…" in js and "b.disabled = true" in js and "b.disabled = false" in js
+    assert '"Recorded: " + String(verdict.verdict).toUpperCase()' in js and "(via ${esc(verdict.source)})" in js
+    assert "Waiting for the demo to move to the next test…" in js
+    # (4) the results summary when the run ends
+    assert "function jobResults" in js and "Run complete" in js and "vx-rtable" in js
+    # (5) countdown/spinners stay client-side: the 1 s ticker drives both readout and bar width
+    assert "function updateCountdowns" in js and "setInterval(updateCountdowns, 1000)" in js
+    assert 'el.hasAttribute("data-vx-fill")' in js and "el.style.width = " in js
+    # the CSS the states rely on: pulse, press, spinner, bar transition, banner
+    assert "vx-pulse" in css and "vx-btn:not(:disabled):active" in css and "vx-rot" in css
+    assert "transition: width 1s linear" in css and ".vx-banner" in css and ".vx-card" in css
+
+
+def _vx_fixture(status, *, current_verdict=False, done=False):
+    """A job shaped like the live verify-demo run: a 'plan' event (6 tests), s1..s4 prompt events, and
+    verdicts on s1 (pass/chat), s2 (fail/web), s3 (skip/console) — optionally a verdict on the current
+    s4, and optionally a closing 'done' event."""
+    plan = [
+        {"id": f"s{i}", "index": i, "title": f"Test {i} title", "strip_name": f"test-{i}-name",
+         "strip_purpose": f"purpose {i}", "strip_expect": f"expect {i}"}
+        for i in range(1, 7)
+    ]
+    events = [{"id": 1, "level": "info", "phase": "plan", "message": "plan posted",
+               "data": {"plan": plan, "wait_seconds": 120}}]
+    for i in range(1, 5):
+        events.append({"id": 10 + i, "level": "info", "phase": f"s{i}", "message": f"STEP {i}/6",
+                       "data": {"prompt": f"prompt {i}", "look_for": f"look {i}", "step_index": i, "step_total": 6,
+                                "strip_name": f"test-{i}-name", "strip_purpose": f"purpose {i}",
+                                "strip_expect": f"expect {i}", "deadline_utc": "2026-10-14T23:40:00Z",
+                                "respond_hint": "!pass / !fail / !skip"}})
+    for sid, vd, src in (("s1", "pass", "chat"), ("s2", "fail", "web"), ("s3", "skip", "console")):
+        events.append({"id": 30 + int(sid[1]), "level": "milestone", "phase": None, "message": f"verdict {vd}",
+                       "data": {"verdict": vd, "source": src, "notes": f"note {sid}", "step": sid}})
+    if current_verdict:
+        events.append({"id": 99, "level": "milestone", "phase": None, "message": "verdict fail",
+                       "data": {"verdict": "fail", "source": "chat", "notes": "camera stuck", "step": "s4"}})
+    if done:
+        events.append({"id": 100, "level": "info", "phase": "done", "message": "run complete",
+                       "data": {"results": [{"id": f"s{i}", "verdict": "pass", "source": "chat", "notes": None}
+                                            for i in range(1, 7)]}})
+    cs = None
+    if status == "running":
+        cs = {"phase": "s4", "step_index": 4, "step_total": 6, "prompt": "prompt 4", "look_for": "look 4",
+              "deadline_utc": "2026-10-14T23:40:00Z", "asked_at": "2026-10-14T23:38:00Z",
+              "respond_hint": "!pass / !fail / !skip"}
+    return {"id": "j-vux", "status": status, "current_step": cs, "events": events}
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_verification_render_executes_in_node(client):
+    """Lift the shipped verification renderers out of app.js and run them against a synthetic job:
+    the six chip states, the current test's card (TEST k of n + the bar), the recorded+waiting state,
+    and the finished 'Run complete' results table."""
+    assert NODE is not None  # skipif above
+    js = client.get("/app.js").text
+    block = "const VERDICT_SET" + js.split("const VERDICT_SET", 1)[1].split("function jobDetail", 1)[0]
+    prologue = (
+        'const ESC_MAP = {"&":"&amp;","<":"&lt;",">":"&gt;",\'"\':"&quot;","\'":"&#39;"};\n'
+        'const esc = (v) => String(v ?? "").replace(/[&<>"\']/g, (c) => ESC_MAP[c]);\n'
+        'const badge = (t, cls = "") => `<span class="badge ${cls}">${esc(t)}</span>`;\n'
+    )
+    epilogue = (
+        "const states = (j) => jobVerifications(j).map((x) => [x.id, x.state]);\n"
+        "console.log(JSON.stringify({\n"
+        "  runningStates: states(RUN),\n"
+        "  stepper: jobStepper(RUN),\n"
+        "  card: nowTestingCard(RUN),\n"
+        "  recordedCard: nowTestingCard(REC),\n"
+        "  curStates: states(CUR),\n"
+        "  curStepper: jobStepper(CUR),\n"
+        "  curCard: nowTestingCard(CUR),\n"
+        "  doneStates: states(DONE),\n"
+        "  results: jobResults(DONE),\n"
+        "}));\n"
+    )
+    # a webapp verdict POSTs without a `step`, so its milestone has no phase: it must still land on the
+    # test that was current when it arrived (the newest prompt before it).
+    cur = _vx_fixture("running")
+    cur["events"].append({"id": 250, "level": "milestone", "phase": None, "message": "verdict fail (web): stuck",
+                          "data": {"verdict": "fail", "source": "web", "notes": "stuck", "step": None}})
+    script = (
+        prologue
+        + block
+        + "\nconst RUN = " + json.dumps(_vx_fixture("running")) + ";\n"
+        + "const REC = " + json.dumps(_vx_fixture("running", current_verdict=True)) + ";\n"
+        + "const CUR = " + json.dumps(cur) + ";\n"
+        + "const DONE = " + json.dumps(_vx_fixture("failed", done=True)) + ";\n"
+        + epilogue
+    )
+    proc = subprocess.run([NODE, "-e", script], capture_output=True, text=True, encoding="utf-8", timeout=60)
+    assert proc.returncode == 0, proc.stderr
+    out = json.loads(proc.stdout)
+    # the six chip states: done colours, the current test, the untouched upcoming ones
+    assert out["runningStates"] == [
+        ["s1", "pass"], ["s2", "fail"], ["s3", "skip"], ["s4", "current"], ["s5", "upcoming"], ["s6", "upcoming"],
+    ]
+    # the stepper carries the state classes, the verdict + its source, and the current pulse
+    assert "vx-chip vx-pass" in out["stepper"] and "vx-chip vx-fail" in out["stepper"]
+    assert "vx-chip vx-skip" in out["stepper"] and "vx-testing vx-current" in out["stepper"]
+    assert 'data-vx-goto="s4"' in out["stepper"] and "via chat" in out["stepper"] and "vx-upcoming" in out["stepper"]
+    # the card shows the current test big: TEST k of n, both explainer fields, and a countdown bar
+    assert "TEST 4 of 6" in out["card"] and 'data-vx-step="s4"' in out["card"]
+    assert "What is tested" in out["card"] and "purpose 4" in out["card"]
+    assert "What you should see" in out["card"] and "expect 4" in out["card"]
+    assert "vx-bar-fill" in out["card"] and "!pass / !fail / !skip" in out["card"]
+    assert "Recorded:" not in out["card"]  # nothing recorded for the current test yet → no waiting state
+    # a verdict already on the current test renders the recorded + waiting state (from any source)
+    assert "Recorded: FAIL" in out["recordedCard"] and "(via chat)" in out["recordedCard"]
+    assert "camera stuck" in out["recordedCard"]
+    assert "Waiting for the demo to move to the next test…" in out["recordedCard"]
+    # a web verdict (no step tag) still lands on the test that was current when it arrived
+    assert out["curStates"][3] == ["s4", "fail"]
+    assert "vx-fail" in out["curStepper"] and "vx-current" in out["curStepper"] and "via web" in out["curStepper"]
+    assert "Recorded: FAIL" in out["curCard"] and "(via web)" in out["curCard"]
+    # a finished job replaces the card with the results table (milestone verdicts win over done results)
+    assert out["doneStates"] == [["s1", "pass"], ["s2", "fail"], ["s3", "skip"],
+                                 ["s4", "pass"], ["s5", "pass"], ["s6", "pass"]]
+    assert "Run complete" in out["results"] and "vx-rtable" in out["results"]
+    assert "4</strong> pass" in out["results"] and "via chat" in out["results"]
