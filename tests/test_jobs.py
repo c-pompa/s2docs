@@ -659,6 +659,59 @@ def test_job_verdict_conflicts_not_running_and_no_run(client, jdb):
     assert client.post("/api/jobs/j-ghost/verdict", json={"verdict": "pass"}).status_code == 404
 
 
+def test_job_page_verdict_publishes_exactly_one_confirm_row(client, jdb):
+    """POST /jobs/{id}/verdict from the job page (source 'web') lands EXACTLY ONE human-confirm row,
+    ref'd to the job, its note tagged 'via job page', and rewrites latest_confirm.json to that row."""
+    jid, run_id = _running_job_with_run(client, jdb)
+    assert not confirms.latest_confirm_path().exists()  # nothing pushed before the verdict
+    r = client.post(f"/api/jobs/{jid}/verdict", json={"verdict": "pass", "notes": "wire is occluded"})
+    assert r.status_code == 200, r.text
+    rows = client.get("/api/evidence", params={"kind": "human-confirm"}).json()
+    assert len(rows) == 1  # exactly one row for one verdict
+    row = rows[0]
+    assert row["ref"] == jid  # ref = job id
+    assert row["test_run_id"] == run_id  # the job's current/last test run
+    assert row["data"]["verdict"] == "pass" and row["data"]["source"] == "web"
+    assert row["data"]["notes"] == "wire is occluded via job page"  # the user's note + 'via job page'
+    assert row["data"]["job_id"] == jid
+    # the push file now holds exactly that row, and the journal has exactly one line
+    latest = json.loads(confirms.latest_confirm_path().read_text(encoding="utf-8"))
+    assert latest["id"] == row["id"] and latest["ref"] == jid
+    lines = [ln for ln in confirms.confirms_jsonl_path().read_text(encoding="utf-8").splitlines() if ln.strip()]
+    assert len(lines) == 1
+
+
+def test_job_page_verdict_without_note_is_still_tagged(client, jdb):
+    """A job-page verdict with no note still records source 'web' and the 'via job page' tag."""
+    jid, _ = _running_job_with_run(client, jdb)
+    client.post(f"/api/jobs/{jid}/verdict", json={"verdict": "skip"})
+    row = client.get("/api/evidence", params={"kind": "human-confirm"}).json()[0]
+    assert row["data"]["source"] == "web" and row["data"]["notes"] == "via job page"
+
+
+def test_coordinator_relayed_verdict_is_not_tagged_via_job_page(client, jdb):
+    """A verdict relayed by the coordinator (source 'coordinator') through the same route keeps its raw
+    note and is NOT tagged 'via job page' — the tag marks the job page, not every writer of the route."""
+    jid, _ = _running_job_with_run(client, jdb)
+    client.post(f"/api/jobs/{jid}/verdict", json={"verdict": "pass", "notes": "looks good", "source": "coordinator"})
+    row = client.get("/api/evidence", params={"kind": "human-confirm"}).json()[0]
+    assert row["data"]["source"] == "coordinator" and row["data"]["notes"] == "looks good"
+    assert row["ref"] == jid  # ref still names the job
+
+
+def test_non_verdict_job_events_do_not_publish(client, jdb):
+    """A plain job event (a log line / progress) is NOT a verdict: it must neither write a human-confirm
+    row nor touch the confirm push files."""
+    jid, _ = _running_job_with_run(client, jdb)
+    r = client.post(
+        f"/api/jobs/{jid}/event",
+        json={"level": "info", "message": "still running", "phase": "wall-occlusion"},
+    )
+    assert r.status_code == 200
+    assert client.get("/api/evidence", params={"kind": "human-confirm"}).json() == []
+    assert not confirms.latest_confirm_path().exists() and not confirms.confirms_jsonl_path().exists()
+
+
 def test_current_step_derivation_and_verdict_from_any_source(client, jdb):
     """current_step = the newest prompt event (+phase); its verdict is set once a verdict milestone newer
     than it lands — from ANY source (chat via a director event, or the webapp itself)."""
