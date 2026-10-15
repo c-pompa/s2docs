@@ -955,15 +955,33 @@ def create_mcp_server(db: Database, workspace: Path | None = None) -> MCPServer:
     @server.tool(annotations=NON_IDEMPOTENT)
     def job_finish(
         job_id: JobId,
-        status: Annotated[str, Field(description="passed | failed | error | cancelled")],
+        status: Annotated[
+            str, Field(description="passed | failed | error | cancelled | inconclusive")
+        ],
         summary: Annotated[
             dict,
             Field(description="Close-out summary, ALL FOUR required and <=600 chars each: {what, why, learned, next}"),
         ],
     ) -> m.Job:
         """Close out a running/queued job. Gate: `summary` must carry what, why, learned and next, each
-        non-empty and <=600 chars; otherwise the call is rejected with the offending field names."""
+        non-empty and <=600 chars; otherwise the call is rejected with the offending field names.
+        `status='inconclusive'` is the honest close-out for a run that ended without a pass/fail verdict
+        (a step-gated demo the user stopped answering) — it is NOT a pass."""
         return _jobs(lambda: jobs.finish(db, job_id, status=status, summary=summary))
+
+    @server.tool(annotations=NON_IDEMPOTENT)
+    def job_restatus(
+        job_id: JobId,
+        status: Annotated[
+            str, Field(description="passed | failed | error | cancelled | inconclusive")
+        ],
+        reason: Annotated[str, Field(description="Why the ledger is being corrected (recorded on the timeline)")],
+    ) -> m.Job:
+        """Correct a FINISHED job's terminal status (terminal -> terminal), for a mis-recorded close-out
+        — e.g. a run that finished 'passed' but never got a verdict. `reason` is mandatory and lands as a
+        `milestone` timeline event. The job must already be terminal (a queued/running job finishes or is
+        cancelled) and the target must differ from the current status, else the call is a conflict."""
+        return _jobs(lambda: jobs.restatus(db, job_id, status=status, reason=reason))
 
     @server.tool(annotations=NON_IDEMPOTENT)
     def job_cancel(

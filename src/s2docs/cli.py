@@ -35,6 +35,10 @@ _DURATION_UNITS = {"": 1, "s": 1, "m": 60, "h": 3600, "d": 86400}
 # Kept as literals so `cli.py`'s hot path never imports the Pydantic models module.
 _EVIDENCE_KINDS = ("console_transcript", "file_hash", "pixel_diff", "screenshot", "note", "other")
 _TEST_STATES = ("idle", "running", "pass", "fail")
+# `job finish` accepts these; `job restatus` only a terminal one. Literals, mirroring models.JOB_STATUSES
+# (the service validates too, so a drift here is a 9, never a bad row).
+_JOB_FINISH_STATUSES = ("passed", "failed", "error", "cancelled", "inconclusive")
+_JOB_TERMINAL_STATUSES = ("passed", "failed", "error", "cancelled", "inconclusive")
 
 
 def _parse_duration(value: str) -> int:
@@ -568,7 +572,7 @@ def _cmd_test(args: argparse.Namespace) -> int:
 
 
 def _human_job(job) -> list[str]:
-    out = [f"{job.id}  {job.kind:5}  {job.status:9}  pos={job.position}  {job.title}"]
+    out = [f"{job.id}  {job.kind:5}  {job.status:12}  pos={job.position}  {job.title}"]
     out.append(f"  target: {job.target}")
     if job.host_id:
         out.append(f"  host: {job.host_id}")
@@ -626,7 +630,9 @@ def _cmd_job(args: argparse.Namespace) -> int:
             return _emit(args, {"job": job.model_dump()}, _human_job(job))
         if args.job_cmd == "list":
             rows = jobs.list_jobs(db, status="active" if args.active else None, host_id=args.host)
-            human = [f"{j.id}  {j.kind:5}  {j.status:9}  pos={j.position}  {j.host_id or '-'}  {j.title}" for j in rows]
+            human = [
+                f"{j.id}  {j.kind:5}  {j.status:12}  pos={j.position}  {j.host_id or '-'}  {j.title}" for j in rows
+            ]
             return _emit(args, {"jobs": [j.model_dump() for j in rows]}, human or ["no jobs"])
         if args.job_cmd == "show":
             job = jobs.get(db, args.job_id)
@@ -674,6 +680,9 @@ def _cmd_job(args: argparse.Namespace) -> int:
             return _emit(args, {"job": job.model_dump()}, _human_job(job))
         if args.job_cmd == "cancel":
             job = jobs.cancel(db, args.job_id, reason=args.reason)
+            return _emit(args, {"job": job.model_dump()}, _human_job(job))
+        if args.job_cmd == "restatus":
+            job = jobs.restatus(db, args.job_id, status=args.status, reason=args.reason)
             return _emit(args, {"job": job.model_dump()}, _human_job(job))
         if args.job_cmd == "watch":
             return _watch_job(db, args.job_id)
@@ -947,7 +956,7 @@ def main(argv: list[str] | None = None) -> int:
     q.add_argument("--note", help="What to capture")
     q = jc.add_parser("finish", help="Close out a job (all four summary fields required)")
     q.add_argument("job_id")
-    q.add_argument("--status", required=True, choices=["passed", "failed", "error", "cancelled"])
+    q.add_argument("--status", required=True, choices=list(_JOB_FINISH_STATUSES))
     q.add_argument("--what", required=True)
     q.add_argument("--why", required=True)
     q.add_argument("--learned", required=True)
@@ -961,6 +970,14 @@ def main(argv: list[str] | None = None) -> int:
     q = jc.add_parser("cancel", help="queued/running -> cancelled")
     q.add_argument("job_id")
     q.add_argument("--reason")
+    q = jc.add_parser("restatus", help="Correct a FINISHED job's status (terminal -> terminal; reason required)")
+    q.add_argument("job_id")
+    q.add_argument(
+        "--status",
+        required=True,
+        help=" | ".join(_JOB_TERMINAL_STATUSES) + " (validated in the service -> exit 9)",
+    )
+    q.add_argument("--reason", required=True, help="Why the ledger is being corrected (recorded on the timeline)")
     q = jc.add_parser("watch", help="Tail a job's events until it ends")
     q.add_argument("job_id")
     p.set_defaults(fn=_cmd_job)

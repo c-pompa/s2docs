@@ -42,7 +42,7 @@ ACTIVE_STATUSES: tuple[str, ...] = m.ACTIVE_JOB_STATUSES
 TERMINAL_STATUSES: tuple[str, ...] = m.TERMINAL_JOB_STATUSES
 LEVELS: tuple[str, ...] = m.JOB_EVENT_LEVELS
 LINK_KINDS: tuple[str, ...] = m.JOB_LINK_KINDS
-FINISH_STATUSES: tuple[str, ...] = ("passed", "failed", "error", "cancelled")
+FINISH_STATUSES: tuple[str, ...] = ("passed", "failed", "error", "cancelled", "inconclusive")
 VERDICTS: tuple[str, ...] = m.VERDICTS
 CONFIRM_SOURCES: tuple[str, ...] = m.CONFIRM_SOURCES
 DEFAULT_VERDICT_SOURCE = "web"
@@ -653,7 +653,12 @@ def next_job(db: Database, host_id: str) -> m.Job:
 
 
 def finish(db: Database, job_id: str, *, status: str, summary: dict | None) -> m.Job:
-    """Close out a running/queued job. Gate: all four summary fields non-empty, each <= 600 chars."""
+    """Close out a running/queued job. Gate: all four summary fields non-empty, each <= 600 chars.
+
+    ``status='inconclusive'`` is the honest close-out for a run that ended without a pass/fail verdict
+    (a step-gated demo the user stopped answering). It carries the same summary gate as any other
+    finish status.
+    """
     job = get(db, job_id)
     if status not in FINISH_STATUSES:
         raise JobValidationError(f"status must be one of {FINISH_STATUSES}, not {status!r}", ["status"])
@@ -695,4 +700,44 @@ def cancel(db: Database, job_id: str, *, reason: str | None = None) -> m.Job:
         )
     if _s(reason):
         _insert_event(db, job_id, "info", None, f"cancelled: {reason}", {"reason": reason})
+    return get(db, job_id)
+
+
+def restatus(db: Database, job_id: str, *, status: str, reason: str | None = None) -> m.Job:
+    """Correct a FINISHED job's terminal status (terminal -> terminal) with a mandatory reason.
+
+    The ledger's own fix-up path, so a mis-recorded close-out (a step-gated demo that finished
+    'passed' with pass=0/fail=0/no-verdict=1) can be corrected through the API instead of by hand.
+    Rules: the target must be a terminal status and must differ from the current one; the job must
+    already be terminal (a queued/running job finishes or is cancelled — restatus never resurrects a
+    queue entry); and the reason is required, recorded as a ``milestone`` timeline event so the
+    correction is auditable. ``finished_at`` is left alone: the run ended when it ended, this only
+    re-states the verdict.
+    """
+    job = get(db, job_id)  # 404 on an unknown job
+    if status not in TERMINAL_STATUSES:
+        raise JobValidationError(f"status must be one of {TERMINAL_STATUSES}, not {status!r}", ["status"])
+    if job.status not in TERMINAL_STATUSES:
+        raise JobConflict(
+            f"job {job_id} is {job.status}; only a finished job can be restated "
+            "(finish or cancel it first — restatus never reopens a job)"
+        )
+    if job.status == status:
+        raise JobConflict(f"job {job_id} is already {status}; restatus must change the status")
+    if not _s(reason):
+        raise JobValidationError("reason is required (the correction is recorded on the timeline)", ["reason"])
+    with db.writer() as conn, conn:
+        conn.execute(
+            "UPDATE jobs SET status = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') "
+            "WHERE id = ? AND status = ?",
+            (status, job_id, job.status),
+        )
+    _insert_event(
+        db,
+        job_id,
+        "milestone",
+        None,
+        f"restatused {job.status} -> {status}: {reason}",
+        {"restatus": {"from": job.status, "to": status, "reason": reason}},
+    )
     return get(db, job_id)

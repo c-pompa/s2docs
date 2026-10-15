@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sqlite3
 import struct
 import zlib
 
@@ -397,6 +398,7 @@ def test_mcp_jobs_registration_and_round_trip(jdb):
         "job_request_screenshot",
         "job_link",
         "job_finish",
+        "job_restatus",
         "job_cancel",
     } <= tools
     assert [j["id"] for j in listed.structured_content["result"]] == [jid]
@@ -810,3 +812,206 @@ def test_cli_job_verdict_exit_codes(tmp_path, monkeypatch, capsys):
     assert "error:" in capsys.readouterr().err
     # an unknown job is not found (3)
     assert _run_cli(monkeypatch, tmp_path, ["job", "verdict", "j-ghost", "--verdict", "pass"]) == 3
+
+
+# ------------------------------------------------- inconclusive (a run with no verdict)
+# The bug this closes: a step-gated demo the user stopped answering finished 'passed' with
+# pass=0/fail=0/no-verdict=1 (jobs j-4a8bc044 / j-7a3258e2 on the live server), so the ledger claimed a
+# verdict nobody made. 'inconclusive' is the terminal status such a run ends as, through the same
+# close-out gate as any other finish.
+def test_finish_inconclusive_is_terminal_and_round_trips(client, jdb):
+    jid = _enq(client).json()["id"]
+    client.post(f"/api/jobs/{jid}/start", json={"worker": "ws/demo"})
+    # the same summary gate as every other finish status
+    r = client.post(f"/api/jobs/{jid}/finish", json={"status": "inconclusive"})
+    assert r.status_code == 422 and r.json()["fields"] == ["what", "why", "learned", "next"]
+    r = client.post(f"/api/jobs/{jid}/finish", json={"status": "inconclusive", "summary": _summary()})
+    assert r.status_code == 200
+    j = r.json()
+    assert j["status"] == "inconclusive" and j["finished_at"] and j["summary"] == _summary()
+    # readable back, filterable as itself, and NOT part of the active queue
+    assert client.get(f"/api/jobs/{jid}").json()["status"] == "inconclusive"
+    assert [x["id"] for x in client.get("/api/jobs", params={"status": "inconclusive"}).json()] == [jid]
+    assert client.get("/api/jobs", params={"status": "active"}).json() == []
+    # terminal: no second finish, no cancel — and it never becomes a 'passed'
+    assert client.post(f"/api/jobs/{jid}/finish", json={"status": "passed", "summary": _summary()}).status_code == 409
+    assert client.post(f"/api/jobs/{jid}/cancel", json={}).status_code == 409
+    with jdb.reader() as conn:  # the value the migration's CHECK must accept reached the DB
+        assert conn.execute("SELECT status FROM jobs WHERE id = ?", (jid,)).fetchone()["status"] == "inconclusive"
+
+
+def test_mcp_job_finish_inconclusive_and_restatus_round_trip(jdb):
+    server = create_mcp_server(jdb)
+
+    async def main():
+        async with Client(server) as c:
+            jid = (await c.call_tool("job_enqueue", {**INTAKE, "host_id": "desktop-pc"})).structured_content["id"]
+            await c.call_tool("job_start", {"job_id": jid, "worker": "ws/mcp"})
+            fin = await c.call_tool("job_finish", {"job_id": jid, "status": "inconclusive", "summary": _summary()})
+            tools = {t.name for t in (await c.list_tools()).tools}
+            again = await c.call_tool(
+                "job_restatus",
+                {"job_id": jid, "status": "passed", "reason": "the verdict arrived after the close-out"},
+            )
+            return tools, fin, again
+
+    tools, fin, again = anyio.run(main)
+    assert {"job_finish", "job_restatus"} <= tools
+    assert fin.structured_content["status"] == "inconclusive"
+    assert again.structured_content["status"] == "passed"
+    assert again.structured_content["events"][-1]["data"]["restatus"]["to"] == "passed"
+
+
+def test_cli_job_inconclusive_finish_and_restatus(tmp_path, monkeypatch, capsys):
+    db = Database(tmp_path / "data" / "s2docs.db")
+    hosts.register_host(db, "desktop-pc", "pompa@x", shell="powershell")
+    base = [
+        "job", "enqueue", "--kind", "test", "--title", "t", "--target", "x@1",
+        "--purpose", "p", "--expected", "e", "--host", "desktop-pc",
+    ]
+    assert _run_cli(monkeypatch, tmp_path, ["--json", *base]) == 0
+    jid = json.loads(capsys.readouterr().out)["job"]["id"]
+    assert _run_cli(monkeypatch, tmp_path, ["job", "start", jid, "--worker", "ws/cli"]) == 0
+    capsys.readouterr()
+    # the CLI accepts 'inconclusive' (the old choices list rejected the argument outright)
+    assert (
+        _run_cli(
+            monkeypatch,
+            tmp_path,
+            ["--json", "job", "finish", jid, "--status", "inconclusive",
+             "--what", "a", "--why", "b", "--learned", "c", "--next", "d"],
+        )
+        == 0
+    )
+    assert json.loads(capsys.readouterr().out)["job"]["status"] == "inconclusive"
+    # restatus: a non-terminal target is validation (9, the global EXIT_VALIDATION)
+    assert _run_cli(monkeypatch, tmp_path, ["job", "restatus", jid, "--status", "maybe", "--reason", "r"]) == 9
+    assert "error:" in capsys.readouterr().err
+    # happy path: correct the ledger; the reason lands on the timeline
+    assert (
+        _run_cli(
+            monkeypatch, tmp_path, ["--json", "job", "restatus", jid, "--status", "passed", "--reason", "answered"]
+        )
+        == 0
+    )
+    out = json.loads(capsys.readouterr().out)["job"]
+    assert out["status"] == "passed"
+    assert out["events"][-1]["data"]["restatus"] == {"from": "inconclusive", "to": "passed", "reason": "answered"}
+    # an unknown job is not found (3)
+    assert _run_cli(monkeypatch, tmp_path, ["job", "restatus", "j-ghost", "--status", "passed", "--reason", "r"]) == 3
+
+
+# --------------------------------------------------- restatus (audited ledger fix-up)
+def test_restatus_terminal_to_terminal_with_a_mandatory_reason(client):
+    jid = _enq(client).json()["id"]
+    client.post(f"/api/jobs/{jid}/start", json={"worker": "ws/x"})
+    client.post(f"/api/jobs/{jid}/finish", json={"status": "passed", "summary": _summary()})
+    # a queued/running job cannot be restated: restatus never reopens a job (409)
+    live = _enq(client).json()["id"]
+    assert client.post(f"/api/jobs/{live}/restatus", json={"status": "inconclusive", "reason": "x"}).status_code == 409
+    # the reason is mandatory (422) and the target must be terminal (422)
+    r = client.post(f"/api/jobs/{jid}/restatus", json={"status": "inconclusive"})
+    assert r.status_code == 422 and r.json()["fields"] == ["reason"]
+    r = client.post(f"/api/jobs/{jid}/restatus", json={"status": "running", "reason": "x"})
+    assert r.status_code == 422 and r.json()["fields"] == ["status"]
+    # a no-op change is a conflict
+    assert client.post(f"/api/jobs/{jid}/restatus", json={"status": "passed", "reason": "x"}).status_code == 409
+    # the correction lands: status changes, finished_at + summary stay (a re-statement, not a re-finish)
+    before = client.get(f"/api/jobs/{jid}").json()
+    r = client.post(f"/api/jobs/{jid}/restatus", json={"status": "inconclusive", "reason": "no verdict was ever given"})
+    assert r.status_code == 200
+    j = r.json()
+    assert j["status"] == "inconclusive"
+    assert j["finished_at"] == before["finished_at"] and j["summary"] == before["summary"]
+    # ... and it is auditable: a milestone event naming the transition and the reason
+    ev = j["events"][-1]
+    assert ev["level"] == "milestone"
+    assert "restatused passed -> inconclusive" in ev["message"]
+    assert ev["data"]["restatus"] == {"from": "passed", "to": "inconclusive", "reason": "no verdict was ever given"}
+    assert client.post("/api/jobs/j-ghost/restatus", json={"status": "passed", "reason": "x"}).status_code == 404
+
+
+# ------------------------------------------------------------------- migration 0013
+def _v12_db_with_every_status(tmp_path):
+    """A pre-0013 (v12) DB with one job per status, each with a timeline event and a link: exactly the
+    shape 0013's table rebuild has to carry across."""
+    from s2docs.db import connection
+
+    path = tmp_path / "v12.db"
+    conn = connection.connect(path)
+    for version, sql in connection._migrations():
+        if version > 12:
+            break
+        conn.executescript(f"BEGIN;\n{sql}\nPRAGMA user_version = {version};\nCOMMIT;")
+    conn.execute("INSERT INTO hosts (id, ssh_target) VALUES ('desktop-pc', 'pompa@x')")
+    summary = json.dumps({"what": "w", "why": "y", "learned": "l", "next": "n"})
+    for i, status in enumerate(("queued", "running", "passed", "failed", "error", "cancelled")):
+        conn.execute(
+            "INSERT INTO jobs (id, kind, title, target, host_id, status, summary) "
+            "VALUES (?, 'test', ?, 'x@1', 'desktop-pc', ?, ?)",
+            (f"j-{i}", f"t{i}", status, summary if status not in ("queued", "running") else None),
+        )
+        conn.execute(
+            "INSERT INTO job_events (job_id, level, phase, message, data) VALUES (?, 'info', 'p', ?, '{}')",
+            (f"j-{i}", f"e{i}"),
+        )
+        conn.execute("INSERT INTO job_links (job_id, kind, ref_id) VALUES (?, 'build', ?)", (f"j-{i}", f"b-{i}"))
+    conn.commit()
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 12
+    conn.close()
+    return path
+
+
+def test_migration_0013_rebuilds_jobs_and_keeps_children(tmp_path):
+    """0013 adds 'inconclusive' to the jobs CHECK by rebuilding the table. jobs IS referenced by
+    job_events/job_links (ON DELETE CASCADE), so the rebuild must not lose the timeline: every count is
+    unchanged, integrity + foreign keys are clean, every old status still validates, and the cascade
+    still works on the rebuilt tables."""
+    from s2docs.db import connection
+
+    path = _v12_db_with_every_status(tmp_path)
+    conn = connection.connect(path)
+    tables = ("jobs", "job_events", "job_links")
+    before = {t: conn.execute(f'SELECT count(*) FROM "{t}"').fetchone()[0] for t in tables}
+    assert connection.migrate(conn) == 13
+    after = {t: conn.execute(f'SELECT count(*) FROM "{t}"').fetchone()[0] for t in tables}
+    assert before == after == {"jobs": 6, "job_events": 6, "job_links": 6}
+    # the children survived intact (ids, phases, links — not just the counts)
+    assert [r["id"] for r in conn.execute("SELECT id FROM job_events ORDER BY id")] == [1, 2, 3, 4, 5, 6]
+    assert [r["phase"] for r in conn.execute("SELECT phase FROM job_events ORDER BY id")] == ["p"] * 6
+    assert [r["ref_id"] for r in conn.execute("SELECT ref_id FROM job_links ORDER BY job_id")] == [
+        f"b-{i}" for i in range(6)
+    ]
+    # every pre-existing status is still stored, the new one validates, a bogus one is still rejected
+    assert {r["status"] for r in conn.execute("SELECT status FROM jobs")} == {
+        "queued", "running", "passed", "failed", "error", "cancelled",
+    }
+    conn.execute("UPDATE jobs SET status = 'inconclusive' WHERE id = 'j-2'")
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute("UPDATE jobs SET status = 'not-a-status' WHERE id = 'j-3'")
+    # the rebuilt schema carries both jobs indexes and the children keep their own
+    indexes = {r["name"] for r in conn.execute("SELECT name FROM sqlite_master WHERE type = 'index'")}
+    assert {"jobs_queue", "jobs_status", "job_events_job"} <= indexes
+    # the FK behaviour the rebuild had to preserve: deleting a job still cascades to its children
+    conn.execute("DELETE FROM jobs WHERE id = 'j-0'")
+    assert conn.execute("SELECT count(*) FROM job_events WHERE job_id = 'j-0'").fetchone()[0] == 0
+    assert conn.execute("SELECT count(*) FROM job_links WHERE job_id = 'j-0'").fetchone()[0] == 0
+    assert conn.execute("SELECT count(*) FROM job_events").fetchone()[0] == 5
+    conn.commit()
+    assert conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+    assert list(conn.execute("PRAGMA foreign_key_check")) == []
+    conn.close()
+
+
+# ------------------------------------------------ web UI: the 'inconclusive' badge
+def test_frontend_inconclusive_badge_markers(client):
+    """The badge is its own class everywhere a job status is shown (queue cards, finished table, job
+    page headline, the Activity timeline's chain heading) — never the amber of a pass or the red of a
+    failure, so a run nobody judged cannot read as a pass."""
+    js = client.get("/app.js").text
+    css = client.get("/style.css").text
+    assert 'inconclusive: "inconclusive"' in js
+    assert 'const jobStatusBadge = (s) => badge(s, JOB_STATUS_CLASS[s] ?? "")' in js
+    assert "jobStatusBadge(j.status)" in js  # the card headline and the finished table
+    assert "statusById" in js and "c.rows[0].jobStatus" in js  # the Activity chain heading
+    assert ".badge.inconclusive" in css and "border-style: dashed" in css
