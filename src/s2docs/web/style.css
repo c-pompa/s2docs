@@ -1,10 +1,11 @@
 :root {
   --bg: #0f1115; --panel: #161a21; --border: #262c36; --fg: #e3e7ee; --muted: #8a93a3;
   --accent: #f5a524; --link: #7cb4ff; --code: #1d222b; --ok: #4cc38a; --bad: #f07178;
-  /* The design is SQUARE: one small corner radius for containers/controls, a smaller one for chips
-     and badges, and no pill geometry anywhere. Every radius in the sheet goes through these tokens,
-     so the whole site stays square from one place. */
-  --r: 3px; --r-sm: 2px;
+  /* The design is SQUARE. ONE radius token, one value, used by every element — a single scale is the
+     convention in mature systems; a 3px/2px pair just adds a distinction nobody can see. 2px rather
+     than 0 on purpose: a true 90° corner aliases into a ragged notch at non-integer DPI scaling and
+     reads as unstyled, while 2px is the smallest radius that renders the corner cleanly. */
+  --r: 2px;
   font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; font-size: 15px;
 }
 @media (prefers-color-scheme: light) {
@@ -17,7 +18,7 @@ a { color: var(--link); text-decoration: none; }
 a:hover { text-decoration: underline; }
 code, pre, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 13px; }
 pre { background: var(--code); padding: 10px 12px; border-radius: var(--r); overflow-x: auto; white-space: pre-wrap; }
-code { background: var(--code); padding: 1px 5px; border-radius: var(--r-sm); }
+code { background: var(--code); padding: 1px 5px; border-radius: var(--r); }
 .muted { color: var(--muted); }
 
 .topbar { position: sticky; top: 0; z-index: 2; display: flex; gap: 12px; align-items: center;
@@ -49,7 +50,7 @@ main { padding: 18px 24px; max-width: 1200px; overflow-x: auto; }
 .pipe { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 4px 0 14px; font-size: 13px; }
 .pipe-t { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .09em; color: var(--muted); margin-right: 2px; }
 .pipe-a { display: inline-flex; align-items: center; gap: 6px; padding: 4px 9px; border: 1px solid var(--border);
-          border-radius: var(--r-sm); background: var(--panel); color: var(--muted); }
+          border-radius: var(--r); background: var(--panel); color: var(--muted); }
 .pipe-a:hover { border-color: var(--muted); text-decoration: none; }
 .pipe-a .pipe-n { font-variant-numeric: tabular-nums; font-weight: 700; opacity: .75; }
 .pipe-a.active { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, var(--panel)); color: var(--accent); }
@@ -68,7 +69,7 @@ th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--bord
 th { color: var(--muted); font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing: .03em; }
 tr:hover td { background: color-mix(in srgb, var(--code) 60%, transparent); }
 
-.badge { display: inline-block; font-size: 11px; padding: 1px 6px; border-radius: var(--r-sm);
+.badge { display: inline-block; font-size: 11px; padding: 1px 6px; border-radius: var(--r);
          border: 1px solid var(--border); color: var(--muted); margin: 0 3px 3px 0; white-space: nowrap; }
 .badge.kind { color: var(--accent); border-color: var(--accent); }
 .badge.warn { color: var(--bad); border-color: var(--bad); }
