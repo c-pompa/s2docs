@@ -50,6 +50,7 @@ def test_tools_are_listed_read_only(server):
         "job_link",
         "job_verdict",
         "job_finish",
+        "job_restatus",
         "job_cancel",
     }
     assert all(t.annotations and t.annotations.read_only_hint for t in tools if t.name not in writers)
@@ -67,6 +68,7 @@ def test_tools_are_listed_read_only(server):
         "job_request_screenshot",
         "job_verdict",
         "job_finish",
+        "job_restatus",
         "job_cancel",
     }
     assert non_idempotent <= writers

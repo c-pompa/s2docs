@@ -214,8 +214,11 @@ const testRows = (ts) =>
 // on top, then queued by position); the job page shows the intake, timeline, screenshots, links and the
 // close-out summary. Events at level error/crash expand their log tail in a <pre>.
 const JOB_LEVEL_CLASS = { error: "warn", crash: "warn", milestone: "kind", learning: "kind", screenshot: "kind" };
-const jobStatusBadge = (s) =>
-  badge(s, s === "passed" || s === "running" ? "kind" : s === "failed" || s === "error" ? "warn" : "");
+// One class per job status. 'inconclusive' (the run ended with no pass/fail verdict) gets its OWN
+// class: it must never read as the amber 'passed'/'running' or the red 'failed'/'error' — a dashed,
+// muted badge says "no call was made" at a glance in the queue, the finished table and the timeline.
+const JOB_STATUS_CLASS = { passed: "kind", running: "kind", failed: "warn", error: "warn", inconclusive: "inconclusive" };
+const jobStatusBadge = (s) => badge(s, JOB_STATUS_CLASS[s] ?? "");
 const jobFlags = (j) =>
   `${j.error_count ? badge(`${j.error_count} error${j.error_count === 1 ? "" : "s"}`, "warn") : ""}` +
   `${j.crash_count ? badge(`${j.crash_count} crash${j.crash_count === 1 ? "" : "es"}`, "warn") : ""}`;
@@ -1218,14 +1221,24 @@ const reapedTag = (r) =>
 // from the job ledger's links: {kind, ref_id} -> job id). Sort newest-first on the run's OWN start.
 const activityRows = (builds, tests, deploys, jobs) => {
   const owner = new Map();
-  (jobs || []).forEach((j) => (j.links || []).forEach((l) => owner.set(`${l.kind}:${l.ref_id}`, j.id)));
+  const statusById = new Map();
+  (jobs || []).forEach((j) => {
+    statusById.set(j.id, j.status || null);
+    (j.links || []).forEach((l) => owner.set(`${l.kind}:${l.ref_id}`, j.id));
+  });
+  // The job a run belongs to, plus that job's status: the chain heading shows it, so a run's ledger
+  // verdict ('inconclusive' = ended with no pass/fail call) is visible from the timeline itself.
+  const own = (key) => {
+    const id = owner.get(key) || null;
+    return { job: id, jobStatus: id ? statusById.get(id) || null : null };
+  };
   const rows = [];
   (builds || []).forEach((b) =>
-    rows.push({ type: "build", at: activityStart(b), state: b.status, name: b.kind || "build", id: b.id, host: b.host_id, run: b, job: owner.get(`build:${b.id}`) || null }));
+    rows.push({ type: "build", at: activityStart(b), state: b.status, name: b.kind || "build", id: b.id, host: b.host_id, run: b, ...own(`build:${b.id}`) }));
   (tests || []).forEach((t) =>
-    rows.push({ type: "test", at: activityStart(t), state: t.state, name: t.name, id: t.id, host: t.host_id, run: t, job: owner.get(`test_run:${t.id}`) || null }));
+    rows.push({ type: "test", at: activityStart(t), state: t.state, name: t.name, id: t.id, host: t.host_id, run: t, ...own(`test_run:${t.id}`) }));
   (deploys || []).forEach((d) =>
-    rows.push({ type: "deploy", at: activityStart(d), state: d.status, name: d.addon || d.id, id: d.id, host: d.host_id, run: d, job: owner.get(`deploy:${d.id}`) || null }));
+    rows.push({ type: "deploy", at: activityStart(d), state: d.status, name: d.addon || d.id, id: d.id, host: d.host_id, run: d, ...own(`deploy:${d.id}`) }));
   const key = (r) => { const t = parseTs(r.at); return Number.isNaN(t) ? -Infinity : t; };
   return rows.sort((a, b) => key(b) - key(a));
 };
@@ -1267,7 +1280,10 @@ const activityTimelineHtml = (rows) => {
       if (!c.job || c.rows.length === 1) return activityRowHtml(c.rows[0]);
       const types = c.rows.map((r) => r.type).join(" → ");
       const nest = c.rows.map((r) => activityRowHtml(r).replace(`<tr class="tl-row`, `<tr class="tl-row tl-nested`)).join("");
-      return `<tr class="tl-job-head"><td colspan="7" class="muted">job ${link(["jobs", c.job], c.job)} <span class="mono tl-chain">${esc(types)}</span></td></tr>${nest}`;
+      // The chain heading carries the job's status badge, so an 'inconclusive' chain (a run that ended
+      // with no verdict) is readable as such right in the timeline.
+      const js = c.rows[0].jobStatus ? ` ${jobStatusBadge(c.rows[0].jobStatus)}` : "";
+      return `<tr class="tl-job-head"><td colspan="7" class="muted">job ${link(["jobs", c.job], c.job)}${js} <span class="mono tl-chain">${esc(types)}</span></td></tr>${nest}`;
     })
     .join("");
   return `<table class="timeline">${head}${body}</table>`;
