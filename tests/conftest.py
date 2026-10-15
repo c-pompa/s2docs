@@ -32,7 +32,7 @@ def _isolated_data_dir(tmp_path, monkeypatch):
 
 CONVARS = """\
 mp_roundtime 5 (min: 0.1, max: 60, gamedll notify replicated release)
-\tHow many minutes each round takes.
+\t{roundtime_desc}
 
 hostname "" (release)
 \tHostname for server.
@@ -321,17 +321,34 @@ def write_wiki(root: Path) -> Path:
 TSCONFIG = '{ "compilerOptions": { "target": "es2022" } }\n'
 
 
-def write_tree(root: Path, *, build: int = 1000, extra_convar: str | None = None) -> Path:
+DEFAULT_ROUNDTIME_DESC = "How many minutes each round takes."
+
+
+def write_tree(
+    root: Path,
+    *,
+    build: int = 1000,
+    extra_convar: str | None = None,
+    roundtime_desc: str | None = None,
+    pawn_extra_field: str | None = None,
+    pulse_extra: str | None = None,
+) -> Path:
+    pawn = SCHEMA_PAWN
+    if pawn_extra_field:
+        pawn = pawn.replace("};", f"\t{pawn_extra_field}\n}};")
+    pulse = PULSE
+    if pulse_extra:
+        pulse = pulse.replace("}", f"\t{pulse_extra}\n}}")
     files = {
-        "DumpSource2/convars.txt": CONVARS
+        "DumpSource2/convars.txt": CONVARS.format(roundtime_desc=roundtime_desc or DEFAULT_ROUNDTIME_DESC)
         + (f"\n{extra_convar} 1 (release)\n\tAdded later.\n" if extra_convar else ""),
         "DumpSource2/commands.txt": COMMANDS,
         "DumpSource2/entities/server.fgd": SERVER_FGD,
         "DumpSource2/entities/client.fgd": CLIENT_FGD,
         "DumpSource2/schemas/server/CBaseEntity.h": SCHEMA_BASE,
-        "DumpSource2/schemas/server/CCSPlayerPawn.h": SCHEMA_PAWN,
+        "DumpSource2/schemas/server/CCSPlayerPawn.h": pawn,
         "DumpSource2/schemas/server/CFuncMover__FollowStrategy_t.h": SCHEMA_ENUM,
-        "DumpSource2/module_metadata/server/pulse_bindings.txt": PULSE,
+        "DumpSource2/module_metadata/server/pulse_bindings.txt": pulse,
         "game/csgo/steam.inf": STEAM_INF.format(build=build),
         "game/core/pak01_dir/resource/core.gameevents": CORE_EVENTS,
         "game/csgo/pak01_dir/resource/mod.gameevents": MOD_EVENTS,

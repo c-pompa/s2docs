@@ -1,6 +1,11 @@
 :root {
   --bg: #0f1115; --panel: #161a21; --border: #262c36; --fg: #e3e7ee; --muted: #8a93a3;
   --accent: #f5a524; --link: #7cb4ff; --code: #1d222b; --ok: #4cc38a; --bad: #f07178;
+  /* The design is SQUARE. ONE radius token, one value, used by every element — a single scale is the
+     convention in mature systems; a 3px/2px pair just adds a distinction nobody can see. 2px rather
+     than 0 on purpose: a true 90° corner aliases into a ragged notch at non-integer DPI scaling and
+     reads as unstyled, while 2px is the smallest radius that renders the corner cleanly. */
+  --r: 2px;
   font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; font-size: 15px;
 }
 @media (prefers-color-scheme: light) {
@@ -12,8 +17,8 @@ body { margin: 0; background: var(--bg); color: var(--fg); }
 a { color: var(--link); text-decoration: none; }
 a:hover { text-decoration: underline; }
 code, pre, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 13px; }
-pre { background: var(--code); padding: 10px 12px; border-radius: 6px; overflow-x: auto; white-space: pre-wrap; }
-code { background: var(--code); padding: 1px 5px; border-radius: 4px; }
+pre { background: var(--code); padding: 10px 12px; border-radius: var(--r); overflow-x: auto; white-space: pre-wrap; }
+code { background: var(--code); padding: 1px 5px; border-radius: var(--r); }
 .muted { color: var(--muted); }
 
 .topbar { position: sticky; top: 0; z-index: 2; display: flex; gap: 12px; align-items: center;
@@ -22,16 +27,35 @@ code { background: var(--code); padding: 1px 5px; border-radius: 4px; }
 #search-form { flex: 1; max-width: 720px; }
 #q, select, textarea, .filters input, .filters select,
 input:not([type=checkbox]):not([type=radio]) {
-  width: 100%; padding: 7px 10px; border-radius: 6px; border: 1px solid var(--border);
+  width: 100%; padding: 7px 10px; border-radius: var(--r); border: 1px solid var(--border);
   background: var(--bg); color: var(--fg); font: inherit; }
 select#game { width: auto; }
 
 .layout { display: grid; grid-template-columns: 190px 1fr; min-height: calc(100vh - 54px); }
 nav { border-right: 1px solid var(--border); padding: 12px 8px; }
-nav a { display: block; padding: 6px 10px; border-radius: 6px; color: var(--fg); }
+nav a { display: block; padding: 6px 10px; border-radius: var(--r); color: var(--fg); }
 nav a.active { background: var(--code); color: var(--accent); }
 nav a.disabled { color: var(--muted); pointer-events: none; }
+/* Sidebar grouping: the sections are clustered by intent (Reference / Workflow / Authoring / Index),
+   so 17 links read as four short lists instead of one. The Workflow group carries a one-line hint
+   naming the pipeline order, since those four pages are stages of one loop, not four tools. */
+.nav-group { margin: 12px 0 2px; padding: 0 10px; font-size: 11px; font-weight: 600;
+             text-transform: uppercase; letter-spacing: .09em; color: var(--muted); }
+.nav-group:first-child { margin-top: 0; }
+.nav-hint { padding: 0 10px 4px; font-size: 11px; line-height: 1.35; color: var(--muted); }
 main { padding: 18px 24px; max-width: 1200px; overflow-x: auto; }
+
+/* The workflow pipeline strip: shown on Orchestration / Jobs / Activity / Hosts / Validate so the
+   relation between those pages is visible on the page, with the current stage lit. */
+.pipe { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 4px 0 14px; font-size: 13px; }
+.pipe-t { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .09em; color: var(--muted); margin-right: 2px; }
+.pipe-a { display: inline-flex; align-items: center; gap: 6px; padding: 4px 9px; border: 1px solid var(--border);
+          border-radius: var(--r); background: var(--panel); color: var(--muted); }
+.pipe-a:hover { border-color: var(--muted); text-decoration: none; }
+.pipe-a .pipe-n { font-variant-numeric: tabular-nums; font-weight: 700; opacity: .75; }
+.pipe-a.active { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, var(--panel)); color: var(--accent); }
+.pipe-a.active .pipe-n { opacity: 1; }
+.pipe-sep { width: 1px; height: 18px; background: var(--border); margin: 0 4px; }
 
 h1 { font-size: 22px; margin: 0 0 4px; word-break: break-all; }
 h2 { font-size: 16px; margin: 22px 0 8px; border-bottom: 1px solid var(--border); padding-bottom: 4px; }
@@ -45,19 +69,19 @@ th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--bord
 th { color: var(--muted); font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing: .03em; }
 tr:hover td { background: color-mix(in srgb, var(--code) 60%, transparent); }
 
-.badge { display: inline-block; font-size: 11px; padding: 1px 6px; border-radius: 10px;
+.badge { display: inline-block; font-size: 11px; padding: 1px 6px; border-radius: var(--r);
          border: 1px solid var(--border); color: var(--muted); margin: 0 3px 3px 0; white-space: nowrap; }
 .badge.kind { color: var(--accent); border-color: var(--accent); }
 .badge.warn { color: var(--bad); border-color: var(--bad); }
 .hit { padding: 10px 0; border-bottom: 1px solid var(--border); }
 .hit .snip { color: var(--muted); font-size: 13px; margin-top: 3px; }
-mark { background: color-mix(in srgb, var(--accent) 35%, transparent); color: inherit; border-radius: 2px; }
+mark { background: color-mix(in srgb, var(--accent) 35%, transparent); color: inherit; border-radius: 0; }
 .pager { display: flex; gap: 10px; align-items: center; margin: 14px 0; }
-button { padding: 6px 12px; border-radius: 6px; border: 1px solid var(--border); background: var(--code);
+button { padding: 6px 12px; border-radius: var(--r); border: 1px solid var(--border); background: var(--code);
          color: var(--fg); cursor: pointer; font: inherit; }
 button:disabled { opacity: .4; cursor: default; }
 .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 10px; }
-.card { border: 1px solid var(--border); border-radius: 8px; padding: 12px; background: var(--panel); }
+.card { border: 1px solid var(--border); border-radius: var(--r); padding: 12px; background: var(--panel); }
 .card .n { font-size: 22px; font-weight: 700; color: var(--accent); }
 /* Screenshot caption: the 32-char md5 has no break points — keep it inside the card. */
 .shot-cap { display: block; overflow-wrap: anywhere; word-break: break-all; }
@@ -65,7 +89,7 @@ button:disabled { opacity: .4; cursor: default; }
 .dag { display: flex; align-items: stretch; gap: 6px; overflow-x: auto; padding: 6px 0 10px; }
 .dag-col { display: flex; flex-direction: column; gap: 8px; min-width: 170px; flex: 1; }
 .dag-arrow { display: flex; align-items: center; color: var(--muted); font-size: 18px; }
-.dag-node { border: 1px solid var(--border); border-left: 3px solid var(--border); border-radius: 8px;
+.dag-node { border: 1px solid var(--border); border-left: 3px solid var(--border); border-radius: var(--r);
             padding: 8px 10px; background: var(--panel); font-size: 13px; }
 .dag-node.done { border-left-color: var(--accent); }
 .dag-node.blocked, .dag-node.failed { border-left-color: var(--bad); }
@@ -74,3 +98,105 @@ button:disabled { opacity: .4; cursor: default; }
 .err { color: var(--bad); }
 .inherited td { opacity: .78; }
 @media (max-width: 760px) { .layout { grid-template-columns: 1fr; } nav { display: flex; overflow-x: auto; border: 0; } }
+
+/* ---- Job page: verification stepper, NOW TESTING card, results ---------------- */
+/* The stepper across the top of the job page: one chip per test, coloured by outcome. */
+.vx-stepper { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; margin: 12px 0 14px; }
+.vx-slabel { font-size: 12px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); }
+.vx-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.vx-chip { display: inline-flex; align-items: center; gap: 4px; padding: 5px 10px; border-radius: var(--r);
+           border: 1px solid var(--border); background: var(--panel); color: var(--muted); cursor: pointer;
+           font-size: 13px; transition: background .15s, border-color .15s, color .15s; }
+.vx-chip:hover { border-color: var(--muted); }
+.vx-cnum { font-variant-numeric: tabular-nums; opacity: .8; }
+.vx-cname { color: var(--fg); }
+.vx-chip.vx-upcoming { opacity: .45; }
+.vx-chip.vx-upcoming .vx-cname { color: var(--muted); }
+/* done-pass (green) / done-fail (red) / done-skip (grey); no-verdict is an amber outline. */
+.vx-chip.vx-pass { border-color: var(--ok); }
+.vx-chip.vx-pass .vx-cname { color: var(--ok); }
+.vx-chip.vx-fail { border-color: var(--bad); }
+.vx-chip.vx-fail .vx-cname { color: var(--bad); }
+.vx-chip.vx-skip { border-color: var(--border); opacity: .75; }
+.vx-chip.vx-noverdict { border-color: var(--accent); border-style: dashed; }
+.vx-chip.vx-noverdict .vx-cname { color: var(--accent); }
+/* The CURRENT test: a pulsing accent border, so the eye lands on it first. */
+.vx-chip.vx-current { border-color: var(--accent); border-width: 2px; background: color-mix(in srgb, var(--accent) 12%, var(--panel));
+                      animation: vx-pulse 1.4s ease-in-out infinite; }
+@keyframes vx-pulse { 0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent) 55%, transparent); }
+                      50% { box-shadow: 0 0 0 6px color-mix(in srgb, var(--accent) 0%, transparent); } }
+
+/* The NOW TESTING card: the current test, big and distinct. */
+.vx-card { border-color: var(--accent); border-width: 2px; }
+.vx-card-head { display: flex; align-items: center; gap: 10px; margin-bottom: 2px; }
+.vx-live { color: var(--bad); font-weight: 700; font-size: 12px; letter-spacing: .08em; animation: vx-blink 1.6s steps(2, start) infinite; }
+@keyframes vx-blink { 50% { opacity: .35; } }
+.vx-testof { font-size: 13px; font-weight: 700; letter-spacing: .06em; color: var(--accent); }
+.vx-title { font-size: 20px; margin: 2px 0 10px; border: 0; padding: 0; }
+.vx-field { margin: 6px 0; }
+.vx-lbl { display: inline-block; min-width: 132px; font-size: 11px; text-transform: uppercase; letter-spacing: .05em;
+          color: var(--muted); }
+.vx-count { display: flex; align-items: center; gap: 10px; margin: 12px 0 4px; }
+.vx-bar { flex: 1; height: 8px; border-radius: var(--r); background: var(--code); overflow: hidden; border: 1px solid var(--border); }
+.vx-bar-fill { display: block; height: 100%; width: 100%; border-radius: var(--r);
+               background: linear-gradient(90deg, var(--accent), var(--ok)); transition: width 1s linear; }
+.vx-cd { min-width: 96px; text-align: right; color: var(--muted); }
+.vx-hint { font-size: 13px; }
+.vx-recorded { margin: 10px 0 4px; font-weight: 600; }
+.vx-recorded .badge { font-size: 12px; }
+.vx-waiting { display: flex; align-items: center; gap: 8px; color: var(--muted); margin: 6px 0 2px; }
+/* Spinner: a small rotating ring, used by 'Sending…' and the 'waiting for the demo' line. */
+.vx-spin { display: inline-block; width: 13px; height: 13px; border-radius: 50%; vertical-align: -2px;
+           border: 2px solid color-mix(in srgb, var(--accent) 35%, transparent); border-top-color: var(--accent);
+           animation: vx-rot .7s linear infinite; }
+@keyframes vx-rot { to { transform: rotate(360deg); } }
+
+/* The verdict buttons: named colours, and a real :active press. */
+.vx-btns { display: flex; gap: 8px; }
+.vx-btn { font-weight: 600; border-width: 1px; transition: transform .06s, filter .12s; }
+.vx-btn:not(:disabled):hover { filter: brightness(1.12); }
+.vx-btn:not(:disabled):active { transform: translateY(2px); filter: brightness(.85); box-shadow: inset 0 2px 6px rgba(0, 0, 0, .45); }
+.vx-btn-pass { background: color-mix(in srgb, var(--ok) 22%, var(--code)); border-color: var(--ok); color: var(--ok); }
+.vx-btn-fail { background: color-mix(in srgb, var(--bad) 22%, var(--code)); border-color: var(--bad); color: var(--bad); }
+.vx-btn-skip { background: var(--code); border-color: var(--muted); color: var(--muted); }
+.vx-btn:disabled { opacity: .55; }
+.vx-error { font-weight: 600; }
+
+/* The card fades/slides in when the run moved to the next test. */
+.vx-enter { animation: vx-slide .7s ease-out; }
+@keyframes vx-slide { from { opacity: 0; transform: translateY(-14px); } to { opacity: 1; transform: none; } }
+
+/* Transient 'Moved on to TEST k' banner (appended to <body>, fixed, self-removing). */
+.vx-banner { position: fixed; top: 14px; left: 50%; transform: translateX(-50%); z-index: 50;
+             padding: 10px 18px; border-radius: var(--r); font-weight: 700; color: #10131a;
+             background: var(--accent); box-shadow: 0 6px 24px rgba(0, 0, 0, .45);
+             transition: opacity .6s, transform .6s; }
+.vx-banner.vx-gone { opacity: 0; transform: translate(-50%, -12px); }
+
+/* Finished job: the results summary. */
+.vx-results { border-color: var(--ok); }
+.vx-complete { font-size: 16px; font-weight: 700; padding: 8px 12px; border-radius: var(--r); margin-bottom: 10px;
+               background: color-mix(in srgb, var(--ok) 16%, var(--panel)); border: 1px solid var(--ok); color: var(--ok); }
+.vx-rtable { margin-top: 4px; }
+
+/* ---- Build Diff: summary header, before/after columns, filters --------------- */
+/* Two builds, the way the numbers read together, and a total change count up top. */
+.diff-head { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin: 12px 0 8px; }
+.diff-build { border: 1px solid var(--border); border-radius: var(--r); background: var(--panel); padding: 8px 12px; }
+.diff-build strong { font-size: 16px; }
+.diff-arrow { color: var(--muted); font-size: 18px; }
+.diff-counts { margin: 4px 0 10px; }
+/* The copy button + its fallback textarea. */
+.diff-actions { display: flex; align-items: center; gap: 10px; margin: 6px 0 2px; flex-wrap: wrap; }
+.diff-md { width: 100%; min-height: 150px; margin-top: 8px; }
+/* A section with nothing to show takes one line, not a table's worth of space. */
+.diff-none { margin: 6px 0; }
+h3.diff-group { font-size: 14px; margin: 14px 0 4px; }
+/* The change tables: names wrap; long values scroll inside a bounded box instead of being cut. */
+table.diff td { font-size: 13px; word-break: break-word; overflow-wrap: anywhere; }
+table.diff tr.diff-removed td { background: color-mix(in srgb, var(--bad) 7%, transparent); }
+table.diff tr.diff-added td { background: color-mix(in srgb, var(--ok) 7%, transparent); }
+.diff-val { max-height: 220px; overflow: auto; margin: 4px 0 0; }
+.diff-long summary { cursor: pointer; }
+.diff-old { background: color-mix(in srgb, var(--bad) 30%, transparent); border-radius: var(--r-sm); }
+.diff-new { background: color-mix(in srgb, var(--ok) 30%, transparent); border-radius: var(--r-sm); }

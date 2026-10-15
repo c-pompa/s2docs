@@ -113,3 +113,88 @@ def test_second_build_diff_and_prune(db, tmp_path):
     with db.reader() as conn:
         added = Repository(conn).diff_builds("cs2").sections["convars"]
         assert [(e.name, e.change) for e in added] == [("convar:sv_new", "removed")]
+
+
+# ------------------------------------------------------------------- field-level diff
+def test_diff_is_field_level_and_grouped(db, tmp_path):
+    """One added schema field is exactly one row (member-scoped), grouped under its class."""
+    with db.writer() as conn:
+        load_build(conn, GAMES["cs2"], write_tree(tmp_path / "f1", build=2001))
+        load_build(conn, GAMES["cs2"], write_tree(tmp_path / "f2", build=2002, pawn_extra_field="float32 m_flNew;"))
+    with db.reader() as conn:
+        diff = Repository(conn).diff_builds("cs2", 2001, 2002)
+    rows = diff.sections["schema"]
+    assert [(e.name, e.change, e.group) for e in rows] == [("CCSPlayerPawn.m_flNew", "added", "server:CCSPlayerPawn")]
+    # the value is the member's own type, not a flattened dump of the whole class
+    assert rows[0].after == "float32" and rows[0].before is None
+    assert diff.totals["schema"] == 1 and diff.limit == 500
+
+
+def test_diff_reports_removed_field_with_full_name(db, tmp_path):
+    with db.writer() as conn:
+        load_build(conn, GAMES["cs2"], write_tree(tmp_path / "r1", build=2101, pawn_extra_field="float32 m_flGone;"))
+        load_build(conn, GAMES["cs2"], write_tree(tmp_path / "r2", build=2102))
+    with db.reader() as conn:
+        rows = Repository(conn).diff_builds("cs2", 2101, 2102).sections["schema"]
+    assert [(e.name, e.change) for e in rows] == [("CCSPlayerPawn.m_flGone", "removed")]
+    assert rows[0].before == "float32" and rows[0].after is None and rows[0].group == "server:CCSPlayerPawn"
+
+
+def test_diff_convar_description_change_is_changed(db, tmp_path):
+    """A description edit on an existing convar is one `changed` row, not added+removed."""
+    with db.writer() as conn:
+        load_build(conn, GAMES["cs2"], write_tree(tmp_path / "c1", build=2201))
+        load_build(conn, GAMES["cs2"], write_tree(tmp_path / "c2", build=2202, roundtime_desc="New round time blurb."))
+    with db.reader() as conn:
+        rows = Repository(conn).diff_builds("cs2", 2201, 2202).sections["convars"]
+    assert [(e.name, e.change) for e in rows] == [("convar:mp_roundtime", "changed")]
+    assert rows[0].before == "5 How many minutes each round takes." and rows[0].after == "5 New round time blurb."
+
+
+def test_diff_covers_pulse_and_hammer_sections(db, tmp_path):
+    """Sections indexed but previously absent from the diff (pulse, hammer) are covered."""
+    with db.writer() as conn:
+        load_build(conn, GAMES["cs2"], write_tree(tmp_path / "p1", build=2301))
+        load_build(
+            conn,
+            GAMES["cs2"],
+            write_tree(
+                tmp_path / "p2",
+                build=2302,
+                pulse_extra='input Disable(PVAL_EHANDLE:trigger _Target "trigger");',
+            ),
+        )
+    with db.reader() as conn:
+        diff = Repository(conn).diff_builds("cs2", 2301, 2302)
+    assert {"pulse", "hammer_classes"} <= set(diff.sections)
+    adds = [(e.name, e.change, e.group) for e in diff.sections["pulse"] if e.change == "added"]
+    assert adds == [("CBaseTrigger_API.Disable (input)", "added", "server:CBaseTrigger_API")]
+
+
+def test_diff_script_api_ignores_ordinal_reorder(db, tmp_path):
+    """A bare symbol reorder (ordinal shift) is not a change: identity is api/parent/name/kind."""
+    with db.writer() as conn:
+        load_build(conn, GAMES["cs2"], write_tree(tmp_path / "s1", build=2401))
+        load_build(conn, GAMES["cs2"], write_tree(tmp_path / "s2", build=2402))
+        conn.execute(
+            "UPDATE script_symbols SET ordinal = ordinal + 100 "
+            "WHERE build_id = (SELECT id FROM builds WHERE build_number = 2402)"
+        )
+        conn.commit()
+    with db.reader() as conn:
+        assert Repository(conn).diff_builds("cs2", 2401, 2402).sections["script_api"] == []
+
+
+def test_diff_script_api_reports_signature_change(db, tmp_path):
+    with db.writer() as conn:
+        load_build(conn, GAMES["cs2"], write_tree(tmp_path / "g1", build=2501))
+        load_build(conn, GAMES["cs2"], write_tree(tmp_path / "g2", build=2502))
+        conn.execute(
+            "UPDATE script_symbols SET signature = 'GetHealth(): string' "
+            "WHERE name = 'GetHealth' AND build_id = (SELECT id FROM builds WHERE build_number = 2502)"
+        )
+        conn.commit()
+    with db.reader() as conn:
+        rows = Repository(conn).diff_builds("cs2", 2501, 2502).sections["script_api"]
+    assert [(e.name, e.change) for e in rows] == [("cs_script:CSPlayerPawn.GetHealth", "changed")]
+    assert rows[0].before == "GetHealth(): number" and rows[0].after == "GetHealth(): string"

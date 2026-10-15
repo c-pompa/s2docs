@@ -2,6 +2,9 @@ import pytest
 from fastapi.testclient import TestClient
 
 from s2docs.api.app import create_app
+from s2docs.config import GAMES
+from s2docs.ingest.loader import load_build
+from tests.conftest import write_tree
 
 
 @pytest.fixture
@@ -40,6 +43,26 @@ def test_errors(client):
     assert client.get("/api/games/deadlock/convars").status_code == 404  # not ingested
     assert client.get("/api/games/cs2/convars", params={"limit": 1000}).status_code == 422
     assert client.get("/api/games/cs2/diff").status_code == 404  # single build
+
+
+def test_diff_field_level_shape(db, tmp_path):
+    """The API diff is member-scoped and grouped, and carries per-section totals + the limit."""
+    with db.writer() as conn:
+        load_build(conn, GAMES["cs2"], write_tree(tmp_path / "d1", build=3001))
+        load_build(conn, GAMES["cs2"], write_tree(tmp_path / "d2", build=3002, pawn_extra_field="float32 m_flNew;"))
+    with TestClient(create_app(db.path)) as c:
+        d = c.get("/api/games/cs2/diff", params={"from": 3001, "to": 3002}).json()
+    assert d["from_build"] == 3001 and d["to_build"] == 3002
+    assert d["limit"] == 500 and d["totals"]["schema"] == 1
+    assert d["sections"]["schema"] == [
+        {
+            "name": "CCSPlayerPawn.m_flNew",
+            "change": "added",
+            "before": None,
+            "after": "float32",
+            "group": "server:CCSPlayerPawn",
+        }
+    ]
 
 
 def test_raw_file_download(client):

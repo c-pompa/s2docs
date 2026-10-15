@@ -603,11 +603,20 @@ def verdict(
         raise JobConflict(
             f"job {job_id} has no linked test run; link one (kind='test_run') before posting a verdict"
         )
+    # The evidence row is the confirm-channel record for this verdict: `ref` names the job so a reader
+    # can trace the confirm back to the page it came from, and a note from the page itself (source 'web')
+    # is tagged "via job page" — the job page is a distinct confirm source beside chat/console/key/
+    # coordinator, and a waiting agent can tell where a verdict came from. The milestone below keeps the
+    # raw note; test_run_id anchors the row to the job's newest linked run.
+    page_note = notes
+    if source == "web":
+        page_note = f"{notes} via job page" if notes else "via job page"
     row = evidence.add_and_publish(
         db,
         kind="human-confirm",
         test_run_id=test_run_id,
-        data={"verdict": verdict, "notes": notes, "step": step, "source": source, "job_id": job_id},
+        ref=job_id,
+        data={"verdict": verdict, "notes": page_note, "step": step, "source": source, "job_id": job_id},
     )
     _insert_event(
         db,

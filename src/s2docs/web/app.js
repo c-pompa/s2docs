@@ -285,44 +285,227 @@ const jobTimeline = (events) =>
         ? ` ${badge(e.data.verdict, e.data.verdict === "pass" ? "kind" : e.data.verdict === "fail" ? "warn" : "")}` +
           `${e.data.source ? ` ${badge("via " + e.data.source)}` : ""}`
         : "";
-      return `<li>${badge(e.level, JOB_LEVEL_CLASS[e.level] || "")}${vd} <span class="muted">${fmtTime(e.created_at)}</span>` +
+      return `<li${e.phase ? ` data-vx-step="${esc(e.phase)}"` : ""}>${badge(e.level, JOB_LEVEL_CLASS[e.level] || "")}${vd} <span class="muted">${fmtTime(e.created_at)}</span>` +
         `${e.phase ? ` <span class="mono muted">${esc(e.phase)}</span>` : ""}<div>${esc(e.message)}</div>${tail}</li>`;
     })
     .join("")}</ul>`;
 
-// The "NOW TESTING" card: while a job is running and the driver has posted a step prompt, show what is
-// being tested and let the user answer from here instead of in game. Buttons POST /api/jobs/<id>/verdict.
+// ---- Job verification model: the stepper + the NOW TESTING card -------------
+// The driver posts one phase 'plan' event up front (the full ordered test list), an 'info' step-prompt
+// event per test (phase = step id; data carries prompt / look_for / strip_name / strip_purpose /
+// strip_expect / deadline_utc / step_index / step_total), a 'milestone' verdict event per answered test
+// (data.verdict + source + notes, step = data.step or the event phase), and a phase 'done' event with
+// per-step results when the run ends. jobVerifications() folds all of that into one ordered list the
+// stepper, the card and the results summary all read. With no plan event yet (an older driver, or the
+// plan not posted) it falls back to the step prompts seen so far, so the strip still shows real progress.
+const VERDICT_SET = new Set(["pass", "fail", "skip"]);
+// One chip class per step state — the whole visual language of the stepper, in one place.
+const VX_STATE_CLASS = {
+  pass: "vx-pass", fail: "vx-fail", skip: "vx-skip",
+  "no-verdict": "vx-noverdict", current: "vx-testing", upcoming: "vx-upcoming",
+};
+
+function jobVerifications(j) {
+  const evs = j.events || [];
+  // The newest plan event wins (a re-plan replaces an earlier one).
+  let plan = null;
+  for (const e of evs) {
+    if (e.phase === "plan" && e.data && Array.isArray(e.data.plan) && e.data.plan.length) plan = e.data.plan;
+  }
+  // Step-prompt events, oldest-first. Also the fallback for a verdict with no step tag (a webapp
+  // verdict POSTs without `step`, so its milestone carries no phase either — it answers whatever prompt
+  // was the newest when it landed).
+  const prompts = [];
+  for (const e of evs) {
+    if (e.level === "info" && e.phase && e.data && typeof e.data === "object" && "prompt" in e.data) prompts.push(e);
+  }
+  const promptBy = new Map(prompts.map((e) => [e.phase, e]));
+  const newestPromptBefore = (id) => {
+    let found = null;
+    for (const p of prompts) if (p.id < id) found = p;
+    return found;
+  };
+  // Newest verdict (and the explicit 'none' timeout marker) per step id.
+  const verdictBy = new Map();
+  const timedOut = new Set();
+  for (const e of evs) {
+    if (!e.data || typeof e.data !== "object") continue;
+    let id = e.data.step || e.phase;
+    if (!id) {
+      const p = newestPromptBefore(e.id); // no step tag: attribute to the prompt it answered
+      id = p ? p.phase : null;
+    }
+    if (!id) continue;
+    if (e.level === "milestone" && VERDICT_SET.has(e.data.verdict)) {
+      verdictBy.set(id, { verdict: e.data.verdict, source: e.data.source, notes: e.data.notes, late: e.data.late, at: e.created_at });
+    } else if (e.data.verdict === "none") {
+      timedOut.add(id);
+    }
+  }
+  // Per-step results the driver writes into the closing phase 'done' event.
+  const doneBy = new Map();
+  for (const e of evs) {
+    if (e.phase === "done" && e.data && Array.isArray(e.data.results)) {
+      for (const r of e.data.results) if (r && (r.id || r.step)) doneBy.set(r.id || r.step, r);
+    }
+  }
+  const items = plan
+    ? plan.map((p, i) => ({
+        id: p.id, index: p.index != null ? p.index : i + 1, title: p.title,
+        strip_name: p.strip_name, strip_purpose: p.strip_purpose, strip_expect: p.strip_expect,
+      }))
+    : [...promptBy.entries()]
+        .map(([id, e]) => ({
+          id, index: (e.data || {}).step_index, title: e.message,
+          strip_name: (e.data || {}).strip_name, strip_purpose: (e.data || {}).strip_purpose,
+          strip_expect: (e.data || {}).strip_expect,
+        }))
+        .sort((a, b) => (a.index || 0) - (b.index || 0));
+  const total = j.current_step && j.current_step.step_total != null ? j.current_step.step_total : items.length;
+  const currentId = j.status === "running" && j.current_step ? j.current_step.phase : null;
+  return items.map((it) => {
+    const prompt = promptBy.get(it.id);
+    const d = (prompt && prompt.data) || {};
+    const dv = doneBy.get(it.id) || {};
+    const verdict =
+      verdictBy.get(it.id) ||
+      (VERDICT_SET.has(dv.verdict) ? { verdict: dv.verdict, source: dv.source, notes: dv.notes } : null);
+    const asked = !!prompt || !!dv.verdict;
+    const isCurrent = it.id === currentId;
+    const state = verdict
+      ? verdict.verdict
+      : isCurrent
+        ? "current"
+        : asked || timedOut.has(it.id)
+          ? "no-verdict"
+          : "upcoming";
+    const deadline = isCurrent && j.current_step && j.current_step.deadline_utc
+      ? j.current_step.deadline_utc
+      : d.deadline_utc || null;
+    return {
+      id: it.id,
+      index: it.index != null ? it.index : "?",
+      total,
+      name: it.strip_name || it.title || it.id,
+      tested: d.strip_purpose || it.strip_purpose || d.prompt || "",
+      expect: d.strip_expect || it.strip_expect || d.look_for || "",
+      prompt: d.prompt,
+      look_for: d.look_for,
+      respond_hint: d.respond_hint,
+      deadline_utc: deadline,
+      asked_at: isCurrent && j.current_step && j.current_step.asked_at ? j.current_step.asked_at : prompt ? prompt.created_at : null,
+      verdict,
+      asked,
+      isCurrent,
+      state,
+    };
+  });
+}
+
+// One stepper chip: 'k. name' + the verdict badge and its source; the current test gets a pulsing
+// accent border, a done chip carries its outcome colour, an unanswered one an amber outline.
+function vxChip(it) {
+  const cls = VX_STATE_CLASS[it.state] || "vx-upcoming";
+  const vb = it.verdict
+    ? badge(it.verdict.verdict, it.verdict.verdict === "pass" ? "kind" : it.verdict.verdict === "fail" ? "warn" : "") +
+      (it.verdict.source ? badge("via " + it.verdict.source) : "")
+    : it.state === "no-verdict"
+      ? badge("no verdict")
+      : it.state === "current"
+        ? badge("testing", "kind")
+        : "";
+  return `<button type="button" class="vx-chip ${cls}${it.isCurrent ? " vx-current" : ""}${it.verdict ? " vx-done" : ""}" data-vx-goto="${esc(
+    it.id,
+  )}"${it.isCurrent ? ' aria-current="step"' : ""}><span class="vx-cnum">${esc(it.index)}.</span> <span class="vx-cname">${esc(
+    it.name,
+  )}</span> ${vb}</button>`;
+}
+
+function jobStepper(j) {
+  const items = jobVerifications(j);
+  if (!items.length) return "";
+  const done = items.filter((x) => x.verdict).length;
+  return `<div class="vx-stepper" data-vx-stepper><span class="vx-slabel">Verification <span class="muted">${
+    done
+  }/${items.length} answered</span></span><div class="vx-chips">${items.map(vxChip).join("")}</div></div>`;
+}
+
+// The live countdown: a track + a fill whose width the 1 s ticker drives (a CSS width transition),
+// plus the numeric 'm:ss left'. No re-render is needed for either to move.
+function vxCountdown(it) {
+  if (!it.deadline_utc) return "";
+  const start = it.asked_at ? ` data-start="${esc(it.asked_at)}"` : "";
+  return `<div class="vx-count"><div class="vx-bar"><span class="vx-bar-fill" data-deadline="${esc(
+    it.deadline_utc,
+  )}" data-vx-fill${start}></span></div><span class="vx-cd mono" data-deadline="${esc(it.deadline_utc)}">…</span></div>`;
+}
+
+// The NOW TESTING card: the current test rendered big and distinct, with the verdict buttons.
 function nowTestingCard(j) {
   const cs = j.current_step;
   if (j.status !== "running" || !cs) return "";
-  const k = cs.step_index != null ? cs.step_index : "?";
-  const n = cs.step_total != null ? cs.step_total : "?";
-  const deadline = cs.deadline_utc
-    ? ` · <span class="muted">deadline <span class="mono" data-deadline="${esc(cs.deadline_utc)}">…</span></span>`
+  const cur = jobVerifications(j).find((x) => x.isCurrent) || {};
+  const k = cs.step_index != null ? cs.step_index : cur.index != null ? cur.index : "?";
+  const n = cs.step_total != null ? cs.step_total : cur.total != null ? cur.total : "?";
+  const name = cur.name || cs.phase || "";
+  const tested = cur.tested || cs.prompt || "";
+  const expect = cur.expect || cs.look_for || "";
+  const hint = cs.respond_hint || "in game: type !pass / !fail / !skip plus a note in chat";
+  const verdict = cur.verdict || cs.verdict || null;
+  // A recorded verdict (from this page, chat, console or the coordinator) reads the same either way.
+  const recorded = verdict
+    ? `<div class="vx-recorded">${badge(
+        "Recorded: " + String(verdict.verdict).toUpperCase(),
+        verdict.verdict === "pass" ? "kind" : verdict.verdict === "fail" ? "warn" : "",
+      )}${verdict.source ? ` <span class="muted">(via ${esc(verdict.source)})</span>` : ""}${
+        verdict.notes ? ` — “${esc(verdict.notes)}”` : ""
+      }</div>`
     : "";
-  const hint = cs.respond_hint
-    ? `<p class="muted">${esc(cs.respond_hint)}</p>`
-    : `<p class="muted">in game: type !pass / !fail / !skip plus a note in chat</p>`;
-  const recorded = cs.verdict
-    ? `<h3 style="margin-bottom:4px">Recorded verdict ${badge(
-        cs.verdict.verdict,
-        cs.verdict.verdict === "pass" ? "kind" : cs.verdict.verdict === "fail" ? "warn" : "",
-      )}${cs.verdict.source ? ` ${badge("via " + cs.verdict.source)}` : ""}</h3>` +
-      `${cs.verdict.notes ? `<p class="muted">“${esc(cs.verdict.notes)}”</p>` : ""}` +
-      `${cs.verdict.evidence_id ? `<p class="mono muted">evidence ${esc(cs.verdict.evidence_id)}</p>` : ""}`
+  const waiting = verdict
+    ? `<div class="vx-waiting"><span class="vx-spin"></span> Waiting for the demo to move to the next test…</div>`
     : "";
-  const form = `<form data-job-verdict="${esc(j.id)}">
+  const form = `<form data-job-verdict="${esc(j.id)}" class="vx-form">
       <p><input name="notes" placeholder="note (optional)"></p>
-      <p><button type="submit" name="verdict" value="pass">Pass</button>
-         <button type="submit" name="verdict" value="fail">Fail</button>
-         <button type="submit" name="verdict" value="skip">Skip</button></p>
+      <p class="vx-btns">
+        <button type="submit" name="verdict" value="pass" class="vx-btn vx-btn-pass">✓ Pass</button>
+        <button type="submit" name="verdict" value="fail" class="vx-btn vx-btn-fail">✗ Fail</button>
+        <button type="submit" name="verdict" value="skip" class="vx-btn vx-btn-skip">– Skip</button>
+      </p>
       <div class="result"></div></form>`;
-  return `<div class="card" style="border-color:var(--accent);border-width:2px">
-    <h2 style="margin-top:0">NOW TESTING <span class="muted">step ${esc(k)}/${esc(n)}:</span> ${badge(cs.phase || "")}</h2>
-    ${cs.prompt ? `<p><strong>${esc(cs.prompt)}</strong></p>` : ""}
-    ${cs.look_for ? `<p class="muted">Look for: ${esc(cs.look_for)}</p>` : ""}
-    ${hint}${deadline}
-    ${recorded ? `${recorded}<p class="muted">Post another if the call changes:</p>` : ""}${form}</div>`;
+  return `<div class="card vx-card" data-vx-card data-vx-step="${esc(cs.phase || "")}" data-vx-name="${esc(
+    name,
+  )}" data-vx-index="${esc(k)}" data-vx-total="${esc(n)}">
+    <div class="vx-card-head"><span class="vx-live">● LIVE</span> <span class="vx-testof">TEST ${esc(k)} of ${esc(n)}</span></div>
+    <h2 class="vx-title">${esc(name)} <span class="mono muted">${esc(cs.phase || "")}</span></h2>
+    ${tested ? `<p class="vx-field"><span class="vx-lbl">What is tested</span> ${esc(tested)}</p>` : ""}
+    ${expect ? `<p class="vx-field"><span class="vx-lbl">What you should see</span> ${esc(expect)}</p>` : ""}
+    ${vxCountdown(cur)}
+    <p class="muted vx-hint">${esc(hint)}</p>
+    ${recorded}${waiting}${form}</div>`;
+}
+
+// When the job is finished the card is replaced by the results: a 'Run complete' banner, the stepper
+// and one row per test with its verdict, source and note.
+function jobResults(j) {
+  const items = jobVerifications(j);
+  if (!items.length) return "";
+  const count = (v) => items.filter((x) => x.verdict && x.verdict.verdict === v).length;
+  const pass = count("pass"), fail = count("fail"), skip = count("skip");
+  const none = items.length - pass - fail - skip;
+  const vb = (v) => badge(v, v === "pass" ? "kind" : v === "fail" ? "warn" : "");
+  return `<div class="card vx-results" data-vx-results>
+    <div class="vx-complete">Run complete — <strong>${pass}</strong> pass · <strong>${fail}</strong> fail · <strong>${skip}</strong> skip · <strong>${none}</strong> no verdict</div>
+    ${jobStepper(j)}
+    <table class="vx-rtable"><tr><th>#</th><th>Test</th><th>Verdict</th><th>Source</th><th>Note</th></tr>
+    ${items
+      .map(
+        (it) => `<tr><td class="mono">${esc(it.index)}</td>
+      <td>${esc(it.name)}<div class="muted mono">${esc(it.id)}</div></td>
+      <td>${it.verdict ? vb(it.verdict.verdict) : `<span class="muted">no verdict</span>`}</td>
+      <td>${it.verdict && it.verdict.source ? badge("via " + it.verdict.source) : `<span class="muted">—</span>`}</td>
+      <td class="muted">${esc((it.verdict && it.verdict.notes) || "—")}</td></tr>`,
+      )
+      .join("")}</table></div>`;
 }
 
 
@@ -353,7 +536,7 @@ function jobDetail(j) {
     ? `<h2>Screenshots</h2><div class="grid">${shots
         .map(
           (a) =>
-            `<figure class="card" style="margin:0"><img src="${esc(a.url)}" alt="${esc(a.name)}" style="width:100%;border-radius:6px">` +
+            `<figure class="card" style="margin:0"><img src="${esc(a.url)}" alt="${esc(a.name)}" style="width:100%;border-radius:var(--r)">` +
             `<figcaption class="muted mono shot-cap">${esc(a.name)}<br>${esc(a.md5)}</figcaption></figure>`,
         )
         .join("")}</div>`
@@ -377,9 +560,12 @@ function jobDetail(j) {
   const when = `created ${fmtTime(j.created_at)}${j.started_at ? ` · started ${fmtTime(j.started_at)}` : ""}${
     j.finished_at ? ` · finished ${fmtTime(j.finished_at)}` : ""
   }`;
+  const vxItems = jobVerifications(j);
+  const stepper = vxItems.length && j.status === "running" ? jobStepper(j) : "";
+  const results = j.status !== "running" ? jobResults(j) : "";
   return `${nowLine()}<div>${jobHeadline(j)}</div>
     <p>${jobMeta(j)}<span class="muted"> · ${when}</span></p>
-    ${nowTestingCard(j)}${summary}${intake}${shotForm}${gallery}${otherArts}${links}${timeline}`;
+    ${stepper}${nowTestingCard(j)}${results}${summary}${intake}${shotForm}${gallery}${otherArts}${links}${timeline}`;
 }
 
 // Minimal Markdown renderer for docs: escape first, then add a small safe subset of formatting.
@@ -420,15 +606,57 @@ async function api(path, params = {}) {
 }
 
 // ------------------------------------------------------------------ routing
-const SECTIONS = [
-  ["search", "Search"], ["convars", "ConVars & Commands"], ["entities", "Entities (Hammer)"],
-  ["schema", "Schema"], ["events", "Game Events"], ["script", "cs_script API"], ["examples", "Examples"],
-  ["pulse", "Pulse"], ["docs", "Docs (source2.wiki)"], ["validate", "Validate"], ["projects", "Orchestration"],
-  ["hosts", "Hosts"], ["jobs", "Jobs"], ["activity", "Activity"], ["diff", "Build Diff"], ["prompts", "Prompts"],
-  ["stats", "Stats"],
+// The sidebar, clustered by intent instead of one flat list of 17 links:
+//   Reference — the indexed game data you look things up in (the app's primary purpose)
+//   Workflow  — the run pipeline, read top-down as its lifecycle (plan → queue → run → machines)
+//   Authoring — offline helpers used while writing scripts/configs
+//   Index     — install-wide numbers
+// Reference leads on purpose: this install is first of all a docs index, and leading with it also keeps
+// the top of the sidebar where it has always been, so grouping is additive rather than a re-learn. The
+// Workflow stages are ordered as a lifecycle because that IS their relation: Orchestration plans the
+// work, Jobs is the human-facing queue/ledger for it, Activity is the live record of the runs it
+// produced, and Hosts are the machines those runs hold. Validate is NOT a stage — it checks a
+// script/cfg offline, before anything is planned or queued — so it sits under Authoring and is offered
+// from the pipeline strip on the workflow pages.
+const NAV_GROUPS = [
+  ["Reference", [
+    ["search", "Search"], ["convars", "ConVars & Commands"], ["entities", "Entities (Hammer)"],
+    ["schema", "Schema"], ["events", "Game Events"], ["script", "cs_script API"], ["examples", "Examples"],
+    ["pulse", "Pulse"], ["docs", "Docs (source2.wiki)"], ["diff", "Build Diff"],
+  ]],
+  ["Workflow", [
+    ["projects", "Orchestration"], ["jobs", "Jobs"], ["activity", "Activity"], ["hosts", "Hosts"],
+  ], "plan → queue → live runs → machines"],
+  ["Authoring", [
+    ["validate", "Validate"], ["prompts", "Prompts"],
+  ]],
+  ["Index", [
+    ["stats", "Stats"],
+  ]],
 ];
+// Flat, in sidebar order — the route default and the active highlight use this.
+const SECTIONS = NAV_GROUPS.flatMap(([, items]) => items);
 // Pages that are about the whole install (hosts/runs/jobs), not one game — routed as #/<section>, no game prefix.
 const GLOBAL_SECTIONS = new Set(["hosts", "jobs", "activity"]);
+
+// The workflow pages are stages of ONE loop, so each of them carries this strip: the whole pipeline in
+// order with the current stage lit, plus the offline Validate check on the side. It answers "how do
+// these relate?" on the page itself, and every stage is one click from every other.
+const WORKFLOW_STAGES = [
+  ["projects", "Plan", "Orchestration", "multi-step DAG + quality gates; the agent works it step by step"],
+  ["jobs", "Queue", "Jobs", "one record per requested run: intake, timeline, verdicts, close-out summary"],
+  ["activity", "Run", "Activity", "live build/test/deploy runs across all hosts, service-fed"],
+  ["hosts", "Machines", "Hosts", "the hosts themselves and who holds each one's lease right now"],
+];
+const sectionHref = (id) => (GLOBAL_SECTIONS.has(id) ? `#/${id}` : `#/${enc(state.game)}/${id}`);
+function pipelineStrip(active) {
+  const stages = WORKFLOW_STAGES.map(([id, step, label, tip], i) =>
+    `<a class="pipe-a ${id === active ? "active" : ""}" href="${sectionHref(id)}" title="${esc(tip)}">` +
+    `<span class="pipe-n">${i + 1}</span> ${esc(step)} · ${esc(label)}</a>`).join("");
+  const check = `<a class="pipe-a ${active === "validate" ? "active" : ""}" href="${sectionHref("validate")}" ` +
+    `title="check a cs_script / .cfg against this build offline — before it is planned or queued">✓ Validate</a>`;
+  return `<div class="pipe"><span class="pipe-t">Workflow</span>${stages}<span class="pipe-sep"></span>${check}</div>`;
+}
 
 function parseHash() {
   const [path, query = ""] = location.hash.replace(/^#\/?/, "").split("?");
@@ -446,11 +674,17 @@ const link = (parts, label, params = {}) => {
 
 function renderNav(active) {
   const g = state.games.find((x) => x.id === state.game);
-  $("#nav").innerHTML = SECTIONS.map(([id, label]) => {
+  const item = ([id, label]) => {
     const disabled = (id === "script" || id === "examples") && !g?.script_api;
-    const href = GLOBAL_SECTIONS.has(id) ? `#/${id}` : `#/${enc(state.game)}/${id}`;
+    const href = sectionHref(id);
     return `<a href="${href}" class="${id === active ? "active" : ""} ${disabled ? "disabled" : ""}">${esc(label)}</a>`;
-  }).join("");
+  };
+  $("#nav").innerHTML = NAV_GROUPS.map(
+    ([title, items, hint]) =>
+      `<div class="nav-group">${esc(title)}</div>${hint ? `<div class="nav-hint">${esc(hint)}</div>` : ""}${items
+        .map(item)
+        .join("")}`,
+  ).join("");
   $("#build").textContent = g?.current_build ? `build ${g.current_build} · ${g.patch_version || ""}` : "not indexed";
 }
 
@@ -463,6 +697,7 @@ async function route() {
   }
   const [section = "search", ...rest] = parts;
   renderNav(section);
+  document.title = "Source 2 Docs"; // a fresh page resets the tab title (job pages re-set it below)
   clearTimeout(liveTimer); // any auto-refresh from the previous page stops now
   liveTimer = null;
   liveDirty = false; // a fresh page starts unedited; the previous page's typing is gone
@@ -472,6 +707,7 @@ async function route() {
     const handler = ROUTES[section] || ROUTES.search;
     view.innerHTML = await handler(rest, params);
     bindFilters(section, rest, params);
+    jobPostRender(view); // stepper->card transition detection + document.title for a job page
     // A live page (Hosts/Activity) parked a render fn in pendingLive; refill its #live region on a timer
     // so the strip updates without re-rendering the header or jumping the scroll position.
     // `ms` may be a function (e.g. poll fast while a run is active, slow when idle); a recursive
@@ -493,6 +729,7 @@ async function route() {
           const saved = snapshotLiveInputs(el);
           el.innerHTML = await render();
           restoreLiveInputs(el, saved);
+          jobPostRender(el); // detect a moved-on test and animate/banner it
         } catch { /* keep the last good view */ }
         liveTimer = setTimeout(tick, delay());
       };
@@ -583,10 +820,33 @@ function bindFilters(section, rest, params) {
   );
   view.querySelectorAll("form[data-prompt]").forEach(bindPromptForm);
   view.querySelectorAll("form[data-validate]").forEach(bindValidateForm);
+  view.querySelectorAll("[data-copy-md]").forEach(bindCopyMd);
   view.querySelectorAll("form[data-start-project]").forEach(bindStartProject);
   view.querySelectorAll("form[data-step]").forEach(bindStepForm);
   view.querySelectorAll("form[data-job-shot]").forEach(bindJobShot);
   view.querySelectorAll("form[data-job-verdict]").forEach(bindJobVerdict);
+}
+
+// Copy the current (filtered) diff as a Markdown table. The table is built into a hidden <textarea>
+// at render time — that box IS the fallback: when the clipboard API is unavailable (or denied), reveal
+// it and select the text so the user can copy by hand.
+function bindCopyMd(btn) {
+  const box = view.querySelector("#diff-md");
+  btn.addEventListener("click", async () => {
+    const text = box ? box.value : "";
+    try {
+      await navigator.clipboard.writeText(text);
+      const label = btn.textContent;
+      btn.textContent = "Copied ✓";
+      setTimeout(() => (btn.textContent = label), 1500);
+    } catch {
+      if (box) {
+        box.hidden = false;
+        box.focus();
+        box.select();
+      }
+    }
+  });
 }
 
 function bindJobShot(form) {
@@ -604,33 +864,104 @@ function bindJobShot(form) {
 }
 
 // The NOW TESTING card's Pass/Fail/Skip buttons: the pressed button's value is the verdict; the note
-// rides along. On success re-render so the card shows the recorded verdict (from any source).
+// rides along. On click all three disable and the pressed one shows a spinner + 'Sending…'; on success
+// the card re-renders into the recorded + waiting state; on error the buttons come back with the error
+// inline. A verdict that arrives from chat/console shows the same recorded state on the next refresh.
 function bindJobVerdict(form) {
   form.addEventListener("submit", async (ev) => {
     ev.preventDefault();
-    const verdict = ev.submitter && ev.submitter.value;
+    const pressed = ev.submitter;
+    const verdict = pressed && pressed.value;
     if (!verdict) return;
     const notes = form.elements.notes.value.trim() || null;
+    const btns = [...form.querySelectorAll("button[name=verdict]")];
+    const label = pressed ? pressed.innerHTML : "";
+    btns.forEach((b) => (b.disabled = true)); // pressed state: every button locks
+    if (pressed) pressed.innerHTML = `<span class="vx-spin"></span> Sending…`;
     const r = await postJson(`/api/jobs/${enc(form.dataset.jobVerdict)}/verdict`, { verdict, notes, source: "web" });
     if (!r.ok) {
-      form.querySelector(".result").innerHTML = `<p class="err">${esc(r.body.detail || "could not record the verdict")}</p>`;
+      // Re-enable so the user can retry, and show the failure inline in red.
+      btns.forEach((b) => (b.disabled = false));
+      if (pressed) pressed.innerHTML = label;
+      form.querySelector(".result").innerHTML = `<p class="err vx-error">${esc(r.body.detail || "could not record the verdict")}</p>`;
       return;
     }
-    // The verdict is recorded: drop the note box and refresh at once so the card shows the recorded
-    // verdict. Clearing liveDirty lets the auto-refresh take over again (it was skipping while typing).
+    // The verdict is recorded: clear the note box and refresh the card at once into the recorded +
+    // 'waiting for the demo to move on' state. Clearing liveDirty lets auto-refresh take over again.
     liveDirty = false;
     form.elements.notes.value = "";
-    route();
+    await refreshJobLive(form.dataset.jobVerdict);
   });
 }
 
-// Live countdown to each step's deadline_utc (the NOW TESTING card): a 1 s ticker over [data-deadline],
-// re-read every tick so it keeps up with the 5 s auto-refresh that replaces the card's innerHTML.
+// Re-render just the job page's #live region from the server (keeps the scroll position and any
+// transition animating in place) — used after a verdict lands so the card shows the recorded state.
+async function refreshJobLive(jobId) {
+  const live = view.querySelector("#live");
+  if (!live) return;
+  try {
+    live.innerHTML = jobDetail(await api(`/jobs/${enc(jobId)}`));
+    jobPostRender(live);
+  } catch {
+    /* keep the last good view */
+  }
+}
+
+// ---- Stepper/card transitions across the 5 s refresh --------------------------
+// The whole #live region is re-rendered on every poll, so "the current test changed" is detected by
+// comparing this refresh's card step id to the last one rendered. A change animates the card and pops
+// a transient banner; document.title mirrors 'TEST k/n — NAME' so the browser tab tracks progress too.
+let vxPrevStep = null;
+function jobPostRender(root) {
+  const card = root.querySelector("[data-vx-card]");
+  const step = card ? card.dataset.vxStep : null;
+  if (!card) {
+    vxPrevStep = null;
+    return;
+  }
+  const k = card.dataset.vxIndex, n = card.dataset.vxTotal, name = card.dataset.vxName || "";
+  document.title = `TEST ${k}/${n} — ${name}`;
+  if (vxPrevStep && step && step !== vxPrevStep) {
+    card.classList.add("vx-enter");
+    setTimeout(() => card.classList.remove("vx-enter"), 800);
+    showTransitionBanner(k, n, name);
+  }
+  vxPrevStep = step;
+}
+// A transient 'Moved on to TEST k: NAME' banner. Appended to <body> so the region's re-render cannot
+// wipe it mid-flight; it fades and removes itself after ~4 s.
+function showTransitionBanner(k, n, name) {
+  const el = document.createElement("div");
+  el.className = "vx-banner";
+  el.textContent = `Moved on to TEST ${k}: ${name}`;
+  document.body.appendChild(el);
+  setTimeout(() => el.classList.add("vx-gone"), 3500);
+  setTimeout(() => el.remove(), 4200);
+}
+// Clicking a done chip scrolls to that test's timeline entry (the verdict milestone if there is one).
+function gotoStepTimeline(id) {
+  if (!id) return;
+  const rows = [...view.querySelectorAll(`[data-vx-step="${window.CSS && CSS.escape ? CSS.escape(id) : id}"]`)];
+  const target = rows[rows.length - 1];
+  if (target) target.scrollIntoView({ behavior: "smooth", block: "center" });
+}
+
+// Live countdown to each step's deadline_utc (the NOW TESTING card): a 1 s client-side ticker, so the
+// numeric 'm:ss left' AND the bar fill keep moving between the 5 s region re-renders. Elements are
+// re-read every tick. A [data-vx-fill] element is the bar (width % via a CSS transition); anything
+// else with [data-deadline] is the numeric readout.
 function updateCountdowns() {
   document.querySelectorAll("[data-deadline]").forEach((el) => {
     const t = Date.parse(el.dataset.deadline);
     if (Number.isNaN(t)) return;
     const left = Math.floor((t - Date.now()) / 1000);
+    if (el.hasAttribute("data-vx-fill")) {
+      const s = el.dataset.start ? Date.parse(el.dataset.start) : NaN;
+      const tot = Number.isNaN(s) ? null : (t - s) / 1000;
+      const frac = tot && tot > 0 ? Math.max(0, Math.min(1, left / tot)) : left > 0 ? 1 : 0;
+      el.style.width = `${(frac * 100).toFixed(1)}%`;
+      return;
+    }
     el.textContent = left <= 0 ? "0:00 (expired)" : `${Math.floor(left / 60)}:${String(left % 60).padStart(2, "0")} left`;
   });
 }
@@ -647,6 +978,147 @@ const pager = (page) => {
 const input = (name, value, ph) => `<input name="${name}" value="${esc(value || "")}" placeholder="${esc(ph)}">`;
 const select = (name, value, options) =>
   `<select name="${name}">${options.map(([v, l]) => `<option value="${esc(v)}" ${v === (value || "") ? "selected" : ""}>${esc(l)}</option>`).join("")}</select>`;
+
+// ---- Build Diff helpers -----------------------------------------------------
+// Each member change renders as two labelled cells: the value that existed BEFORE and the value that
+// exists AFTER. A missing side reads '— absent' (an added row must not look like it has a before
+// value). Long values are never cut mid-token: they stay whole inside a bounded scroll box behind a
+// <details> expander, and the preview stops on a word boundary. For `changed` rows the shared
+// prefix/suffix is trimmed so only the differing span stands out. Field-level rows cluster under their
+// parent key (the API's `group`); a flat section (group null, e.g. convars) renders one table.
+// diff-helpers:start
+const CHANGE_RANK = { added: 0, changed: 1, removed: 2 };
+const DIFF_VAL_MAX = 160; // values longer than this collapse into an expander
+const changeBadge = (c) => badge(c, c === "removed" ? "warn" : c === "added" ? "kind" : "");
+const absentCell = () => `<span class="muted">— absent</span>`;
+// A word-boundary preview: cut at the last space, never inside a token; say how much is hidden.
+const wordPreview = (s, n = 90) => {
+  if (s.length <= n) return s;
+  const cut = s.slice(0, n);
+  const sp = cut.lastIndexOf(" ");
+  const head = sp > n * 0.5 ? cut.slice(0, sp) : cut;
+  return `${head} … (${s.length - head.length} more chars)`;
+};
+// One side's value. Whole value inside a bounded scroll box; nothing is silently truncated.
+const diffVal = (v) => {
+  if (v == null || v === "") return absentCell();
+  const s = String(v);
+  if (s.length <= DIFF_VAL_MAX) return `<span class="mono">${esc(s)}</span>`;
+  return (
+    `<details class="diff-long"><summary class="mono">${esc(wordPreview(s))}</summary>` +
+    `<pre class="mono diff-val">${esc(s)}</pre></details>`
+  );
+};
+// The shared head/tail length of two strings, so a `changed` pair shows only what differs.
+function commonEdges(a, b) {
+  const min = Math.min(a.length, b.length);
+  let p = 0;
+  while (p < min && a[p] === b[p]) p++;
+  let s = 0;
+  while (s < min - p && a[a.length - 1 - s] === b[b.length - 1 - s]) s++;
+  return [p, s];
+}
+const elideHead = (s, n = 40) => (s.length > n ? "…" + s.slice(s.length - n) : s);
+const elideTail = (s, n = 40) => (s.length > n ? s.slice(0, n) + "…" : s);
+// One cell of a `changed` row: shared prefix/suffix muted, the differing span highlighted.
+const diffChangedCell = (v, other, side) => {
+  if (v == null) return absentCell();
+  const a = String(v);
+  const b = String(other ?? "");
+  const [p, suf] = commonEdges(a, b);
+  const mid = a.slice(p, a.length - suf);
+  const pre = p ? `<span class="muted">${esc(elideHead(a.slice(0, p)))}</span>` : "";
+  const post = suf ? `<span class="muted">${esc(elideTail(a.slice(a.length - suf)))}</span>` : "";
+  const body = mid ? `<span class="diff-${side}">${esc(mid)}</span>` : `<span class="muted">∅</span>`;
+  return `<span class="mono">${pre}${body}${post}</span>`;
+};
+const diffRow = (r) => {
+  let before, after;
+  if (r.change === "changed") {
+    before = diffChangedCell(r.before, r.after, "old");
+    after = diffChangedCell(r.after, r.before, "new");
+  } else if (r.change === "added") {
+    before = absentCell();
+    after = diffVal(r.after);
+  } else {
+    before = diffVal(r.before);
+    after = absentCell();
+  }
+  return (
+    `<tr class="diff-${r.change}"><td>${changeBadge(r.change)}</td>` +
+    `<td class="mono">${esc(r.name)}</td><td>${before}</td><td>${after}</td></tr>`
+  );
+};
+const DIFF_HEAD = "<tr><th>Change</th><th>Name</th><th>Before</th><th>After</th></tr>";
+const diffTable = (rows) => `<table class="diff">${DIFF_HEAD}${rows.map(diffRow).join("")}</table>`;
+const sortDiffRows = (rows) =>
+  rows.slice().sort((a, b) =>
+    (CHANGE_RANK[a.change] - CHANGE_RANK[b.change]) || (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+const diffGrouped = (rows) => {
+  const groups = new Map();
+  for (const r of rows) {
+    const g = r.group || "(ungrouped)";
+    if (!groups.has(g)) groups.set(g, []);
+    groups.get(g).push(r);
+  }
+  return [...groups.entries()]
+    .sort((x, y) => (x[0] < y[0] ? -1 : x[0] > y[0] ? 1 : 0))
+    .map(
+      ([g, rs]) =>
+        `<h3 class="diff-group mono">${esc(g)} <span class="muted">(${rs.length})</span></h3>` + diffTable(rs),
+    )
+    .join("");
+};
+// Every section in file order: sections with changes render in full (grouped, with a truncation note
+// when the API capped them); a section with no changes collapses to one muted line.
+const diffSectionsHtml = (d, match) =>
+  Object.entries(d.sections)
+    .map(([sec, rows]) => {
+      const total = d.totals && d.totals[sec] != null ? d.totals[sec] : rows.length;
+      if (!total) return `<p class="muted diff-none">${esc(sec)}: no changes</p>`;
+      const shown = sortDiffRows(rows.filter(match));
+      if (!shown.length) return `<p class="muted diff-none">${esc(sec)}: no changes match the filter</p>`;
+      const cap = total > rows.length
+        ? `<span class="muted"> · showing first ${rows.length} of ${total}</span>`
+        : "";
+      const body = shown.some((r) => r.group != null) ? diffGrouped(shown) : diffTable(shown);
+      return `<h2>${esc(sec)} <span class="muted">(${shown.length})</span>${cap}</h2>${body}`;
+    })
+    .join("");
+// Header totals: N added / N removed / N changed, the active-section count, and whether any section
+// was capped (so the page is honest when the API truncates).
+const diffCounts = (d) => {
+  const counts = { added: 0, removed: 0, changed: 0 };
+  let total = 0;
+  let sections = 0;
+  for (const [sec, rows] of Object.entries(d.sections)) {
+    const t = d.totals && d.totals[sec] != null ? d.totals[sec] : rows.length;
+    if (t) sections += 1;
+    for (const r of rows) {
+      counts[r.change] += 1;
+      total += 1;
+    }
+  }
+  const realTotal = Object.values(d.totals || {}).reduce((a, b) => a + b, 0) || total;
+  return { ...counts, total, sections, truncated: realTotal > total };
+};
+// The clipboard table is built from the CURRENT (filtered) view, so what the user copies is what they
+// see. Pipe/newline escaping keeps the markdown table from breaking on a value.
+const mdCell = (v) => (v == null || v === "" ? "—" : String(v).replace(/\|/g, "\\|").replace(/\n/g, "<br>"));
+const diffMarkdown = (d, match) => {
+  const lines = [`# Build diff — ${d.game} ${d.from_build} → ${d.to_build}`, ""];
+  for (const [sec, rows] of Object.entries(d.sections)) {
+    const shown = sortDiffRows(rows.filter(match));
+    if (!shown.length) continue;
+    lines.push(`## ${sec}`, "", "| Change | Group | Name | Before | After |", "| --- | --- | --- | --- | --- |");
+    for (const r of shown) {
+      lines.push(`| ${r.change} | ${mdCell(r.group)} | \`${r.name}\` | ${mdCell(r.before)} | ${mdCell(r.after)} |`);
+    }
+    lines.push("");
+  }
+  return lines.join("\n");
+};
+// diff-helpers:end
 
 // Map a search hit (kind + key) to its detail route.
 function hitLink(hit) {
@@ -932,10 +1404,36 @@ const ROUTES = {
         Run <code>s2docs sync</code> after the next game update to diff patches.</p>`;
     const d = await api(`/games/${state.game}/diff`, { from: p.from, to: p.to });
     const opts = builds.map((b) => [String(b.build_number), `${b.build_number} (${b.patch_version || ""})`]);
-    return `<h1>Build diff</h1><form class="filters">${select("from", String(d.from_build), opts)}${select("to", String(d.to_build), opts)}</form>
-      ${Object.entries(d.sections).map(([sec, rows]) => `<h2>${esc(sec)} (${rows.length})</h2>${rows.length ? `<table>
-        <tr><th>Change</th><th>Name</th><th>Before → After</th></tr>${rows.map((r) => `<tr><td>${badge(r.change, r.change === "removed" ? "warn" : "kind")}</td>
-        <td class="mono">${esc(r.name)}</td><td class="mono muted">${esc((r.before || "").slice(0, 160))}${r.change === "changed" ? " → " : ""}${esc((r.after || "").slice(0, 160))}</td></tr>`).join("")}</table>` : `<p class="muted">No changes.</p>`}`).join("")}`;
+    const byNum = Object.fromEntries(builds.map((b) => [b.build_number, b]));
+    // Build metadata for the summary header, from GET /api/games/{game}/builds.
+    const meta = (n) => {
+      const b = byNum[n] || {};
+      const bits = [
+        b.patch_version && `patch ${b.patch_version}`,
+        b.version_date,
+        b.source_commit && `commit ${String(b.source_commit).slice(0, 10)}`,
+      ].filter(Boolean);
+      return `<div class="diff-build"><strong>build ${esc(n)}</strong>` +
+        (bits.length ? `<div class="muted">${esc(bits.join(" · "))}</div>` : "") + `</div>`;
+    };
+    // Filters come from the hash query (deep-linkable like ?from=&to=): change type + a name substring.
+    const q = (p.q || "").trim().toLowerCase();
+    const change = p.change || "";
+    const match = (r) => (!change || r.change === change) && (!q || r.name.toLowerCase().includes(q));
+    const c = diffCounts(d);
+    const md = diffMarkdown(d, match);
+    return `<h1>Build diff</h1>
+      <form class="filters">${select("from", String(d.from_build), opts)}${select("to", String(d.to_build), opts)}
+        ${select("change", p.change, [["", "all changes"], ["added", "added"], ["removed", "removed"], ["changed", "changed"]])}
+        ${input("q", p.q, "filter changed names…")}</form>
+      <div class="diff-head">${meta(d.from_build)}<span class="diff-arrow">→</span>${meta(d.to_build)}</div>
+      <p class="diff-counts">${badge(c.added + " added", "kind")}${badge(c.removed + " removed", "warn")}${badge(c.changed + " changed")}
+        <span class="muted">across ${c.sections} section${c.sections === 1 ? "" : "s"}${
+          c.truncated ? ` · sections capped at ${d.limit || 500} rows` : ""
+        }</span></p>
+      <div class="diff-actions"><button type="button" data-copy-md>Copy as Markdown</button>
+        <textarea id="diff-md" class="diff-md mono" hidden aria-label="diff as Markdown">${esc(md)}</textarea></div>
+      ${diffSectionsHtml(d, match)}`;
   },
 
   // "projects" are orchestration DAGs (multi-step plans the server tracks), distinct from the
@@ -989,7 +1487,7 @@ const ROUTES = {
             <textarea name="notes" rows="2" placeholder="notes / evidence"></textarea>
             <p>${["in_progress", "done", "blocked", "skipped"].map((st) => `<button name="status" value="${st}">${st}</button>`).join(" ")}</p>
             <div class="result"></div></form></div>`).join("");
-      return `<p>${link([state.game, "projects"], "← Orchestration")}</p><h1>${esc(p.title)}</h1>
+      return `<p>${link([state.game, "projects"], "← Orchestration")}</p><h1>${esc(p.title)}</h1>${pipelineStrip("projects")}
         <p>${statusBadge(p.status)}${badge(p.workflow)}${badge(p.game)}${p.addon ? badge("addon: " + p.addon) : ""} <span class="mono muted">${esc(p.id)}</span></p>
         <p class="muted">This is an <strong>orchestration DAG</strong> — the server's multi-step plan — not a build/test run.
           For the runs these steps drive on hosts, see ${link(["activity"], "Activity")}.</p>
@@ -1003,7 +1501,7 @@ const ROUTES = {
     }
     const [projects, workflows] = await Promise.all([api("/projects"), api("/workflows")]);
     const wfOptions = workflows.filter((w) => w.games.includes(state.game)).map((w) => [w.id, w.title]);
-    return `<h1>Orchestration</h1><p class="muted">Multi-step <strong>orchestration DAGs</strong>: the server holds the plan and the
+    return `<h1>Orchestration</h1>${pipelineStrip("projects")}<p class="muted">Multi-step <strong>orchestration DAGs</strong>: the server holds the plan and the
       quality gates, your agent does the work. These are plans, not runs — for the build/test/deploy runs they drive, see
       ${link(["activity"], "Activity")}. Start one here or from an MCP client (prompt <code>orchestrate</code>), then hand
       the project id to your agent. Click a project to open its step-level view: step states, gates, evidence and notes.</p>
@@ -1045,7 +1543,7 @@ const ROUTES = {
           <h2>Recent test runs (${tests.length})</h2>${testRows(tests.slice(0, 15))}`;
       };
       liveBody("#live", body);
-      return `<p>${link(["hosts"], "← Hosts")}</p><h1 class="mono">${esc(hostId)}</h1><div id="live">${await body()}</div>`;
+      return `<p>${link(["hosts"], "← Hosts")}</p><h1 class="mono">${esc(hostId)}</h1>${pipelineStrip("hosts")}<div id="live">${await body()}</div>`;
     }
     const body = async () => {
       const hosts = await api("/hosts");
@@ -1062,7 +1560,7 @@ const ROUTES = {
         .join("")}</table>`;
     };
     liveBody("#live", body);
-    return `<h1>Hosts</h1><p class="muted">Test/build hosts and who is driving each right now (owner, fresh vs stale, heartbeat age). Auto-refreshes every 5 s. Click a host for its facts, lock history and recent activity.</p><div id="live">${await body()}</div>`;
+    return `<h1>Hosts</h1>${pipelineStrip("hosts")}<p class="muted">Test/build hosts and who is driving each right now (owner, fresh vs stale, heartbeat age). Auto-refreshes every 5 s. Click a host for its facts, lock history and recent activity.</p><div id="live">${await body()}</div>`;
   },
 
   // Game-independent: the live view a person watches to answer "what is running right now".
@@ -1148,7 +1646,7 @@ const ROUTES = {
     };
     // Fast (5 s) while a run is active; slow (15 s) when idle so an idle install isn't hammered.
     liveBody("#live", body, () => (state.activityActive ? 5000 : 15000));
-    return `<h1>Activity</h1><p class="muted">What is running right now across all hosts — build runs, test runs and deployments, without SSHing anywhere.
+    return `<h1>Activity</h1>${pipelineStrip("activity")}<p class="muted">What is running right now across all hosts — build runs, test runs and deployments, without SSHing anywhere.
       This view is <strong>service-fed</strong>: rows appear when work goes through the s2docs build/test/deploy services
       (MCP <code>build_start</code>/<code>test_start</code>/<code>deploy_push</code>, or the CLI), <em>not</em> from any CS2 running anywhere.
       Test-run rows mirror the in-game HUD strip (name / step / state / elapsed). Every row also carries its
@@ -1160,7 +1658,7 @@ const ROUTES = {
     if (jobId) {
       const body = async () => jobDetail(await api(`/jobs/${enc(jobId)}`));
       liveBody("#live", body, () => 5000);
-      return `<p>${link(["jobs"], "← Jobs")}</p><div id="live">${await body()}</div>`;
+      return `<p>${link(["jobs"], "← Jobs")}</p>${pipelineStrip("jobs")}<div id="live">${await body()}</div>`;
     }
     const body = async () => {
       const [allJobs, hosts] = await Promise.all([api("/jobs"), api("/hosts")]);
@@ -1169,7 +1667,7 @@ const ROUTES = {
     };
     // Fast (5 s) while any job is running; slow (15 s) when the queue is idle.
     liveBody("#live", body, () => (state.jobsActive ? 5000 : 15000));
-    return `<h1>Jobs</h1><p class="muted">One record per requested run: the intake is the gate, the timeline is the
+    return `<h1>Jobs</h1>${pipelineStrip("jobs")}<p class="muted">One record per requested run: the intake is the gate, the timeline is the
       record, screenshots/logs are artifacts, and a job closes out with a mandatory summary (what / why / learned /
       next). Jobs <strong>never</strong> claim the host lease — the build/test/deploy tools still do; a job links to
       those records. The queue is per host: running on top, then queued by position. Auto-refreshes every 5 s while a
@@ -1182,7 +1680,11 @@ const ROUTES = {
       <p class="muted">Type-checked by the TypeScript compiler against this build's <code>point_script.d.ts</code>.</p>
       <form data-validate="cs-script"><textarea name="code" rows="14" class="mono" placeholder='import { Instance } from "cs_script/point_script";'></textarea>
       <p><button type="submit">Check script</button></p><div class="result"></div></form>` : "";
-    return `<h1>Validate</h1>${scriptForm}
+    return `<h1>Validate</h1>${pipelineStrip("validate")}
+      <p class="muted">Validate is the <strong>offline gate</strong>, not a stage of the run pipeline: it type-checks a
+      cs_script or a .cfg against this build's own index before anything is planned (${link([state.game, "projects"], "Orchestration")}),
+      queued (${link(["jobs"], "Jobs")}) or run on a host (${link(["activity"], "Activity")}). It touches no host and starts
+      nothing.</p>${scriptForm}
       <h2>Config (.cfg)</h2><p class="muted">Every command is checked against the indexed convars/commands for ${esc(g?.name || state.game)}.</p>
       <form data-validate="cfg"><textarea name="text" rows="10" class="mono" placeholder="sv_cheats 1&#10;mp_roundtime 3"></textarea>
       <p>${select("context", "server", [["server", "server cfg"], ["client", "client cfg"], ["any", "any"]])} <button type="submit">Check cfg</button></p>
@@ -1324,6 +1826,12 @@ async function boot() {
       e.preventDefault();
       $("#q").focus();
     }
+  });
+  // Clicking a stepper chip scrolls the page to that test's timeline entry (delegated, so it survives
+  // the 5 s re-render of the whole #live region).
+  document.addEventListener("click", (ev) => {
+    const chip = ev.target && ev.target.closest ? ev.target.closest("[data-vx-goto]") : null;
+    if (chip) gotoStepTimeline(chip.dataset.vxGoto);
   });
   window.addEventListener("hashchange", route);
   setInterval(updateCountdowns, 1000); // ticks the NOW TESTING deadline regardless of which page is up
