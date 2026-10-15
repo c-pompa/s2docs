@@ -285,44 +285,227 @@ const jobTimeline = (events) =>
         ? ` ${badge(e.data.verdict, e.data.verdict === "pass" ? "kind" : e.data.verdict === "fail" ? "warn" : "")}` +
           `${e.data.source ? ` ${badge("via " + e.data.source)}` : ""}`
         : "";
-      return `<li>${badge(e.level, JOB_LEVEL_CLASS[e.level] || "")}${vd} <span class="muted">${fmtTime(e.created_at)}</span>` +
+      return `<li${e.phase ? ` data-vx-step="${esc(e.phase)}"` : ""}>${badge(e.level, JOB_LEVEL_CLASS[e.level] || "")}${vd} <span class="muted">${fmtTime(e.created_at)}</span>` +
         `${e.phase ? ` <span class="mono muted">${esc(e.phase)}</span>` : ""}<div>${esc(e.message)}</div>${tail}</li>`;
     })
     .join("")}</ul>`;
 
-// The "NOW TESTING" card: while a job is running and the driver has posted a step prompt, show what is
-// being tested and let the user answer from here instead of in game. Buttons POST /api/jobs/<id>/verdict.
+// ---- Job verification model: the stepper + the NOW TESTING card -------------
+// The driver posts one phase 'plan' event up front (the full ordered test list), an 'info' step-prompt
+// event per test (phase = step id; data carries prompt / look_for / strip_name / strip_purpose /
+// strip_expect / deadline_utc / step_index / step_total), a 'milestone' verdict event per answered test
+// (data.verdict + source + notes, step = data.step or the event phase), and a phase 'done' event with
+// per-step results when the run ends. jobVerifications() folds all of that into one ordered list the
+// stepper, the card and the results summary all read. With no plan event yet (an older driver, or the
+// plan not posted) it falls back to the step prompts seen so far, so the strip still shows real progress.
+const VERDICT_SET = new Set(["pass", "fail", "skip"]);
+// One chip class per step state — the whole visual language of the stepper, in one place.
+const VX_STATE_CLASS = {
+  pass: "vx-pass", fail: "vx-fail", skip: "vx-skip",
+  "no-verdict": "vx-noverdict", current: "vx-testing", upcoming: "vx-upcoming",
+};
+
+function jobVerifications(j) {
+  const evs = j.events || [];
+  // The newest plan event wins (a re-plan replaces an earlier one).
+  let plan = null;
+  for (const e of evs) {
+    if (e.phase === "plan" && e.data && Array.isArray(e.data.plan) && e.data.plan.length) plan = e.data.plan;
+  }
+  // Step-prompt events, oldest-first. Also the fallback for a verdict with no step tag (a webapp
+  // verdict POSTs without `step`, so its milestone carries no phase either — it answers whatever prompt
+  // was the newest when it landed).
+  const prompts = [];
+  for (const e of evs) {
+    if (e.level === "info" && e.phase && e.data && typeof e.data === "object" && "prompt" in e.data) prompts.push(e);
+  }
+  const promptBy = new Map(prompts.map((e) => [e.phase, e]));
+  const newestPromptBefore = (id) => {
+    let found = null;
+    for (const p of prompts) if (p.id < id) found = p;
+    return found;
+  };
+  // Newest verdict (and the explicit 'none' timeout marker) per step id.
+  const verdictBy = new Map();
+  const timedOut = new Set();
+  for (const e of evs) {
+    if (!e.data || typeof e.data !== "object") continue;
+    let id = e.data.step || e.phase;
+    if (!id) {
+      const p = newestPromptBefore(e.id); // no step tag: attribute to the prompt it answered
+      id = p ? p.phase : null;
+    }
+    if (!id) continue;
+    if (e.level === "milestone" && VERDICT_SET.has(e.data.verdict)) {
+      verdictBy.set(id, { verdict: e.data.verdict, source: e.data.source, notes: e.data.notes, late: e.data.late, at: e.created_at });
+    } else if (e.data.verdict === "none") {
+      timedOut.add(id);
+    }
+  }
+  // Per-step results the driver writes into the closing phase 'done' event.
+  const doneBy = new Map();
+  for (const e of evs) {
+    if (e.phase === "done" && e.data && Array.isArray(e.data.results)) {
+      for (const r of e.data.results) if (r && (r.id || r.step)) doneBy.set(r.id || r.step, r);
+    }
+  }
+  const items = plan
+    ? plan.map((p, i) => ({
+        id: p.id, index: p.index != null ? p.index : i + 1, title: p.title,
+        strip_name: p.strip_name, strip_purpose: p.strip_purpose, strip_expect: p.strip_expect,
+      }))
+    : [...promptBy.entries()]
+        .map(([id, e]) => ({
+          id, index: (e.data || {}).step_index, title: e.message,
+          strip_name: (e.data || {}).strip_name, strip_purpose: (e.data || {}).strip_purpose,
+          strip_expect: (e.data || {}).strip_expect,
+        }))
+        .sort((a, b) => (a.index || 0) - (b.index || 0));
+  const total = j.current_step && j.current_step.step_total != null ? j.current_step.step_total : items.length;
+  const currentId = j.status === "running" && j.current_step ? j.current_step.phase : null;
+  return items.map((it) => {
+    const prompt = promptBy.get(it.id);
+    const d = (prompt && prompt.data) || {};
+    const dv = doneBy.get(it.id) || {};
+    const verdict =
+      verdictBy.get(it.id) ||
+      (VERDICT_SET.has(dv.verdict) ? { verdict: dv.verdict, source: dv.source, notes: dv.notes } : null);
+    const asked = !!prompt || !!dv.verdict;
+    const isCurrent = it.id === currentId;
+    const state = verdict
+      ? verdict.verdict
+      : isCurrent
+        ? "current"
+        : asked || timedOut.has(it.id)
+          ? "no-verdict"
+          : "upcoming";
+    const deadline = isCurrent && j.current_step && j.current_step.deadline_utc
+      ? j.current_step.deadline_utc
+      : d.deadline_utc || null;
+    return {
+      id: it.id,
+      index: it.index != null ? it.index : "?",
+      total,
+      name: it.strip_name || it.title || it.id,
+      tested: d.strip_purpose || it.strip_purpose || d.prompt || "",
+      expect: d.strip_expect || it.strip_expect || d.look_for || "",
+      prompt: d.prompt,
+      look_for: d.look_for,
+      respond_hint: d.respond_hint,
+      deadline_utc: deadline,
+      asked_at: isCurrent && j.current_step && j.current_step.asked_at ? j.current_step.asked_at : prompt ? prompt.created_at : null,
+      verdict,
+      asked,
+      isCurrent,
+      state,
+    };
+  });
+}
+
+// One stepper chip: 'k. name' + the verdict badge and its source; the current test gets a pulsing
+// accent border, a done chip carries its outcome colour, an unanswered one an amber outline.
+function vxChip(it) {
+  const cls = VX_STATE_CLASS[it.state] || "vx-upcoming";
+  const vb = it.verdict
+    ? badge(it.verdict.verdict, it.verdict.verdict === "pass" ? "kind" : it.verdict.verdict === "fail" ? "warn" : "") +
+      (it.verdict.source ? badge("via " + it.verdict.source) : "")
+    : it.state === "no-verdict"
+      ? badge("no verdict")
+      : it.state === "current"
+        ? badge("testing", "kind")
+        : "";
+  return `<button type="button" class="vx-chip ${cls}${it.isCurrent ? " vx-current" : ""}${it.verdict ? " vx-done" : ""}" data-vx-goto="${esc(
+    it.id,
+  )}"${it.isCurrent ? ' aria-current="step"' : ""}><span class="vx-cnum">${esc(it.index)}.</span> <span class="vx-cname">${esc(
+    it.name,
+  )}</span> ${vb}</button>`;
+}
+
+function jobStepper(j) {
+  const items = jobVerifications(j);
+  if (!items.length) return "";
+  const done = items.filter((x) => x.verdict).length;
+  return `<div class="vx-stepper" data-vx-stepper><span class="vx-slabel">Verification <span class="muted">${
+    done
+  }/${items.length} answered</span></span><div class="vx-chips">${items.map(vxChip).join("")}</div></div>`;
+}
+
+// The live countdown: a track + a fill whose width the 1 s ticker drives (a CSS width transition),
+// plus the numeric 'm:ss left'. No re-render is needed for either to move.
+function vxCountdown(it) {
+  if (!it.deadline_utc) return "";
+  const start = it.asked_at ? ` data-start="${esc(it.asked_at)}"` : "";
+  return `<div class="vx-count"><div class="vx-bar"><span class="vx-bar-fill" data-deadline="${esc(
+    it.deadline_utc,
+  )}" data-vx-fill${start}></span></div><span class="vx-cd mono" data-deadline="${esc(it.deadline_utc)}">…</span></div>`;
+}
+
+// The NOW TESTING card: the current test rendered big and distinct, with the verdict buttons.
 function nowTestingCard(j) {
   const cs = j.current_step;
   if (j.status !== "running" || !cs) return "";
-  const k = cs.step_index != null ? cs.step_index : "?";
-  const n = cs.step_total != null ? cs.step_total : "?";
-  const deadline = cs.deadline_utc
-    ? ` · <span class="muted">deadline <span class="mono" data-deadline="${esc(cs.deadline_utc)}">…</span></span>`
+  const cur = jobVerifications(j).find((x) => x.isCurrent) || {};
+  const k = cs.step_index != null ? cs.step_index : cur.index != null ? cur.index : "?";
+  const n = cs.step_total != null ? cs.step_total : cur.total != null ? cur.total : "?";
+  const name = cur.name || cs.phase || "";
+  const tested = cur.tested || cs.prompt || "";
+  const expect = cur.expect || cs.look_for || "";
+  const hint = cs.respond_hint || "in game: type !pass / !fail / !skip plus a note in chat";
+  const verdict = cur.verdict || cs.verdict || null;
+  // A recorded verdict (from this page, chat, console or the coordinator) reads the same either way.
+  const recorded = verdict
+    ? `<div class="vx-recorded">${badge(
+        "Recorded: " + String(verdict.verdict).toUpperCase(),
+        verdict.verdict === "pass" ? "kind" : verdict.verdict === "fail" ? "warn" : "",
+      )}${verdict.source ? ` <span class="muted">(via ${esc(verdict.source)})</span>` : ""}${
+        verdict.notes ? ` — “${esc(verdict.notes)}”` : ""
+      }</div>`
     : "";
-  const hint = cs.respond_hint
-    ? `<p class="muted">${esc(cs.respond_hint)}</p>`
-    : `<p class="muted">in game: type !pass / !fail / !skip plus a note in chat</p>`;
-  const recorded = cs.verdict
-    ? `<h3 style="margin-bottom:4px">Recorded verdict ${badge(
-        cs.verdict.verdict,
-        cs.verdict.verdict === "pass" ? "kind" : cs.verdict.verdict === "fail" ? "warn" : "",
-      )}${cs.verdict.source ? ` ${badge("via " + cs.verdict.source)}` : ""}</h3>` +
-      `${cs.verdict.notes ? `<p class="muted">“${esc(cs.verdict.notes)}”</p>` : ""}` +
-      `${cs.verdict.evidence_id ? `<p class="mono muted">evidence ${esc(cs.verdict.evidence_id)}</p>` : ""}`
+  const waiting = verdict
+    ? `<div class="vx-waiting"><span class="vx-spin"></span> Waiting for the demo to move to the next test…</div>`
     : "";
-  const form = `<form data-job-verdict="${esc(j.id)}">
+  const form = `<form data-job-verdict="${esc(j.id)}" class="vx-form">
       <p><input name="notes" placeholder="note (optional)"></p>
-      <p><button type="submit" name="verdict" value="pass">Pass</button>
-         <button type="submit" name="verdict" value="fail">Fail</button>
-         <button type="submit" name="verdict" value="skip">Skip</button></p>
+      <p class="vx-btns">
+        <button type="submit" name="verdict" value="pass" class="vx-btn vx-btn-pass">✓ Pass</button>
+        <button type="submit" name="verdict" value="fail" class="vx-btn vx-btn-fail">✗ Fail</button>
+        <button type="submit" name="verdict" value="skip" class="vx-btn vx-btn-skip">– Skip</button>
+      </p>
       <div class="result"></div></form>`;
-  return `<div class="card" style="border-color:var(--accent);border-width:2px">
-    <h2 style="margin-top:0">NOW TESTING <span class="muted">step ${esc(k)}/${esc(n)}:</span> ${badge(cs.phase || "")}</h2>
-    ${cs.prompt ? `<p><strong>${esc(cs.prompt)}</strong></p>` : ""}
-    ${cs.look_for ? `<p class="muted">Look for: ${esc(cs.look_for)}</p>` : ""}
-    ${hint}${deadline}
-    ${recorded ? `${recorded}<p class="muted">Post another if the call changes:</p>` : ""}${form}</div>`;
+  return `<div class="card vx-card" data-vx-card data-vx-step="${esc(cs.phase || "")}" data-vx-name="${esc(
+    name,
+  )}" data-vx-index="${esc(k)}" data-vx-total="${esc(n)}">
+    <div class="vx-card-head"><span class="vx-live">● LIVE</span> <span class="vx-testof">TEST ${esc(k)} of ${esc(n)}</span></div>
+    <h2 class="vx-title">${esc(name)} <span class="mono muted">${esc(cs.phase || "")}</span></h2>
+    ${tested ? `<p class="vx-field"><span class="vx-lbl">What is tested</span> ${esc(tested)}</p>` : ""}
+    ${expect ? `<p class="vx-field"><span class="vx-lbl">What you should see</span> ${esc(expect)}</p>` : ""}
+    ${vxCountdown(cur)}
+    <p class="muted vx-hint">${esc(hint)}</p>
+    ${recorded}${waiting}${form}</div>`;
+}
+
+// When the job is finished the card is replaced by the results: a 'Run complete' banner, the stepper
+// and one row per test with its verdict, source and note.
+function jobResults(j) {
+  const items = jobVerifications(j);
+  if (!items.length) return "";
+  const count = (v) => items.filter((x) => x.verdict && x.verdict.verdict === v).length;
+  const pass = count("pass"), fail = count("fail"), skip = count("skip");
+  const none = items.length - pass - fail - skip;
+  const vb = (v) => badge(v, v === "pass" ? "kind" : v === "fail" ? "warn" : "");
+  return `<div class="card vx-results" data-vx-results>
+    <div class="vx-complete">Run complete — <strong>${pass}</strong> pass · <strong>${fail}</strong> fail · <strong>${skip}</strong> skip · <strong>${none}</strong> no verdict</div>
+    ${jobStepper(j)}
+    <table class="vx-rtable"><tr><th>#</th><th>Test</th><th>Verdict</th><th>Source</th><th>Note</th></tr>
+    ${items
+      .map(
+        (it) => `<tr><td class="mono">${esc(it.index)}</td>
+      <td>${esc(it.name)}<div class="muted mono">${esc(it.id)}</div></td>
+      <td>${it.verdict ? vb(it.verdict.verdict) : `<span class="muted">no verdict</span>`}</td>
+      <td>${it.verdict && it.verdict.source ? badge("via " + it.verdict.source) : `<span class="muted">—</span>`}</td>
+      <td class="muted">${esc((it.verdict && it.verdict.notes) || "—")}</td></tr>`,
+      )
+      .join("")}</table></div>`;
 }
 
 
@@ -377,9 +560,12 @@ function jobDetail(j) {
   const when = `created ${fmtTime(j.created_at)}${j.started_at ? ` · started ${fmtTime(j.started_at)}` : ""}${
     j.finished_at ? ` · finished ${fmtTime(j.finished_at)}` : ""
   }`;
+  const vxItems = jobVerifications(j);
+  const stepper = vxItems.length && j.status === "running" ? jobStepper(j) : "";
+  const results = j.status !== "running" ? jobResults(j) : "";
   return `${nowLine()}<div>${jobHeadline(j)}</div>
     <p>${jobMeta(j)}<span class="muted"> · ${when}</span></p>
-    ${nowTestingCard(j)}${summary}${intake}${shotForm}${gallery}${otherArts}${links}${timeline}`;
+    ${stepper}${nowTestingCard(j)}${results}${summary}${intake}${shotForm}${gallery}${otherArts}${links}${timeline}`;
 }
 
 // Minimal Markdown renderer for docs: escape first, then add a small safe subset of formatting.
@@ -463,6 +649,7 @@ async function route() {
   }
   const [section = "search", ...rest] = parts;
   renderNav(section);
+  document.title = "Source 2 Docs"; // a fresh page resets the tab title (job pages re-set it below)
   clearTimeout(liveTimer); // any auto-refresh from the previous page stops now
   liveTimer = null;
   liveDirty = false; // a fresh page starts unedited; the previous page's typing is gone
@@ -472,6 +659,7 @@ async function route() {
     const handler = ROUTES[section] || ROUTES.search;
     view.innerHTML = await handler(rest, params);
     bindFilters(section, rest, params);
+    jobPostRender(view); // stepper->card transition detection + document.title for a job page
     // A live page (Hosts/Activity) parked a render fn in pendingLive; refill its #live region on a timer
     // so the strip updates without re-rendering the header or jumping the scroll position.
     // `ms` may be a function (e.g. poll fast while a run is active, slow when idle); a recursive
@@ -493,6 +681,7 @@ async function route() {
           const saved = snapshotLiveInputs(el);
           el.innerHTML = await render();
           restoreLiveInputs(el, saved);
+          jobPostRender(el); // detect a moved-on test and animate/banner it
         } catch { /* keep the last good view */ }
         liveTimer = setTimeout(tick, delay());
       };
@@ -604,33 +793,104 @@ function bindJobShot(form) {
 }
 
 // The NOW TESTING card's Pass/Fail/Skip buttons: the pressed button's value is the verdict; the note
-// rides along. On success re-render so the card shows the recorded verdict (from any source).
+// rides along. On click all three disable and the pressed one shows a spinner + 'Sending…'; on success
+// the card re-renders into the recorded + waiting state; on error the buttons come back with the error
+// inline. A verdict that arrives from chat/console shows the same recorded state on the next refresh.
 function bindJobVerdict(form) {
   form.addEventListener("submit", async (ev) => {
     ev.preventDefault();
-    const verdict = ev.submitter && ev.submitter.value;
+    const pressed = ev.submitter;
+    const verdict = pressed && pressed.value;
     if (!verdict) return;
     const notes = form.elements.notes.value.trim() || null;
+    const btns = [...form.querySelectorAll("button[name=verdict]")];
+    const label = pressed ? pressed.innerHTML : "";
+    btns.forEach((b) => (b.disabled = true)); // pressed state: every button locks
+    if (pressed) pressed.innerHTML = `<span class="vx-spin"></span> Sending…`;
     const r = await postJson(`/api/jobs/${enc(form.dataset.jobVerdict)}/verdict`, { verdict, notes, source: "web" });
     if (!r.ok) {
-      form.querySelector(".result").innerHTML = `<p class="err">${esc(r.body.detail || "could not record the verdict")}</p>`;
+      // Re-enable so the user can retry, and show the failure inline in red.
+      btns.forEach((b) => (b.disabled = false));
+      if (pressed) pressed.innerHTML = label;
+      form.querySelector(".result").innerHTML = `<p class="err vx-error">${esc(r.body.detail || "could not record the verdict")}</p>`;
       return;
     }
-    // The verdict is recorded: drop the note box and refresh at once so the card shows the recorded
-    // verdict. Clearing liveDirty lets the auto-refresh take over again (it was skipping while typing).
+    // The verdict is recorded: clear the note box and refresh the card at once into the recorded +
+    // 'waiting for the demo to move on' state. Clearing liveDirty lets auto-refresh take over again.
     liveDirty = false;
     form.elements.notes.value = "";
-    route();
+    await refreshJobLive(form.dataset.jobVerdict);
   });
 }
 
-// Live countdown to each step's deadline_utc (the NOW TESTING card): a 1 s ticker over [data-deadline],
-// re-read every tick so it keeps up with the 5 s auto-refresh that replaces the card's innerHTML.
+// Re-render just the job page's #live region from the server (keeps the scroll position and any
+// transition animating in place) — used after a verdict lands so the card shows the recorded state.
+async function refreshJobLive(jobId) {
+  const live = view.querySelector("#live");
+  if (!live) return;
+  try {
+    live.innerHTML = jobDetail(await api(`/jobs/${enc(jobId)}`));
+    jobPostRender(live);
+  } catch {
+    /* keep the last good view */
+  }
+}
+
+// ---- Stepper/card transitions across the 5 s refresh --------------------------
+// The whole #live region is re-rendered on every poll, so "the current test changed" is detected by
+// comparing this refresh's card step id to the last one rendered. A change animates the card and pops
+// a transient banner; document.title mirrors 'TEST k/n — NAME' so the browser tab tracks progress too.
+let vxPrevStep = null;
+function jobPostRender(root) {
+  const card = root.querySelector("[data-vx-card]");
+  const step = card ? card.dataset.vxStep : null;
+  if (!card) {
+    vxPrevStep = null;
+    return;
+  }
+  const k = card.dataset.vxIndex, n = card.dataset.vxTotal, name = card.dataset.vxName || "";
+  document.title = `TEST ${k}/${n} — ${name}`;
+  if (vxPrevStep && step && step !== vxPrevStep) {
+    card.classList.add("vx-enter");
+    setTimeout(() => card.classList.remove("vx-enter"), 800);
+    showTransitionBanner(k, n, name);
+  }
+  vxPrevStep = step;
+}
+// A transient 'Moved on to TEST k: NAME' banner. Appended to <body> so the region's re-render cannot
+// wipe it mid-flight; it fades and removes itself after ~4 s.
+function showTransitionBanner(k, n, name) {
+  const el = document.createElement("div");
+  el.className = "vx-banner";
+  el.textContent = `Moved on to TEST ${k}: ${name}`;
+  document.body.appendChild(el);
+  setTimeout(() => el.classList.add("vx-gone"), 3500);
+  setTimeout(() => el.remove(), 4200);
+}
+// Clicking a done chip scrolls to that test's timeline entry (the verdict milestone if there is one).
+function gotoStepTimeline(id) {
+  if (!id) return;
+  const rows = [...view.querySelectorAll(`[data-vx-step="${window.CSS && CSS.escape ? CSS.escape(id) : id}"]`)];
+  const target = rows[rows.length - 1];
+  if (target) target.scrollIntoView({ behavior: "smooth", block: "center" });
+}
+
+// Live countdown to each step's deadline_utc (the NOW TESTING card): a 1 s client-side ticker, so the
+// numeric 'm:ss left' AND the bar fill keep moving between the 5 s region re-renders. Elements are
+// re-read every tick. A [data-vx-fill] element is the bar (width % via a CSS transition); anything
+// else with [data-deadline] is the numeric readout.
 function updateCountdowns() {
   document.querySelectorAll("[data-deadline]").forEach((el) => {
     const t = Date.parse(el.dataset.deadline);
     if (Number.isNaN(t)) return;
     const left = Math.floor((t - Date.now()) / 1000);
+    if (el.hasAttribute("data-vx-fill")) {
+      const s = el.dataset.start ? Date.parse(el.dataset.start) : NaN;
+      const tot = Number.isNaN(s) ? null : (t - s) / 1000;
+      const frac = tot && tot > 0 ? Math.max(0, Math.min(1, left / tot)) : left > 0 ? 1 : 0;
+      el.style.width = `${(frac * 100).toFixed(1)}%`;
+      return;
+    }
     el.textContent = left <= 0 ? "0:00 (expired)" : `${Math.floor(left / 60)}:${String(left % 60).padStart(2, "0")} left`;
   });
 }
@@ -1324,6 +1584,12 @@ async function boot() {
       e.preventDefault();
       $("#q").focus();
     }
+  });
+  // Clicking a stepper chip scrolls the page to that test's timeline entry (delegated, so it survives
+  // the 5 s re-render of the whole #live region).
+  document.addEventListener("click", (ev) => {
+    const chip = ev.target && ev.target.closest ? ev.target.closest("[data-vx-goto]") : null;
+    if (chip) gotoStepTimeline(chip.dataset.vxGoto);
   });
   window.addEventListener("hashchange", route);
   setInterval(updateCountdowns, 1000); // ticks the NOW TESTING deadline regardless of which page is up
