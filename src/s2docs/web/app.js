@@ -1085,22 +1085,35 @@ const diffSectionsHtml = (d, match) =>
       return `<h2>${esc(sec)} <span class="muted">(${shown.length})</span>${cap}</h2>${body}`;
     })
     .join("");
-// Header totals: N added / N removed / N changed, the active-section count, and whether any section
-// was capped (so the page is honest when the API truncates).
-const diffCounts = (d) => {
+// Header totals: N added / N removed / N changed, the active-section count, which sections the API
+// capped, and (when a `match` filter is passed) how many rows that filter shows. The server's `counts`
+// are per-section change-type counts taken BEFORE its per-section row cap, so they stay exact on a
+// capped section — counting the rows we received under-reports there. An older server that omits
+// `counts` falls back to counting the rows we got (`exact: false`).
+const diffCounts = (d, match) => {
   const counts = { added: 0, removed: 0, changed: 0 };
-  let total = 0;
+  let shown = 0;
   let sections = 0;
+  const capped = [];
   for (const [sec, rows] of Object.entries(d.sections)) {
     const t = d.totals && d.totals[sec] != null ? d.totals[sec] : rows.length;
     if (t) sections += 1;
-    for (const r of rows) {
-      counts[r.change] += 1;
-      total += 1;
-    }
+    shown += rows.length;
+    if (t > rows.length) capped.push(sec);
   }
-  const realTotal = Object.values(d.totals || {}).reduce((a, b) => a + b, 0) || total;
-  return { ...counts, total, sections, truncated: realTotal > total };
+  const server = d.counts && Object.keys(d.counts).length ? d.counts : null;
+  if (server) {
+    for (const c of Object.values(server)) {
+      counts.added += c.added || 0;
+      counts.removed += c.removed || 0;
+      counts.changed += c.changed || 0;
+    }
+  } else {
+    for (const rows of Object.values(d.sections)) for (const r of rows) counts[r.change] += 1;
+  }
+  const realTotal = Object.values(d.totals || {}).reduce((a, b) => a + b, 0) || shown;
+  const matched = match ? Object.values(d.sections).reduce((n, rows) => n + rows.filter(match).length, 0) : null;
+  return { ...counts, total: shown, matched, sections, capped, exact: !!server, truncated: realTotal > shown };
 };
 // The clipboard table is built from the CURRENT (filtered) view, so what the user copies is what they
 // see. Pipe/newline escaping keeps the markdown table from breaking on a value.
@@ -1420,17 +1433,31 @@ const ROUTES = {
     const q = (p.q || "").trim().toLowerCase();
     const change = p.change || "";
     const match = (r) => (!change || r.change === change) && (!q || r.name.toLowerCase().includes(q));
-    const c = diffCounts(d);
+    const c = diffCounts(d, match);
     const md = diffMarkdown(d, match);
+    // Dropdown VALUES stay '' / added / removed / changed so ?change= deep links keep working; the
+    // labels carry the exact per-type totals (from the server's pre-limit `counts`).
+    const changeOpts = [
+      ["", `all changes (${c.added + c.removed + c.changed})`],
+      ["added", `added (${c.added})`],
+      ["removed", `removed (${c.removed})`],
+      ["changed", `changed (${c.changed})`],
+    ];
+    const capNote = c.capped.length
+      ? ` (${c.capped.slice(0, 3).join(", ")}${c.capped.length > 3 ? ", …" : ""})`
+      : "";
+    const filtering = change || q;
     return `<h1>Build diff</h1>
       <form class="filters">${select("from", String(d.from_build), opts)}${select("to", String(d.to_build), opts)}
-        ${select("change", p.change, [["", "all changes"], ["added", "added"], ["removed", "removed"], ["changed", "changed"]])}
+        ${select("change", p.change, changeOpts)}
         ${input("q", p.q, "filter changed names…")}</form>
       <div class="diff-head">${meta(d.from_build)}<span class="diff-arrow">→</span>${meta(d.to_build)}</div>
       <p class="diff-counts">${badge(c.added + " added", "kind")}${badge(c.removed + " removed", "warn")}${badge(c.changed + " changed")}
-        <span class="muted">across ${c.sections} section${c.sections === 1 ? "" : "s"}${
-          c.truncated ? ` · sections capped at ${d.limit || 500} rows` : ""
-        }</span></p>
+        <span class="muted">total changes across ${c.sections} section${c.sections === 1 ? "" : "s"}${
+          c.truncated ? ` · sections capped at ${d.limit || 500} rows${capNote}` : ""
+        }${c.exact ? "" : " · counted from the rows shown"}</span>${
+          filtering ? `<span class="muted"> · filter active: showing ${c.matched} matching row${c.matched === 1 ? "" : "s"}</span>` : ""
+        }</p>
       <div class="diff-actions"><button type="button" data-copy-md>Copy as Markdown</button>
         <textarea id="diff-md" class="diff-md mono" hidden aria-label="diff as Markdown">${esc(md)}</textarea></div>
       ${diffSectionsHtml(d, match)}`;
