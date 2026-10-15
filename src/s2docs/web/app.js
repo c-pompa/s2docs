@@ -817,10 +817,33 @@ function bindFilters(section, rest, params) {
   );
   view.querySelectorAll("form[data-prompt]").forEach(bindPromptForm);
   view.querySelectorAll("form[data-validate]").forEach(bindValidateForm);
+  view.querySelectorAll("[data-copy-md]").forEach(bindCopyMd);
   view.querySelectorAll("form[data-start-project]").forEach(bindStartProject);
   view.querySelectorAll("form[data-step]").forEach(bindStepForm);
   view.querySelectorAll("form[data-job-shot]").forEach(bindJobShot);
   view.querySelectorAll("form[data-job-verdict]").forEach(bindJobVerdict);
+}
+
+// Copy the current (filtered) diff as a Markdown table. The table is built into a hidden <textarea>
+// at render time — that box IS the fallback: when the clipboard API is unavailable (or denied), reveal
+// it and select the text so the user can copy by hand.
+function bindCopyMd(btn) {
+  const box = view.querySelector("#diff-md");
+  btn.addEventListener("click", async () => {
+    const text = box ? box.value : "";
+    try {
+      await navigator.clipboard.writeText(text);
+      const label = btn.textContent;
+      btn.textContent = "Copied ✓";
+      setTimeout(() => (btn.textContent = label), 1500);
+    } catch {
+      if (box) {
+        box.hidden = false;
+        box.focus();
+        box.select();
+      }
+    }
+  });
 }
 
 function bindJobShot(form) {
@@ -952,6 +975,147 @@ const pager = (page) => {
 const input = (name, value, ph) => `<input name="${name}" value="${esc(value || "")}" placeholder="${esc(ph)}">`;
 const select = (name, value, options) =>
   `<select name="${name}">${options.map(([v, l]) => `<option value="${esc(v)}" ${v === (value || "") ? "selected" : ""}>${esc(l)}</option>`).join("")}</select>`;
+
+// ---- Build Diff helpers -----------------------------------------------------
+// Each member change renders as two labelled cells: the value that existed BEFORE and the value that
+// exists AFTER. A missing side reads '— absent' (an added row must not look like it has a before
+// value). Long values are never cut mid-token: they stay whole inside a bounded scroll box behind a
+// <details> expander, and the preview stops on a word boundary. For `changed` rows the shared
+// prefix/suffix is trimmed so only the differing span stands out. Field-level rows cluster under their
+// parent key (the API's `group`); a flat section (group null, e.g. convars) renders one table.
+// diff-helpers:start
+const CHANGE_RANK = { added: 0, changed: 1, removed: 2 };
+const DIFF_VAL_MAX = 160; // values longer than this collapse into an expander
+const changeBadge = (c) => badge(c, c === "removed" ? "warn" : c === "added" ? "kind" : "");
+const absentCell = () => `<span class="muted">— absent</span>`;
+// A word-boundary preview: cut at the last space, never inside a token; say how much is hidden.
+const wordPreview = (s, n = 90) => {
+  if (s.length <= n) return s;
+  const cut = s.slice(0, n);
+  const sp = cut.lastIndexOf(" ");
+  const head = sp > n * 0.5 ? cut.slice(0, sp) : cut;
+  return `${head} … (${s.length - head.length} more chars)`;
+};
+// One side's value. Whole value inside a bounded scroll box; nothing is silently truncated.
+const diffVal = (v) => {
+  if (v == null || v === "") return absentCell();
+  const s = String(v);
+  if (s.length <= DIFF_VAL_MAX) return `<span class="mono">${esc(s)}</span>`;
+  return (
+    `<details class="diff-long"><summary class="mono">${esc(wordPreview(s))}</summary>` +
+    `<pre class="mono diff-val">${esc(s)}</pre></details>`
+  );
+};
+// The shared head/tail length of two strings, so a `changed` pair shows only what differs.
+function commonEdges(a, b) {
+  const min = Math.min(a.length, b.length);
+  let p = 0;
+  while (p < min && a[p] === b[p]) p++;
+  let s = 0;
+  while (s < min - p && a[a.length - 1 - s] === b[b.length - 1 - s]) s++;
+  return [p, s];
+}
+const elideHead = (s, n = 40) => (s.length > n ? "…" + s.slice(s.length - n) : s);
+const elideTail = (s, n = 40) => (s.length > n ? s.slice(0, n) + "…" : s);
+// One cell of a `changed` row: shared prefix/suffix muted, the differing span highlighted.
+const diffChangedCell = (v, other, side) => {
+  if (v == null) return absentCell();
+  const a = String(v);
+  const b = String(other ?? "");
+  const [p, suf] = commonEdges(a, b);
+  const mid = a.slice(p, a.length - suf);
+  const pre = p ? `<span class="muted">${esc(elideHead(a.slice(0, p)))}</span>` : "";
+  const post = suf ? `<span class="muted">${esc(elideTail(a.slice(a.length - suf)))}</span>` : "";
+  const body = mid ? `<span class="diff-${side}">${esc(mid)}</span>` : `<span class="muted">∅</span>`;
+  return `<span class="mono">${pre}${body}${post}</span>`;
+};
+const diffRow = (r) => {
+  let before, after;
+  if (r.change === "changed") {
+    before = diffChangedCell(r.before, r.after, "old");
+    after = diffChangedCell(r.after, r.before, "new");
+  } else if (r.change === "added") {
+    before = absentCell();
+    after = diffVal(r.after);
+  } else {
+    before = diffVal(r.before);
+    after = absentCell();
+  }
+  return (
+    `<tr class="diff-${r.change}"><td>${changeBadge(r.change)}</td>` +
+    `<td class="mono">${esc(r.name)}</td><td>${before}</td><td>${after}</td></tr>`
+  );
+};
+const DIFF_HEAD = "<tr><th>Change</th><th>Name</th><th>Before</th><th>After</th></tr>";
+const diffTable = (rows) => `<table class="diff">${DIFF_HEAD}${rows.map(diffRow).join("")}</table>`;
+const sortDiffRows = (rows) =>
+  rows.slice().sort((a, b) =>
+    (CHANGE_RANK[a.change] - CHANGE_RANK[b.change]) || (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+const diffGrouped = (rows) => {
+  const groups = new Map();
+  for (const r of rows) {
+    const g = r.group || "(ungrouped)";
+    if (!groups.has(g)) groups.set(g, []);
+    groups.get(g).push(r);
+  }
+  return [...groups.entries()]
+    .sort((x, y) => (x[0] < y[0] ? -1 : x[0] > y[0] ? 1 : 0))
+    .map(
+      ([g, rs]) =>
+        `<h3 class="diff-group mono">${esc(g)} <span class="muted">(${rs.length})</span></h3>` + diffTable(rs),
+    )
+    .join("");
+};
+// Every section in file order: sections with changes render in full (grouped, with a truncation note
+// when the API capped them); a section with no changes collapses to one muted line.
+const diffSectionsHtml = (d, match) =>
+  Object.entries(d.sections)
+    .map(([sec, rows]) => {
+      const total = d.totals && d.totals[sec] != null ? d.totals[sec] : rows.length;
+      if (!total) return `<p class="muted diff-none">${esc(sec)}: no changes</p>`;
+      const shown = sortDiffRows(rows.filter(match));
+      if (!shown.length) return `<p class="muted diff-none">${esc(sec)}: no changes match the filter</p>`;
+      const cap = total > rows.length
+        ? `<span class="muted"> · showing first ${rows.length} of ${total}</span>`
+        : "";
+      const body = shown.some((r) => r.group != null) ? diffGrouped(shown) : diffTable(shown);
+      return `<h2>${esc(sec)} <span class="muted">(${shown.length})</span>${cap}</h2>${body}`;
+    })
+    .join("");
+// Header totals: N added / N removed / N changed, the active-section count, and whether any section
+// was capped (so the page is honest when the API truncates).
+const diffCounts = (d) => {
+  const counts = { added: 0, removed: 0, changed: 0 };
+  let total = 0;
+  let sections = 0;
+  for (const [sec, rows] of Object.entries(d.sections)) {
+    const t = d.totals && d.totals[sec] != null ? d.totals[sec] : rows.length;
+    if (t) sections += 1;
+    for (const r of rows) {
+      counts[r.change] += 1;
+      total += 1;
+    }
+  }
+  const realTotal = Object.values(d.totals || {}).reduce((a, b) => a + b, 0) || total;
+  return { ...counts, total, sections, truncated: realTotal > total };
+};
+// The clipboard table is built from the CURRENT (filtered) view, so what the user copies is what they
+// see. Pipe/newline escaping keeps the markdown table from breaking on a value.
+const mdCell = (v) => (v == null || v === "" ? "—" : String(v).replace(/\|/g, "\\|").replace(/\n/g, "<br>"));
+const diffMarkdown = (d, match) => {
+  const lines = [`# Build diff — ${d.game} ${d.from_build} → ${d.to_build}`, ""];
+  for (const [sec, rows] of Object.entries(d.sections)) {
+    const shown = sortDiffRows(rows.filter(match));
+    if (!shown.length) continue;
+    lines.push(`## ${sec}`, "", "| Change | Group | Name | Before | After |", "| --- | --- | --- | --- | --- |");
+    for (const r of shown) {
+      lines.push(`| ${r.change} | ${mdCell(r.group)} | \`${r.name}\` | ${mdCell(r.before)} | ${mdCell(r.after)} |`);
+    }
+    lines.push("");
+  }
+  return lines.join("\n");
+};
+// diff-helpers:end
 
 // Map a search hit (kind + key) to its detail route.
 function hitLink(hit) {
@@ -1237,10 +1401,36 @@ const ROUTES = {
         Run <code>s2docs sync</code> after the next game update to diff patches.</p>`;
     const d = await api(`/games/${state.game}/diff`, { from: p.from, to: p.to });
     const opts = builds.map((b) => [String(b.build_number), `${b.build_number} (${b.patch_version || ""})`]);
-    return `<h1>Build diff</h1><form class="filters">${select("from", String(d.from_build), opts)}${select("to", String(d.to_build), opts)}</form>
-      ${Object.entries(d.sections).map(([sec, rows]) => `<h2>${esc(sec)} (${rows.length})</h2>${rows.length ? `<table>
-        <tr><th>Change</th><th>Name</th><th>Before → After</th></tr>${rows.map((r) => `<tr><td>${badge(r.change, r.change === "removed" ? "warn" : "kind")}</td>
-        <td class="mono">${esc(r.name)}</td><td class="mono muted">${esc((r.before || "").slice(0, 160))}${r.change === "changed" ? " → " : ""}${esc((r.after || "").slice(0, 160))}</td></tr>`).join("")}</table>` : `<p class="muted">No changes.</p>`}`).join("")}`;
+    const byNum = Object.fromEntries(builds.map((b) => [b.build_number, b]));
+    // Build metadata for the summary header, from GET /api/games/{game}/builds.
+    const meta = (n) => {
+      const b = byNum[n] || {};
+      const bits = [
+        b.patch_version && `patch ${b.patch_version}`,
+        b.version_date,
+        b.source_commit && `commit ${String(b.source_commit).slice(0, 10)}`,
+      ].filter(Boolean);
+      return `<div class="diff-build"><strong>build ${esc(n)}</strong>` +
+        (bits.length ? `<div class="muted">${esc(bits.join(" · "))}</div>` : "") + `</div>`;
+    };
+    // Filters come from the hash query (deep-linkable like ?from=&to=): change type + a name substring.
+    const q = (p.q || "").trim().toLowerCase();
+    const change = p.change || "";
+    const match = (r) => (!change || r.change === change) && (!q || r.name.toLowerCase().includes(q));
+    const c = diffCounts(d);
+    const md = diffMarkdown(d, match);
+    return `<h1>Build diff</h1>
+      <form class="filters">${select("from", String(d.from_build), opts)}${select("to", String(d.to_build), opts)}
+        ${select("change", p.change, [["", "all changes"], ["added", "added"], ["removed", "removed"], ["changed", "changed"]])}
+        ${input("q", p.q, "filter changed names…")}</form>
+      <div class="diff-head">${meta(d.from_build)}<span class="diff-arrow">→</span>${meta(d.to_build)}</div>
+      <p class="diff-counts">${badge(c.added + " added", "kind")}${badge(c.removed + " removed", "warn")}${badge(c.changed + " changed")}
+        <span class="muted">across ${c.sections} section${c.sections === 1 ? "" : "s"}${
+          c.truncated ? ` · sections capped at ${d.limit || 500} rows` : ""
+        }</span></p>
+      <div class="diff-actions"><button type="button" data-copy-md>Copy as Markdown</button>
+        <textarea id="diff-md" class="diff-md mono" hidden aria-label="diff as Markdown">${esc(md)}</textarea></div>
+      ${diffSectionsHtml(d, match)}`;
   },
 
   // "projects" are orchestration DAGs (multi-step plans the server tracks), distinct from the

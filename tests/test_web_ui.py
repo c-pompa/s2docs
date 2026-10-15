@@ -470,6 +470,114 @@ def test_central_time_rendering_executes_in_node(client):
     assert re.fullmatch(r"\d{1,2}:\d{2} [AP]M (CST|CDT)", out["now"]), out["now"]  # '4:42 PM CST'
 
 
+# ------------------------------------------------- Build Diff: clarity layer
+def test_frontend_diff_clarity_markers(client):
+    """The diff page renders labelled Before/After columns, groups field-level rows under their parent,
+    collapses empty sections, offers change-type + name filters and a Copy-as-Markdown button."""
+    js = client.get("/app.js").text
+    css = client.get("/style.css").text
+    assert "diff-helpers:start" in js and "diff-helpers:end" in js
+    # labelled, separate before/after columns (not one 'Before → After' cell)
+    assert '"<tr><th>Change</th><th>Name</th><th>Before</th><th>After</th></tr>"' in js
+    # an added/removed side that does not exist reads 'absent', so an added row has no before value
+    assert "absentCell" in js and "— absent" in js
+    # long values go into a bounded scroll box / expander, never a mid-token slice
+    assert "diff-long" in js and "diff-val" in js and "wordPreview" in js and "more chars" in js
+    # `changed` rows trim the shared prefix/suffix; the old/new spans carry the diff-old/diff-new classes
+    assert "function commonEdges" in js and 'diff-${side}' in js
+    assert '"old"' in js and '"new"' in js
+    # field-level rows cluster under their parent class/entity/event (the API `group`)
+    assert "const diffGrouped" in js and "diff-group" in js
+    # zero-change sections collapse to one line; a capped section says how much is hidden
+    assert ": no changes" in js and "showing first" in js
+    # filters wired through the hash query + the export button and its textarea fallback
+    assert "filter changed names" in js and '["", "all changes"]' in js
+    assert "Copy as Markdown" in js and "data-copy-md" in js and 'id="diff-md"' in js and "bindCopyMd" in js
+    # the header shows both builds' metadata and the added/removed/changed breakdown
+    assert "diff-head" in js and "source_commit" in js and "diffCounts" in js
+    # the CSS the layout relies on
+    for sel in (".diff-head", ".diff-old", ".diff-new", ".diff-val", ".diff-none", "table.diff"):
+        assert sel in css
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_diff_render_executes_in_node(client):
+    """Lift the shipped diff helpers out of app.js and render a synthetic diff: absent sides, trimmed
+    changed spans, grouped rows, an expander for a long value, an empty-section line, a truncation note
+    and the Markdown export."""
+    assert NODE is not None  # skipif above
+    js = client.get("/app.js").text
+    block = js.split("// diff-helpers:start", 1)[1].split("// diff-helpers:end", 1)[0]
+    prologue = (
+        'const ESC_MAP = {"&":"&amp;","<":"&lt;",">":"&gt;",\'"\':"&quot;","\'":"&#39;"};\n'
+        'const esc = (v) => String(v ?? "").replace(/[&<>"\']/g, (c) => ESC_MAP[c]);\n'
+        'const badge = (t, cls = "") => `<span class="badge ${cls}">${esc(t)}</span>`;\n'
+    )
+    long_val = "type " + " ".join(["chunk"] * 60)
+    data = {
+        "game": "cs2",
+        "from_build": 2000930,
+        "to_build": 2000932,
+        "limit": 500,
+        "totals": {"convars": 3, "entities": 0, "schema": 4, "events": 0, "script_api": 0},
+        "sections": {
+            "convars": [
+                {"name": "convar:cl_demo_freecam", "change": "added", "before": None,
+                 "after": "true During demo playback", "group": None},
+                {"name": "convar:demo_mouse_enable_binding", "change": "removed",
+                 "before": "drop Name of the binding", "after": None, "group": None},
+                {"name": "convar:r_csgo_sky_occluder", "change": "changed",
+                 "before": "0 Old sky occluder text", "after": "1 New sky occluder text", "group": None},
+            ],
+            "entities": [],
+            "schema": [
+                {"name": "C_CSPlayerPawn.m_flEmitSoundTime_Client", "change": "added", "before": None,
+                 "after": "GameTime_t", "group": "client:C_CSPlayerPawn"},
+                {"name": "CCSPlayerPawn.m_flLongValue", "change": "added", "before": None,
+                 "after": long_val, "group": "server:CCSPlayerPawn"},
+            ],
+        },
+    }
+    script = (
+        prologue
+        + block
+        + "\nconst D = " + json.dumps(data) + ";\n"
+        + "const all = () => true;\n"
+        + "console.log(JSON.stringify({\n"
+        + "  html: diffSectionsHtml(D, all),\n"
+        + "  counts: diffCounts(D),\n"
+        + "  md: diffMarkdown(D, all),\n"
+        + "}));\n"
+    )
+    proc = subprocess.run([NODE, "-e", script], capture_output=True, text=True, encoding="utf-8", timeout=60)
+    assert proc.returncode == 0, proc.stderr
+    out = json.loads(proc.stdout)
+    html = out["html"]
+    # an added row has NO before value (it reads absent) and its after value is shown
+    added = html.split("C_CSPlayerPawn.m_flEmitSoundTime_Client", 1)[1].split("</tr>", 1)[0]
+    assert "— absent" in added and "GameTime_t" in added
+    # a removed row keeps its before value and shows 'absent' after
+    removed = html.split("demo_mouse_enable_binding", 1)[1].split("</tr>", 1)[0]
+    assert "drop Name of the binding" in removed and "— absent" in removed
+    # a `changed` row trims the shared prefix/suffix, highlighting only the differing span
+    assert '<span class="diff-old">0 Old</span>' in html and '<span class="diff-new">1 New</span>' in html
+    assert "sky occluder text" in html  # the shared suffix stays visible (muted)
+    # a long value is not cut mid-token: it lives whole inside a bounded <details>/<pre>
+    assert 'class="diff-long"' in html and 'class="mono diff-val"' in html and "more chars" in html
+    assert long_val in html  # the full value is present, only collapsed
+    # field-level rows group under their parent key
+    assert '<h3 class="diff-group mono">client:C_CSPlayerPawn' in html
+    assert '<h3 class="diff-group mono">server:CCSPlayerPawn' in html
+    # a zero-change section takes one line; a capped section says how much is hidden
+    assert "entities: no changes" in html
+    assert "showing first 2 of 4" in html
+    # header counts and the Markdown export
+    assert out["counts"]["added"] == 3 and out["counts"]["removed"] == 1 and out["counts"]["changed"] == 1
+    assert out["counts"]["truncated"] is True
+    assert "## schema" in out["md"] and "| Change | Group | Name | Before | After |" in out["md"]
+    assert "| added | client:C_CSPlayerPawn | `C_CSPlayerPawn.m_flEmitSoundTime_Client` | — | GameTime_t |" in out["md"]
+
+
 # ------------------------------------------------- Job page: verification UX
 # The user ask: "make it clear we have changed to the next verification — all look the same and the
 # button doesn't look pressed and nothing looks like it's loading or moving to the next". These tests

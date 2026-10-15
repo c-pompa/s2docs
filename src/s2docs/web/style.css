@@ -177,3 +177,25 @@ button:disabled { opacity: .4; cursor: default; }
 .vx-complete { font-size: 16px; font-weight: 700; padding: 8px 12px; border-radius: var(--r); margin-bottom: 10px;
                background: color-mix(in srgb, var(--ok) 16%, var(--panel)); border: 1px solid var(--ok); color: var(--ok); }
 .vx-rtable { margin-top: 4px; }
+
+/* ---- Build Diff: summary header, before/after columns, filters --------------- */
+/* Two builds, the way the numbers read together, and a total change count up top. */
+.diff-head { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin: 12px 0 8px; }
+.diff-build { border: 1px solid var(--border); border-radius: var(--r); background: var(--panel); padding: 8px 12px; }
+.diff-build strong { font-size: 16px; }
+.diff-arrow { color: var(--muted); font-size: 18px; }
+.diff-counts { margin: 4px 0 10px; }
+/* The copy button + its fallback textarea. */
+.diff-actions { display: flex; align-items: center; gap: 10px; margin: 6px 0 2px; flex-wrap: wrap; }
+.diff-md { width: 100%; min-height: 150px; margin-top: 8px; }
+/* A section with nothing to show takes one line, not a table's worth of space. */
+.diff-none { margin: 6px 0; }
+h3.diff-group { font-size: 14px; margin: 14px 0 4px; }
+/* The change tables: names wrap; long values scroll inside a bounded box instead of being cut. */
+table.diff td { font-size: 13px; word-break: break-word; overflow-wrap: anywhere; }
+table.diff tr.diff-removed td { background: color-mix(in srgb, var(--bad) 7%, transparent); }
+table.diff tr.diff-added td { background: color-mix(in srgb, var(--ok) 7%, transparent); }
+.diff-val { max-height: 220px; overflow: auto; margin: 4px 0 0; }
+.diff-long summary { cursor: pointer; }
+.diff-old { background: color-mix(in srgb, var(--bad) 30%, transparent); border-radius: var(--r-sm); }
+.diff-new { background: color-mix(in srgb, var(--ok) 30%, transparent); border-radius: var(--r-sm); }
