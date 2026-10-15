@@ -2030,7 +2030,7 @@ const ROUTES = {
       const hero = heroParts.join("");
 
       // ---- DOCK: one LED chip per host — liveness at a glance, click for detail.
-      const dock = hosts.length
+      const dockChips = hosts.length
         ? hosts
             .map((h) => {
               const busy = h.lock && h.lock.fresh && h.lock.owner;
@@ -2041,12 +2041,16 @@ const ROUTES = {
                 `<div class="muted" style="font-size:11px">${esc(h.lock && h.lock.phase ? h.lock.phase : stuck ? "STUCK" : busy ? "busy" : stale ? "stale" : "idle")}</div></span></a>`;
             })
             .join("")
-        : `<span class="muted">no hosts registered</span>`;
-      const dockHtml = `<div style="display:flex;align-items:baseline;gap:10px;margin:2px 0 6px"><span class="ovw-st" style="font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.09em;color:var(--muted)">Machines</span>` +
+        : `<p class="muted" style="margin:0">no hosts registered</p>`;
+      // The dock is a PANEL beside the hero, not a full-width strip below it — when a job is
+      // running, the running thing and the machines that run it read as ONE row, not two blocks.
+      const dockHtml = `<div class="ovw-panel ovw-dockpanel"><div style="display:flex;align-items:baseline;gap:10px;margin-bottom:8px">` +
+        `<span class="ovw-st" style="font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.09em;color:var(--muted)">Machines</span>` +
         `<span class="muted" style="font-size:12px">${hosts.filter((h) => h.lock && h.lock.fresh && h.lock.owner).length}/${hosts.length} busy</span></div>` +
-        `<div class="ovw-dock">${dock}</div>`;
+        `<div class="ovw-dock">${dockChips}</div></div>`;
 
-      // ---- LANES: queue rail | verdict wall | feed.
+      // ---- LANES: queue rail | verdict wall | feed. The queue rail only renders when something
+      // IS queued — an empty "Nothing queued." panel is dead weight at the top of the page.
       const queueLine = (badgeHtml, html) =>
         `<div class="ovw-line">${badgeHtml}<span style="min-width:0">${html}</span></div>`;
       const queueItems = [
@@ -2056,8 +2060,9 @@ const ROUTES = {
         ...queuedBuilds.map((b) =>
           queueLine(stateBadge(b.status), `<span class="mono">${esc(b.id)}</span> <span class="muted">· ${esc(b.kind)} · ${b.host_id ? esc(b.host_id) : "unassigned"}</span>`)),
       ];
-      const queueRail = `<div class="ovw-panel"><div class="ovw-st" style="font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.09em;color:var(--muted);margin-bottom:6px">Queued</div>` +
-        (queueItems.length ? queueItems.join("") : `<p class="muted" style="margin:0">Nothing queued.</p>`) + `</div>`;
+      const queueRail = queueItems.length
+        ? `<div class="ovw-panel"><div class="ovw-st" style="margin-bottom:6px">Queued <span style="text-transform:none;letter-spacing:0">(${queueItems.length})</span></div><div class="ovw-scroll">${queueItems.join("")}</div></div>`
+        : "";
 
       // The verdict wall: one tile per job, newest first, like a CI status board — a screenful of
       // colour answers "is the suite healthy?" faster than any table. Tile colour is the job's
@@ -2088,7 +2093,7 @@ const ROUTES = {
         `<span class="ovw-st" style="font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.09em;color:var(--muted)">Verdict wall</span>` +
         `<span class="muted" style="font-size:12px">${jobs.length} job${jobs.length === 1 ? "" : "s"} · ${link(["jobs"], "full ledger →")}</span></div>` +
         (legend ? `<div style="margin:-2px 0 8px">${legend}</div>` : "") +
-        (wall || `<p class="muted" style="margin:0">No jobs recorded yet.</p>`) + `</div>`;
+        (wall ? `<div class="ovw-wall ovw-scroll">${wall}</div>` : `<p class="muted" style="margin:0">No jobs recorded yet.</p>`) + `</div>`;
 
       // The feed: the newest runs as one-liners (the Activity table stays the full record).
       const allRows = activityRows(builds, tests, deploys, jobs);
@@ -2102,16 +2107,19 @@ const ROUTES = {
       const feedHtml = `<div class="ovw-panel"><div style="display:flex;align-items:baseline;gap:10px;margin-bottom:6px">` +
         `<span class="ovw-st" style="font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.09em;color:var(--muted)">Feed</span>` +
         `<span class="muted" style="font-size:12px">${allRows.length} run${allRows.length === 1 ? "" : "s"} · ${link(["activity"], "Activity →")}</span></div>` +
-        (feed || `<p class="muted" style="margin:0">No runs recorded yet.</p>`) + `</div>`;
+        (feed ? `<div class="ovw-scroll">${feed}</div>` : `<p class="muted" style="margin:0">No runs recorded yet.</p>`) + `</div>`;
 
       const plans = projects.filter((x) => (x.status || "active") === "active");
-      const plansHtml = plans.length
-        ? `<div class="ovw-panel" style="margin-bottom:12px"><div class="ovw-st" style="font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.09em;color:var(--muted);margin-bottom:6px">Open plans</div>` +
-          `<p style="margin:0">${plans.slice(0, 6).map((x) => link([state.game, "projects", x.id], x.title || x.id)).join(" · ")} · ${link([state.game, "projects"], "all →")}</p></div>`
+      // The LEFT lane is always the "what's next" lane: queued items when there are any, the open
+      // orchestration plans when the queue is empty — never an empty panel.
+      const plansRail = plans.length
+        ? `<div class="ovw-panel"><div class="ovw-st" style="margin-bottom:6px">Open plans</div><p style="margin:0">` +
+          plans.slice(0, 6).map((x) => link([state.game, "projects", x.id], x.title || x.id)).join(" · ") +
+          ` · ${link([state.game, "projects"], "all →")}</p></div>`
         : "";
 
-      return hero + plansHtml + dockHtml +
-        `<div class="ovw-lanes">${queueRail}${wallHtml}${feedHtml}</div>`;
+      return `<div class="ovw-top">${hero}${dockHtml}</div>
+        <div class="ovw-lanes">${queueRail || plansRail}${wallHtml}${feedHtml}</div>`;
     };
     liveBody("#live", body, () => (state.activityActive || state.jobsActive ? 5000 : 15000));
     return `<h1>Overview</h1>${pipelineStrip("")}

@@ -326,7 +326,17 @@ table.timeline { margin-top: 6px; }
 .ovw-led.stuck { background: var(--bad); animation: ovw-pulse .8s ease-in-out infinite; }
 .ovw-led.stale { background: color-mix(in srgb, var(--muted) 45%, transparent); }
 @keyframes ovw-pulse { 50% { opacity: .3; } }
-.ovw-lanes { display: grid; grid-template-columns: 250px minmax(0, 1fr) 320px; gap: 12px; align-items: start; }
+/* The hero row: the running thing LEFT, the machine dock RIGHT — one row, not two stacked blocks.
+   The lanes are scroll-capped so unequal content can never leave a void under a short lane. */
+.ovw-top { display: grid; grid-template-columns: minmax(0, 1fr) 300px; gap: 12px; align-items: start; margin-bottom: 12px; }
+.ovw-top .ovw-hero { margin-bottom: 0; }
+.ovw-dockpanel { min-width: 0; }
+.ovw-dock { display: flex; flex-direction: column; gap: 6px; }
+.ovw-dock > a { display: flex; align-items: center; gap: 9px; padding: 7px 12px;
+                border: 1px solid var(--border); border-radius: var(--r); background: var(--bg); color: var(--fg); }
+.ovw-dock > a:hover { text-decoration: none; border-color: var(--muted); }
+.ovw-scroll { max-height: 420px; overflow-y: auto; }
+.ovw-lanes { display: grid; grid-template-columns: 280px minmax(0, 1fr) 340px; gap: 12px; align-items: start; }
 .ovw-line { display: flex; gap: 8px; padding: 6px 0; border-bottom: 1px solid var(--border);
             font-size: 12.5px; align-items: baseline; }
 .ovw-line:last-child { border-bottom: none; }
@@ -368,5 +378,6 @@ table.timeline { margin-top: 6px; }
   .sm-grid { grid-template-columns: 1fr; }
   .shot-grid { grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); }
   .jh-meta { grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); }
+  .ovw-top { grid-template-columns: 1fr; }
   .ovw-lanes { grid-template-columns: 1fr; }
 }
