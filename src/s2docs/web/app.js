@@ -23,6 +23,16 @@ const parseTs = (iso) => {
   const s = String(iso);
   return Date.parse(/[Zz]|[+-]\d\d:?\d\d$/.test(s) ? s : s + "Z");
 };
+// A SHORT relative age for tight spaces (the wall tiles): '5m', '2h34m', '3d2h'. Empty when
+// unparseable — the tile then falls back to nothing rather than a long absolute string.
+const shortAgo = (iso) => {
+  const t = parseTs(iso);
+  if (Number.isNaN(t)) return "";
+  const s = Math.max(0, (Date.now() - t) / 1000);
+  if (s < 60) return "now";
+  const m = Math.floor(s / 60), h = Math.floor(m / 60), d = Math.floor(h / 24);
+  return d ? `${d}d${h % 24}h` : h ? `${h}h${m % 60}m` : `${m}m`;
+};
 // The single humanizer every elapsed/duration value goes through.
 const human = (s) => {
   if (s == null) return "—";
@@ -1955,6 +1965,7 @@ const ROUTES = {
   // rail, the VERDICT WALL (one colored tile per job, like a CI status board) and a compact FEED.
   // Every tile/line links to its detail page; polls like Activity (5 s live, 15 s idle).
   async overview() {
+    document.title = "Overview · Source 2 Docs";
     const body = async () => {
       const [builds, tests, deploys, jobs, hosts, projects] = await Promise.all([
         api("/builds"),
@@ -2024,9 +2035,10 @@ const ROUTES = {
             .map((h) => {
               const busy = h.lock && h.lock.fresh && h.lock.owner;
               const stuck = h.lock && h.lock.stuck;
+              const stale = !busy && !stuck && h.lock && h.lock.owner;
               return `<a href="${`#/hosts/${enc(h.id)}`}" title="${esc(gpuOf(h))}${h.lock && h.lock.owner ? ` · ${h.lock.owner}${h.lock.phase ? ` — ${h.lock.phase}` : ""}` : " · idle"}">` +
-                `<span class="ovw-led ${stuck ? "stuck" : busy ? "busy" : ""}"></span><span><strong>${esc(h.id)}</strong>` +
-                `<div class="muted" style="font-size:11px">${esc(h.lock && h.lock.phase ? h.lock.phase : stuck ? "STUCK" : busy ? "busy" : "idle")}</div></span></a>`;
+                `<span class="ovw-led ${stuck ? "stuck" : stale ? "stale" : busy ? "busy" : ""}"></span><span><strong>${esc(h.id)}</strong>` +
+                `<div class="muted" style="font-size:11px">${esc(h.lock && h.lock.phase ? h.lock.phase : stuck ? "STUCK" : busy ? "busy" : stale ? "stale" : "idle")}</div></span></a>`;
             })
             .join("")
         : `<span class="muted">no hosts registered</span>`;
@@ -2049,7 +2061,7 @@ const ROUTES = {
 
       // The verdict wall: one tile per job, newest first, like a CI status board — a screenful of
       // colour answers "is the suite healthy?" faster than any table. Tile colour is the job's
-      // status; the label is the id; the tooltip carries the full title.
+      // status; the label is the id; the age is a SHORT relative string so it fits the tile.
       const TILE = {
         passed: "passed", running: "running", queued: "queued", failed: "failed", error: "failed",
         cancelled: "cancelled", inconclusive: "inconclusive",
@@ -2058,17 +2070,24 @@ const ROUTES = {
         .slice()
         .sort((a, b) => ((a.created_at || "") < (b.created_at || "") ? 1 : -1))
         .slice(0, 40);
+      const counts = {};
+      jobs.forEach((j) => { counts[j.status] = (counts[j.status] || 0) + 1; });
+      const legend = Object.entries(counts)
+        .map(([s, n]) => `<span class="ovw-lg ${TILE[s] || "inconclusive"}">${n} ${esc(s)}</span>`)
+        .join(" ");
       const wall = recentJobs
         .map((j) => {
           const cls = TILE[j.status] || "inconclusive";
+          const ago = shortAgo(j.created_at);
           return `<a class="ovw-tile ${cls}" href="${`#/jobs/${enc(j.id)}`}" title="${esc(`${j.id} — ${j.title || ""} · ${j.status}${j.created_at ? ` · ${fmtTime(j.created_at)}` : ""}`)}">` +
             `<span class="ovw-st">${esc(j.status)}</span><div class="ovw-id">${esc(j.id)}</div>` +
-            `<div class="ovw-age">${esc(j.kind)}${j.created_at ? ` · ${fmtTime(j.created_at)}` : ""}</div></a>`;
+            `<div class="ovw-age">${esc(j.kind)}${ago ? ` · ${ago}` : ""}</div></a>`;
         })
         .join("");
       const wallHtml = `<div class="ovw-panel"><div style="display:flex;align-items:baseline;gap:10px;margin-bottom:8px">` +
         `<span class="ovw-st" style="font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.09em;color:var(--muted)">Verdict wall</span>` +
         `<span class="muted" style="font-size:12px">${jobs.length} job${jobs.length === 1 ? "" : "s"} · ${link(["jobs"], "full ledger →")}</span></div>` +
+        (legend ? `<div style="margin:-2px 0 8px">${legend}</div>` : "") +
         (wall || `<p class="muted" style="margin:0">No jobs recorded yet.</p>`) + `</div>`;
 
       // The feed: the newest runs as one-liners (the Activity table stays the full record).

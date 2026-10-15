@@ -324,19 +324,31 @@ table.timeline { margin-top: 6px; }
 .ovw-led { width: 9px; height: 9px; border-radius: 50%; flex: none; background: var(--muted); }
 .ovw-led.busy { background: var(--accent); animation: ovw-pulse 1.6s ease-in-out infinite; }
 .ovw-led.stuck { background: var(--bad); animation: ovw-pulse .8s ease-in-out infinite; }
+.ovw-led.stale { background: color-mix(in srgb, var(--muted) 45%, transparent); }
 @keyframes ovw-pulse { 50% { opacity: .3; } }
 .ovw-lanes { display: grid; grid-template-columns: 250px minmax(0, 1fr) 320px; gap: 12px; align-items: start; }
 .ovw-line { display: flex; gap: 8px; padding: 6px 0; border-bottom: 1px solid var(--border);
             font-size: 12.5px; align-items: baseline; }
 .ovw-line:last-child { border-bottom: none; }
 .ovw-line > .badge { flex: none; }
+.ovw-line > span:not(.badge) { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ovw-line > span:not(.badge) a, .ovw-line > span:not(.badge) .mono { white-space: nowrap; }
 .ovw-wall { display: grid; grid-template-columns: repeat(auto-fill, minmax(104px, 1fr)); gap: 8px; }
 .ovw-tile { display: block; border: 1px solid transparent; border-radius: var(--r); padding: 8px 9px 7px;
             color: var(--fg); min-width: 0; overflow: hidden; }
 .ovw-tile:hover { text-decoration: none; border-color: var(--muted); }
-.ovw-tile .ovw-id { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 11px; opacity: .85; }
+.ovw-tile .ovw-id { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 11px; opacity: .85;
+                    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ovw-tile .ovw-st { font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; }
-.ovw-tile .ovw-age { font-size: 11px; opacity: .7; }
+.ovw-tile .ovw-age { font-size: 11px; opacity: .7; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ovw-lg { font-size: 11px; color: var(--muted); margin-right: 10px; }
+.ovw-lg::before { content: ""; display: inline-block; width: 7px; height: 7px; border-radius: 50%;
+                  margin-right: 4px; background: currentColor; }
+.ovw-lg.passed { color: var(--ok); }
+.ovw-lg.failed { color: var(--bad); }
+.ovw-lg.running { color: var(--link); }
+.ovw-lg.queued { color: var(--accent); }
+.ovw-lg.cancelled, .ovw-lg.inconclusive { color: var(--muted); }
 .ovw-tile.passed { background: color-mix(in srgb, var(--ok) 16%, var(--panel)); }
 .ovw-tile.passed .ovw-st { color: var(--ok); }
 .ovw-tile.failed { background: color-mix(in srgb, var(--bad) 16%, var(--panel)); }
