@@ -114,7 +114,7 @@ claude mcp add --transport http s2docs http://127.0.0.1:8000/mcp
 | `get_game_event`, `list_game_events` | The effective definition after core → game → mod overrides |
 | `get_script_api`, `list_script_types` | The cs_script API (`Instance` = `Domain`), including inherited members |
 | `search_pulse` | Pulse visual-scripting node bindings |
-| `diff_builds` | What changed between two indexed builds (convars, entities, schema, events, script API) |
+| `diff_builds` | What changed between two indexed builds, at member granularity: one row per added/removed/changed **schema field, entity member, game-event field, script symbol, convar, Pulse binding or Hammer class**, grouped under its parent class/entity/event/library. Sections: convars, entities, schema, events, script_api, pulse, hammer_classes |
 | `list_examples`, `get_example` | Valve's cs_script sample scripts, each with the API it uses |
 | `list_docs`, `get_doc` | source2.wiki pages as Markdown, with URL and license for citation |
 

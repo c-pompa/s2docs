@@ -264,8 +264,11 @@ def create_mcp_server(db: Database, workspace: Path | None = None) -> MCPServer:
         from_build: Annotated[int | None, Field(description="Older build number; default = previous build")] = None,
         to_build: Annotated[int | None, Field(description="Newer build number; default = current build")] = None,
     ) -> m.BuildDiff:
-        """Show what changed between two ingested builds: convars, entities, schema, events and script API.
-        Use it after a game patch to find code or configs that might break."""
+        """Show what changed between two ingested builds, at member granularity: one row per added/
+        removed/changed schema field, entity member, game-event field, script symbol, convar, Pulse
+        binding or Hammer class. Each entry carries `group` (the parent class/entity/event/library) so
+        members cluster under it; `before`/`after` hold only that member's own value. Use it after a
+        game patch to find code or configs that might break."""
         check_game(game)
         return run(lambda r: r.diff_builds(game, from_build, to_build))
 
