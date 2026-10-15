@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Twice-daily index refresh for s2docs, so the Build Diff page has a pair of builds to compare within
+  hours of a CS2/Deadlock patch. Install:
+      cp scripts/launchd/com.s2docs.sync.plist ~/Library/LaunchAgents/
+      launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.s2docs.sync.plist
+  Run it immediately (and watch the log):
+      launchctl kickstart -k gui/$(id -u)/com.s2docs.sync ; tail -f ~/.hermes/logs/s2docs-sync.log
+  Change the hours in StartCalendarInterval below; 05:10 avoids the 03:30-04:15 backup/reindex window.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.s2docs.sync</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Volumes/SSD_2/XCode_Repos/myprojects/valve-mcp-api-project/scripts/sync_index.sh</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>/Volumes/SSD_2/XCode_Repos/myprojects/valve-mcp-api-project</string>
+  <key>StartCalendarInterval</key>
+  <array>
+    <dict>
+      <key>Hour</key>
+      <integer>5</integer>
+      <key>Minute</key>
+      <integer>10</integer>
+    </dict>
+    <dict>
+      <key>Hour</key>
+      <integer>17</integer>
+      <key>Minute</key>
+      <integer>10</integer>
+    </dict>
+  </array>
+  <key>RunAtLoad</key>
+  <false/>
+  <key>StandardOutPath</key>
+  <string>/Users/christianpompa/.hermes/logs/s2docs-sync.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/christianpompa/.hermes/logs/s2docs-sync.log</string>
+</dict>
+</plist>
