@@ -511,8 +511,23 @@ def request_screenshot(db: Database, job_id: str, *, note: str | None = None) ->
     return get(db, job_id)
 
 
-def save_artifact(db: Database, job_id: str, name: str, content: bytes, content_type: str) -> m.JobArtifact:
-    """Store a raw-body artifact (append-only: no overwrite). Images auto-add a ``screenshot`` event."""
+def save_artifact(
+    db: Database,
+    job_id: str,
+    name: str,
+    content: bytes,
+    content_type: str,
+    *,
+    image_event: dict | None = None,
+) -> m.JobArtifact:
+    """Store a raw-body artifact (append-only: no overwrite). Images auto-add a ``screenshot`` event.
+
+    ``image_event`` lets an image upload carry the screenshot-event TAG data (step/reason/seq/verdict
+    + the client's own message) so the auto-event is the EXACTLY ONE event for that shot. Without it
+    the client that uploads must not also POST its own ``screenshot`` event, or the shot appears
+    twice (an untagged auto row plus the tagged one). ``image_event`` is ``{"message": str,
+    "data": {...}}``; url/md5/bytes are always set by the server.
+    """
     get(db, job_id)  # 404 on an unknown job
     check_artifact_name(name)
     ctype = (content_type or "").split(";", 1)[0].strip().lower()
@@ -534,14 +549,15 @@ def save_artifact(db: Database, job_id: str, name: str, content: bytes, content_
         raise JobConflict(f"artifact {name!r} already exists for job {job_id} (append-only, no overwrite)") from exc
     md5 = hashlib.md5(content).hexdigest()
     if ctype.startswith("image/"):
-        _insert_event(
-            db,
-            job_id,
-            "screenshot",
-            None,
-            f"screenshot: {name}",
-            {"url": _artifact_url(job_id, name), "md5": md5, "bytes": len(content)},
-        )
+        ev_data: dict = {"url": _artifact_url(job_id, name), "md5": md5, "bytes": len(content)}
+        ev_msg = f"screenshot: {name}"
+        if isinstance(image_event, dict):
+            extra = image_event.get("data")
+            if isinstance(extra, dict):
+                ev_data.update(extra)
+            if _s(image_event.get("message")):
+                ev_msg = str(image_event["message"])
+        _insert_event(db, job_id, "screenshot", None, ev_msg, ev_data)
     if get(db, job_id).params.get("pending_shot"):
         _set_pending_shot(db, job_id, False)
     return m.JobArtifact(name=name, url=_artifact_url(job_id, name), md5=md5, size=len(content))
