@@ -73,6 +73,10 @@ tr:hover td { background: color-mix(in srgb, var(--code) 60%, transparent); }
          border: 1px solid var(--border); color: var(--muted); margin: 0 3px 3px 0; white-space: nowrap; }
 .badge.kind { color: var(--accent); border-color: var(--accent); }
 .badge.warn { color: var(--bad); border-color: var(--bad); }
+/* A job that ended with NO pass/fail verdict (status 'inconclusive'): a muted, dashed badge —
+   deliberately neither the amber of 'passed'/'running' nor the red of 'failed'/'error', so a run
+   nobody judged never reads as a pass. */
+.badge.inconclusive { color: var(--muted); border-color: var(--muted); border-style: dashed; }
 .hit { padding: 10px 0; border-bottom: 1px solid var(--border); }
 .hit .snip { color: var(--muted); font-size: 13px; margin-top: 3px; }
 mark { background: color-mix(in srgb, var(--accent) 35%, transparent); color: inherit; border-radius: 0; }

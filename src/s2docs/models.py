@@ -632,10 +632,13 @@ class TestRun(BaseModel):
 JobKind = Literal["test", "demo", "final"]
 JOB_KINDS: tuple[str, ...] = JobKind.__args__  # type: ignore[attr-defined]
 
-JobStatus = Literal["queued", "running", "passed", "failed", "error", "cancelled"]
+# 'inconclusive' is terminal and means "the run ended without a pass/fail verdict" — a step-gated demo
+# the user stopped answering, or a driver with no verdict to report. It is NOT a pass: a run with
+# pass=0/fail=0/no-verdict=1 closes out inconclusive so the ledger never claims a verdict nobody made.
+JobStatus = Literal["queued", "running", "passed", "failed", "error", "cancelled", "inconclusive"]
 JOB_STATUSES: tuple[str, ...] = JobStatus.__args__  # type: ignore[attr-defined]
 ACTIVE_JOB_STATUSES: tuple[str, ...] = ("queued", "running")
-TERMINAL_JOB_STATUSES: tuple[str, ...] = ("passed", "failed", "error", "cancelled")
+TERMINAL_JOB_STATUSES: tuple[str, ...] = ("passed", "failed", "error", "cancelled", "inconclusive")
 
 JobEventLevel = Literal["info", "warn", "error", "crash", "screenshot", "milestone", "learning"]
 JOB_EVENT_LEVELS: tuple[str, ...] = JobEventLevel.__args__  # type: ignore[attr-defined]

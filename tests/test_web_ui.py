@@ -786,7 +786,9 @@ def test_frontend_activity_timeline_markers(client):
     assert "const activityRowHtml" in js and "const isReaped" in js and "const reapedTag" in js
     # all three feeds merged, and job linkage resolved from the job ledger (a run row carries no job id)
     assert 'api("/jobs", { limit: 200 })' in js
-    assert "owner.get(`build:${b.id}`)" in js and "owner.get(`test_run:${t.id}`)" in js and "owner.get(`deploy:${d.id}`)" in js
+    assert "own(`build:${b.id}`)" in js and "own(`test_run:${t.id}`)" in js and "own(`deploy:${d.id}`)" in js
+    # the owning job's status rides along into the row, so the chain heading can badge it
+    assert "statusById" in js and "c.rows[0].jobStatus" in js
     # a row carries time | type chip | state | name | duration | host | job
     assert "<th>Job</th>" in js and '"tl-row tl-${r.type}"' in js
     # job nesting: a heading + indented rows for 2+ consecutive same-job rows
@@ -812,6 +814,8 @@ def test_activity_timeline_executes_in_node(client):
     js = client.get("/app.js").text
     dur = js.split("// duration-helpers:start", 1)[1].split("// duration-helpers:end", 1)[0]
     block = js.split("// activity-timeline:start", 1)[1].split("// activity-timeline:end", 1)[0]
+    # the shipped status-class map + badge (the timeline's chain heading uses them) — lifted, not stubbed
+    status_block = "const JOB_STATUS_CLASS" + js.split("const JOB_STATUS_CLASS", 1)[1].split("const jobFlags", 1)[0]
     prologue = """const ESC_MAP = {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"};
 const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (c) => ESC_MAP[c]);
 const enc = encodeURIComponent;
@@ -821,7 +825,7 @@ const stateBadge = (s) => badge(s, "");
 const lockStuckBadge = () => "";
 const fmtTime = (iso) => String(iso ?? "—");
 const link = (parts, label) => `<a href="#/${parts.map(enc).join("/")}">${esc(label)}</a>`;
-"""
+""" + status_block
     # builds on desktop-pc start at 10:00; the deploy at 10:08, the live test at 10:05; a REAPED test
     # started at 09:00 (oldest) but its updated_at is 10:30 (newest) — the late reaper touch that used
     # to float it to the top. A job links the three newest runs (deploy/test/build), so they nest.
@@ -838,7 +842,7 @@ const link = (parts, label) => `<a href="#/${parts.map(enc).join("/")}">${esc(la
     ]
     deploys = [{"id": "d-1", "host_id": "desktop-pc", "addon": None, "status": "verified",
                 "created_at": "2026-10-13T10:08:00Z", "updated_at": "2026-10-13T10:08:30Z", "entries": []}]
-    jobs = [{"id": "j-a", "links": [{"kind": "build", "ref_id": "b-1"},
+    jobs = [{"id": "j-a", "status": "inconclusive", "links": [{"kind": "build", "ref_id": "b-1"},
                                     {"kind": "test_run", "ref_id": "t-1"},
                                     {"kind": "deploy", "ref_id": "d-1"}]}]
     script = (
@@ -854,9 +858,12 @@ const link = (parts, label) => `<a href="#/${parts.map(enc).join("/")}">${esc(la
         + "const ri = HTML.indexOf('iso_dead');\n"
         + "const reapedRow = HTML.slice(HTML.lastIndexOf('<tr class=\"tl-row', ri), HTML.indexOf('</tr>', ri)+5);\n"
         + "const chain = (HTML.match(/tl-chain\">([^<]*)</) || [])[1] || null;\n"
+        + "const hi = HTML.indexOf('tl-job-head');\n"
+        + "const head = hi < 0 ? '' : HTML.slice(HTML.lastIndexOf('<tr', hi), HTML.indexOf('</tr>', hi) + 5);\n"
         + "console.log(JSON.stringify({order, types: rows.map((r) => r.type), jobs: rows.map((r) => r.job),"
-        + " reapedRow, chain, nested: (HTML.match(/tl-nested/g) || []).length,"
-        + " heads: (HTML.match(/tl-job-head/g) || []).length, jobLinks: (HTML.match(/#\\/jobs\\/j-a/g) || []).length}));\n"
+        + " reapedRow, chain, head, nested: (HTML.match(/tl-nested/g) || []).length,"
+        + " heads: (HTML.match(/tl-job-head/g) || []).length,"
+        + " jobLinks: (HTML.match(/#\\/jobs\\/j-a/g) || []).length}));\n"
     )
     proc = subprocess.run([NODE, "-e", script], capture_output=True, text=True, encoding="utf-8", timeout=60)
     assert proc.returncode == 0, proc.stderr
@@ -870,7 +877,42 @@ const link = (parts, label) => `<a href="#/${parts.map(enc).join("/")}">${esc(la
     # 3 nested rows + the one job heading = 4 links to the job
     assert out["heads"] == 1 and out["nested"] == 3 and out["jobLinks"] == 4
     assert out["chain"] == "deploy → test → build"
+    # the heading also carries the job's own status badge, so an 'inconclusive' chain (a run that
+    # ended with no verdict) is readable from the timeline instead of looking like any other job
+    assert 'class="badge inconclusive">inconclusive<' in out["head"]
+    assert out["head"].count("#/jobs/j-a") == 1
     # the reaped row is honest: a muted 'reaped' tag, NOT a bare 'idle' badge, and no job link ('—')
     assert "reaped" in out["reapedRow"] and ">idle<" not in out["reapedRow"]
     assert "reaped: lease lost" in out["reapedRow"]  # the note rides in the tooltip
     assert "—" in out["reapedRow"] and "#/jobs/" not in out["reapedRow"]
+
+
+# ------------------------------------------- Job status: the 'inconclusive' badge
+# The ledger used to finish a no-verdict run 'passed' (pass=0/fail=0/no-verdict=1). The webapp's job
+# status badge now gives that run its own class, so it can never be read as a pass at a glance.
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_job_status_badges_execute_in_node(client):
+    """Lift the shipped status-class map + badge and render every job status: the amber 'kind' of a pass
+    and the red 'warn' of a failure are untouched, and 'inconclusive' gets its own class."""
+    assert NODE is not None  # skipif above
+    js = client.get("/app.js").text
+    block = "const JOB_STATUS_CLASS" + js.split("const JOB_STATUS_CLASS", 1)[1].split("const jobFlags", 1)[0]
+    prologue = """const ESC_MAP = {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"};
+const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (c) => ESC_MAP[c]);
+const badge = (t, cls = "") => `<span class="badge ${cls}">${esc(t)}</span>`;
+"""
+    epilogue = (
+        'const ALL = ["queued","running","passed","failed","error","cancelled","inconclusive"];\n'
+        "console.log(JSON.stringify(Object.fromEntries(ALL.map((s) => [s, jobStatusBadge(s)]))));\n"
+    )
+    proc = subprocess.run(
+        [NODE, "-e", prologue + block + epilogue], capture_output=True, text=True, encoding="utf-8", timeout=60
+    )
+    assert proc.returncode == 0, proc.stderr
+    out = json.loads(proc.stdout)
+    assert set(out) == {"queued", "running", "passed", "failed", "error", "cancelled", "inconclusive"}
+    assert out["passed"] == '<span class="badge kind">passed</span>'
+    assert out["failed"] == '<span class="badge warn">failed</span>'
+    assert out["inconclusive"] == '<span class="badge inconclusive">inconclusive</span>'
+    # the distinction that matters: an unjudged run reads as neither a pass nor a failure
+    assert "kind" not in out["inconclusive"] and "warn" not in out["inconclusive"]

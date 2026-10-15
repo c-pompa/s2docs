@@ -649,6 +649,13 @@ class JobFinishIn(BaseModel):
     summary: dict | None = None
 
 
+class JobRestatusIn(BaseModel):
+    status: str = Field(description="A terminal status: passed | failed | error | cancelled | inconclusive")
+    reason: str | None = Field(
+        default=None, description="Why the ledger is being corrected (required; recorded on the timeline)"
+    )
+
+
 class JobCancelIn(BaseModel):
     reason: str | None = None
 
@@ -733,7 +740,16 @@ def request_job_screenshot(job_id: str, body: JobScreenshotIn, db: Db):
 
 @router.post("/jobs/{job_id}/finish", response_model=m.Job)
 def finish_job(job_id: str, body: JobFinishIn, db: Db):
+    """Close out a queued/running job. `status='inconclusive'` = the run ended with no pass/fail verdict."""
     return jobs.finish(db, job_id, status=body.status, summary=body.summary)
+
+
+@router.post("/jobs/{job_id}/restatus", response_model=m.Job)
+def restatus_job(job_id: str, body: JobRestatusIn, db: Db):
+    """Correct a FINISHED job's terminal status (terminal -> terminal). `reason` is mandatory and is
+    recorded as a `milestone` timeline event, so the correction is auditable. 409 for a non-terminal
+    job or a no-op change; 422 for a non-terminal target status or a missing reason."""
+    return jobs.restatus(db, job_id, status=body.status, reason=body.reason)
 
 
 @router.post("/jobs/{job_id}/cancel", response_model=m.Job)
