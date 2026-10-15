@@ -964,8 +964,8 @@ const NAV_GROUPS = [
     ["pulse", "Pulse"], ["docs", "Docs (source2.wiki)"], ["diff", "Build Diff"],
   ]],
   ["Workflow", [
-    ["projects", "Orchestration"], ["jobs", "Jobs"], ["activity", "Activity"], ["hosts", "Hosts"],
-  ], "plan → queue → live runs → machines"],
+    ["overview", "Overview"], ["projects", "Orchestration"], ["jobs", "Jobs"], ["activity", "Activity"], ["hosts", "Hosts"],
+  ], "one dashboard, then plan → queue → live runs → machines"],
   ["Authoring", [
     ["validate", "Validate"], ["prompts", "Prompts"],
   ]],
@@ -976,7 +976,7 @@ const NAV_GROUPS = [
 // Flat, in sidebar order — the route default and the active highlight use this.
 const SECTIONS = NAV_GROUPS.flatMap(([, items]) => items);
 // Pages that are about the whole install (hosts/runs/jobs), not one game — routed as #/<section>, no game prefix.
-const GLOBAL_SECTIONS = new Set(["hosts", "jobs", "activity"]);
+const GLOBAL_SECTIONS = new Set(["overview", "hosts", "jobs", "activity"]);
 
 // The workflow pages are stages of ONE loop, so each of them carries this strip: the whole pipeline in
 // order with the current stage lit, plus the offline Validate check on the side. It answers "how do
@@ -1947,6 +1947,138 @@ const ROUTES = {
       <div class="diff-actions"><button type="button" data-copy-md>Copy as Markdown</button>
         <textarea id="diff-md" class="diff-md mono" hidden aria-label="diff as Markdown">${esc(md)}</textarea></div>
       ${diffSectionsHtml(d, match)}`;
+  },
+
+  // Game-independent: ONE dashboard for the whole workflow — what is running, the job queue and
+  // its history, the hosts and the recent run timeline on a single page. It aggregates the four
+  // workflow pages (Jobs / Activity / Hosts / Orchestration) read-only; each block links out to
+  // its detail page, and it polls like Activity (5 s while anything is live, 15 s when idle).
+  async overview() {
+    const body = async () => {
+      const [builds, tests, deploys, jobs, hosts, projects] = await Promise.all([
+        api("/builds"),
+        api("/test-runs"),
+        api("/deploys"),
+        api("/jobs", { limit: 200 }).catch(() => []),
+        api("/hosts").catch(() => []),
+        api("/projects", { limit: 50 }).catch(() => []),
+      ]);
+      const isActiveBuild = (b) => b.status === "running" || b.status === "queued";
+      const activeBuilds = builds.filter(isActiveBuild);
+      const activeTests = tests.filter((t) => t.state === "running");
+      const openJobs = jobs.filter((j) => j.status === "running" || j.status === "queued");
+      // Drives the poll cadence (same contract as the Activity and Jobs pages).
+      state.activityActive = activeBuilds.length > 0 || activeTests.length > 0;
+      state.jobsActive = openJobs.length > 0;
+
+      // ---- NOW: everything currently running or queued, freshest first.
+      const ts = (r) => (r.updated_at || r.created_at || r.started_at || "");
+      const nowCards = [];
+      activeTests
+        .slice()
+        .sort((a, b) => (ts(a) < ts(b) ? 1 : -1))
+        .forEach((t) =>
+          nowCards.push(
+            `<div class="card" style="margin-bottom:8px">${stateBadge(t.state)} <strong>TEST</strong> ${esc(t.name)} —
+             <span class="mono">${esc(t.step || "(no step)")}</span>
+             <span class="muted">· ${human(t.elapsed_sec)} · host ${
+               t.host_id ? link(["hosts", t.host_id], t.host_id) : "—"
+             }</span>${lockStuckBadge(t.lock)}</div>`,
+          ),
+        );
+      activeBuilds
+        .slice()
+        .sort((a, b) => (ts(a) < ts(b) ? 1 : -1))
+        .forEach((b) =>
+          nowCards.push(
+            `<div class="card" style="margin-bottom:8px">${stateBadge(b.status)} <span class="mono">${esc(b.id)}</span> on ${link(
+              ["hosts", b.host_id],
+              b.host_id,
+            )} <span class="muted">· ${esc(b.kind)} · up ${runTime(b)}</span>${materialWarning(b)}${
+              runPhase(b) ? `<div class="muted mono">${esc(runPhase(b))}</div>` : `<div class="muted mono">${esc(b.command)}</div>`
+            }</div>`,
+          ),
+        );
+      openJobs.forEach((j) =>
+        nowCards.push(
+          `<div class="card" style="margin-bottom:8px">${stateBadge(j.status)} <strong>JOB</strong> ${link(
+            ["jobs", j.id],
+            j.id,
+          )} — ${esc(j.title || "(untitled)")} <span class="muted">· ${esc(j.kind)}${
+            j.host_id ? ` · host ${link(["hosts", j.host_id], j.host_id)}` : ""
+          }</span></div>`,
+        ),
+      );
+      const idle = [builds, tests, deploys, jobs].flat().map((r) => r.updated_at || r.created_at || "").filter(Boolean).sort().pop();
+      const now = nowCards.length
+        ? nowCards.join("")
+        : `<p class="muted">Nothing is running and no job is queued.${idle ? ` Last activity ${fmtTime(idle)}.` : ""}</p>`;
+
+      // ---- JOBS AT A GLANCE: status counts on top, then the most recent history. The ledger's
+      // statuses the STATE_CLASS map does not know are coloured here (passed=good, error=warn).
+      const jcls = { passed: "kind", error: "warn" };
+      const counts = {};
+      jobs.forEach((j) => { counts[j.status] = (counts[j.status] || 0) + 1; });
+      const countBadges = Object.entries(counts)
+        .map(([s, n]) => `<span class="badge ${jcls[s] ?? STATE_CLASS[s] ?? ""}">${esc(s)} ${n}</span>`)
+        .join(" ");
+      const recentJobs = jobs
+        .slice()
+        .sort((a, b) => ((a.created_at || "") < (b.created_at || "") ? 1 : -1))
+        .slice(0, 15);
+      const jobRows = recentJobs
+        .map(
+          (j) =>
+            `<tr><td>${link(["jobs", j.id], j.id)}</td><td>${stateBadge(j.status)}</td><td>${esc(j.kind)}</td>` +
+            `<td>${esc(j.title || "")}</td><td class="muted">${j.host_id ? link(["hosts", j.host_id], j.host_id) : "—"}</td>` +
+            `<td class="muted">${fmtTime(j.created_at)}</td></tr>`,
+        )
+        .join("");
+      const jobsBlock = `<h2>Jobs at a glance</h2>
+        <p>${countBadges || `<span class="muted">no jobs recorded</span>`} <span class="muted">· ${link(["jobs"], "full ledger →")}</span></p>
+        ${jobs.length ? `<table><tr><th>Job</th><th>Status</th><th>Kind</th><th>Title</th><th>Host</th><th>Created</th></tr>${jobRows}</table>` : ""}`;
+
+      // ---- HOSTS: compact registry with live lock state.
+      const hostRows = hosts
+        .map(
+          (h) =>
+            `<tr><td>${link(["hosts", h.id], h.id)}</td><td>${esc(gpuOf(h))}</td>` +
+            `<td class="muted">${h.probed_at ? fmtTime(h.probed_at) : "never"}</td><td>${lockCell(h.lock)}</td></tr>`,
+        )
+        .join("");
+      const hostsBlock = hosts.length
+        ? `<h2>Hosts <span class="muted">${hosts.length} · ${link(["hosts"], "detail →")}</span></h2>
+           <table><tr><th>Host</th><th>GPU</th><th>Probed</th><th>Lock</th></tr>${hostRows}</table>`
+        : `<h2>Hosts</h2><p class="muted">No hosts registered — ${link(["hosts"], "Hosts page")} has the commands.</p>`;
+
+      // ---- RECENT RUNS: the top of the shared timeline (newest 12), one row per run.
+      const allRows = activityRows(builds, tests, deploys, jobs);
+      const rows = allRows.slice(0, 12);
+      const timelineBlock = rows.length
+        ? `<h2>Recent runs <span class="muted">newest 12 of ${allRows.length} · ${link(["activity"], "full Activity page →")}</span></h2>
+           ${activityTimelineHtml(rows)}`
+        : `<h2>Recent runs</h2><p class="muted">No build/test/deploy run recorded yet — ${link(["activity"], "Activity")} explains how to start one.</p>`;
+
+      // ---- ORCHESTRATION: open plans, so the "what is being worked toward" is on the dashboard.
+      const openProjects = projects.filter((p) => (p.status || "active") === "active");
+      const projectsBlock = projects.length
+        ? `<h2>Orchestration <span class="muted">${openProjects.length} open · ${link([state.game, "projects"], "all plans →")}</span></h2>
+           <p>${openProjects.slice(0, 8).map((p) => link([state.game, "projects", p.id], p.title || p.id)).join(" · ") || `<span class="muted">none open</span>`}</p>`
+        : `<h2>Orchestration</h2><p class="muted">No orchestration projects yet — ${link([state.game, "projects"], "Orchestration")} explains them.</p>`;
+
+      return `<h2>Now${state.activityActive || state.jobsActive ? ` ${badge("live", "kind")}` : ""}</h2>${now}
+        ${jobsBlock}
+        ${hostsBlock}
+        ${timelineBlock}
+        ${projectsBlock}`;
+    };
+    liveBody("#live", body, () => (state.activityActive || state.jobsActive ? 5000 : 15000));
+    return `<h1>Overview</h1>${pipelineStrip("")}
+      <p class="muted">The whole workflow on one page: what is running right now, the job queue and its history, the
+      hosts and who holds each lease, the newest runs, and the open orchestration plans. Read-only — every block
+      links to its detail page (${link(["jobs"], "Jobs")}, ${link(["activity"], "Activity")}, ${link(["hosts"], "Hosts")},
+      ${link([state.game, "projects"], "Orchestration")}). Auto-refreshes every 5 s while anything is live, 15 s when idle.</p>
+      <div id="live">${await body()}</div>`;
   },
 
   // "projects" are orchestration DAGs (multi-step plans the server tracks), distinct from the

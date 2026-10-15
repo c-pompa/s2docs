@@ -415,7 +415,7 @@ def test_frontend_central_time_markers(client):
     assert "fmtTime(e.ts)" in js  # lock history
     assert "fmtTime(d.created_at)" in js  # deployments
     assert "fmtTime(p.updated_at)" in js and "fmtTime(s.updated_at)" in js  # projects + step table
-    assert js.count("fmtTime(h.probed_at)") == 2  # hosts list + host detail
+    assert js.count("fmtTime(h.probed_at)") >= 3  # hosts list + host detail + Overview dashboard
     # the raw ISO stays reachable in a tooltip; a null reads '—', an unparseable value is kept escaped
     assert 'title="${esc(String(iso))}"' in js
     # 'server now' line so a relative age can be sanity-checked (Hosts + Activity)

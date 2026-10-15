@@ -589,7 +589,7 @@ def test_web_jobs_route_and_static_assets(client):
     js = client.get("/app.js").text
     assert "async jobs([jobId])" in js  # the #/jobs and #/jobs/<id> route
     assert '["jobs", "Jobs"]' in js  # nav entry
-    assert 'GLOBAL_SECTIONS = new Set(["hosts", "jobs", "activity"])' in js  # install-wide, not per game
+    assert 'GLOBAL_SECTIONS = new Set(["overview", "hosts", "jobs", "activity"])' in js  # install-wide, not per game
     assert "function jobBoard(" in js and "function jobDetail(" in js
     assert "data-job-shot" in js and "Request screenshot" in js and "Close-out summary" in js
     # the "respond from the webapp" card: NOW TESTING + the Pass/Fail/Skip form posting to /verdict
