@@ -804,6 +804,16 @@ def create_mcp_server(db: Database, workspace: Path | None = None) -> MCPServer:
         """One job with its full timeline (events), links to test runs/builds/deploys/evidence and artifacts."""
         return _jobs(lambda: jobs.get(db, job_id))
 
+    @server.tool(annotations=READ_ONLY)
+    def job_screenshots(
+        job_id: JobId,
+        step: Annotated[str | None, Field(description="Filter by step id ('s4'); 'unassigned' = untagged")] = None,
+        reason: Annotated[str | None, Field(description="ready | periodic | verdict | request | verify")] = None,
+    ) -> list[m.JobScreenshot]:
+        """A job's screenshots tied to their step and verdict (seq, step, reason, url, web_url, verdict,
+        dimensions) — the image context a reviewer pulls after a run. Filter by `step`/`reason`."""
+        return _jobs(lambda: jobs.screenshots(db, job_id, step=step, reason=reason))
+
     @server.tool(annotations=NON_IDEMPOTENT)
     def job_enqueue(
         kind: Annotated[str, Field(description="test | demo | final")],

@@ -15,6 +15,11 @@ VERSION = "0.1.0"
 # Process start time, captured once at import — surfaces in the DB-identity payload (see server_identity).
 STARTED_AT = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
+# The public base URL of the web UI. The S2DOCS_PUBLIC_URL setting wins outright; with no request to
+# derive from (MCP tools, the CLI, the director's reporters) this is the fallback — the LAN address
+# the user opens the UI from.
+DEFAULT_PUBLIC_URL = "http://10.88.15.208:8812"
+
 # Lock stuck-ness defaults (see hosts.py). A fresh heartbeat whose phase has not moved for longer
 # than the threshold reads STUCK; a per-phase override wins (e.g. {'compile': 7200} lets a legitimate
 # long compile run before it is flagged).
@@ -101,6 +106,7 @@ class Settings:
     stuck_sec: int = DEFAULT_STUCK_SEC  # phase age (s) after which a fresh lock reads STUCK
     stuck_phases: dict[str, int] = field(default_factory=dict)  # per-phase overrides, merged over DEFAULT_STUCK_PHASES
     auth_token: str | None = None  # S2DOCS_AUTH_TOKEN; None = auth disabled (default)
+    public_url: str | None = None  # S2DOCS_PUBLIC_URL; None = derive from the request / LAN fallback
 
     @property
     def auth_required(self) -> bool:
@@ -202,6 +208,7 @@ def get_settings() -> Settings:
         stuck_sec=_stuck_sec(),
         stuck_phases=_stuck_phases(),
         auth_token=os.environ.get("S2DOCS_AUTH_TOKEN") or None,
+        public_url=(os.environ.get("S2DOCS_PUBLIC_URL") or "").strip().rstrip("/") or None,
     )
 
 
@@ -220,6 +227,7 @@ def server_identity() -> dict:
         "started_at": STARTED_AT,
         "version": VERSION,
         "auth_required": settings.auth_required,
+        "public_url": settings.public_url or DEFAULT_PUBLIC_URL,
         # The confirm push channel: files a waiting agent watches instead of polling /api/evidence.
         "confirms_jsonl": str((settings.data_dir / "confirms.jsonl").resolve()),
         "latest_confirm": str((settings.data_dir / "latest_confirm.json").resolve()),

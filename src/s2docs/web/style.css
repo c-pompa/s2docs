@@ -88,7 +88,7 @@ button:disabled { opacity: .4; cursor: default; }
 .card { border: 1px solid var(--border); border-radius: var(--r); padding: 12px; background: var(--panel); }
 .card .n { font-size: 22px; font-weight: 700; color: var(--accent); }
 /* Screenshot caption: the 32-char md5 has no break points — keep it inside the card. */
-.shot-cap { display: block; overflow-wrap: anywhere; word-break: break-all; }
+.shot-cap { display: block; overflow-wrap: anywhere; }
 /* Orchestration step DAG: one column per dependency depth, connected left→right. */
 .dag { display: flex; align-items: stretch; gap: 6px; overflow-x: auto; padding: 6px 0 10px; }
 .dag-col { display: flex; flex-direction: column; gap: 8px; min-width: 170px; flex: 1; }
@@ -163,7 +163,7 @@ button:disabled { opacity: .4; cursor: default; }
 .vx-btn-pass { background: color-mix(in srgb, var(--ok) 22%, var(--code)); border-color: var(--ok); color: var(--ok); }
 .vx-btn-fail { background: color-mix(in srgb, var(--bad) 22%, var(--code)); border-color: var(--bad); color: var(--bad); }
 .vx-btn-skip { background: var(--code); border-color: var(--muted); color: var(--muted); }
-.vx-btn:disabled { opacity: .55; }
+.vx-btn:disabled { opacity: .45; filter: grayscale(.75); cursor: not-allowed; }
 .vx-error { font-weight: 600; }
 
 /* The card fades/slides in when the run moved to the next test. */
@@ -218,3 +218,100 @@ table.timeline { margin-top: 6px; }
 .tl-chain { color: var(--muted); }
 .tl-nested td:first-child { padding-left: 26px; }
 .tl-nested td:first-child::before { content: "↳ "; color: var(--muted); }
+
+/* ---- Job page: organized hierarchy (header / now / results / evidence / timeline) ---- */
+/* HEADER: title + status on the left, the URL copy button on the right, a labelled meta grid. */
+.job-header { margin: 12px 0 14px; }
+.jh-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.jh-title h1 { margin: 0 0 6px; }
+.jh-tags { display: flex; align-items: center; flex-wrap: wrap; gap: 3px; }
+.jh-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.jh-target { margin: 6px 0; word-break: break-word; }
+.jh-meta { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 8px 16px; margin: 8px 0 6px; }
+.jh-cell { min-width: 0; }
+.jh-k { font-size: 11px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); }
+.jh-v { word-break: break-word; }
+.jh-intake2 p { margin: 4px 0; }
+.jh-intake2 .jh-k { display: inline-block; min-width: 78px; }
+.copy-btn { font-size: 12px; padding: 4px 10px; }
+
+/* A dismissible notice for a stale ?verdict= query (the old native-GET bug). */
+.stale-verdict { border-color: var(--accent); margin: 10px 0; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.stale-ico { color: var(--accent); }
+.stale-dismiss { margin-left: auto; font-size: 12px; padding: 3px 10px; }
+
+/* NOW / STATE region. */
+.job-now { margin: 12px 0 14px; }
+.vx-complete-ok { border-color: var(--ok); background: color-mix(in srgb, var(--ok) 16%, var(--panel)); color: var(--ok); }
+.vx-complete-bad { border-color: var(--bad); background: color-mix(in srgb, var(--bad) 16%, var(--panel)); color: var(--bad); }
+.vx-complete-warn { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 14%, var(--panel)); color: var(--accent); }
+.vx-complete-muted { border-color: var(--muted); background: var(--panel); color: var(--muted); }
+
+/* The SETTING UP / CLEANING UP countdown banner. */
+.vx-phase { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; padding: 8px 14px; margin: 0 0 10px;
+            border-radius: var(--r); border: 1px solid var(--accent); font-weight: 600;
+            background: color-mix(in srgb, var(--accent) 12%, var(--panel)); }
+.vx-phase-kind { font-size: 12px; letter-spacing: .08em; color: var(--accent); text-transform: uppercase; }
+.vx-phase-main { color: var(--fg); }
+.vx-phase-next { color: var(--muted); font-weight: 400; }
+.vx-phase-cd { margin-left: auto; font-size: 18px; font-weight: 700; color: var(--accent); font-variant-numeric: tabular-nums; }
+.vx-phase-cleanup { border-color: var(--muted); background: color-mix(in srgb, var(--muted) 10%, var(--panel)); }
+.vx-phase-cleanup .vx-phase-kind, .vx-phase-cleanup .vx-phase-cd { color: var(--muted); }
+.vx-gate { color: var(--muted); font-weight: 600; margin: 8px 0 2px; }
+.vx-camera { display: flex; align-items: center; gap: 8px; margin: 8px 0 2px; flex-wrap: wrap; }
+.vx-verdict-shot { display: flex; align-items: center; gap: 8px; margin: 2px 0 6px; }
+.vx-shotform { border-top: 1px solid var(--border); margin-top: 10px; padding-top: 8px; }
+.vx-shotform input { max-width: 320px; }
+.vx-pending { color: var(--accent); font-weight: 600; margin: 4px 0; }
+
+/* RESULTS: a shots column with inline thumbnails, and the verdict shot beside its badge. */
+.vx-shotcell { display: flex; flex-wrap: wrap; gap: 4px; }
+.vx-vshot { display: flex; align-items: center; gap: 6px; margin-top: 4px; font-size: 12px; }
+
+/* SUMMARY: four labelled blocks. */
+.sm-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px 18px; }
+.sm-k { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--accent); margin-bottom: 2px; }
+.sm-v { white-space: pre-wrap; }
+
+/* EVIDENCE: thumbnails grouped by step, click-to-enlarge. */
+.ev-group { margin: 8px 0 14px; }
+.ev-step { font-size: 13px; margin: 0 0 6px; border: 0; color: var(--fg); }
+.shot-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 10px; }
+.shot { margin: 0; }
+.shot-btn { display: block; width: 100%; padding: 0; border: 1px solid var(--border); border-radius: var(--r);
+            background: var(--code); cursor: zoom-in; overflow: hidden; line-height: 0; }
+.shot-btn:hover { border-color: var(--muted); }
+.shot-btn img { width: 100%; height: auto; display: block; border-radius: var(--r); }
+.shot figcaption { margin-top: 4px; font-size: 12px; }
+.shot-verdict { border: 2px solid var(--ok); border-radius: var(--r); padding: 2px; }
+.vx-shotcell .shot-btn, .vx-camera .shot-btn, .vx-vshot .shot-btn { width: 56px; flex: 0 0 auto; }
+.vx-shotcell .shot-sm img, .vx-camera .shot-sm img, .vx-vshot .shot-sm img { height: 40px; object-fit: cover; }
+.shot-btn.shot-sm { width: 56px; }
+
+/* Full-resolution lightbox (appended to <body>, opened by a delegated click). */
+.lightbox { position: fixed; inset: 0; z-index: 60; display: none; align-items: center; justify-content: center;
+            background: rgba(0, 0, 0, .85); padding: 24px; cursor: zoom-out; }
+.lightbox.open { display: flex; }
+.lightbox img { max-width: 96vw; max-height: 88vh; border: 1px solid var(--border); border-radius: var(--r); }
+.lightbox figcaption { text-align: center; margin-top: 8px; }
+
+/* TIMELINE: collapsible per-step groups, level colours, routine lines folded away. */
+.tl-group { border: 1px solid var(--border); border-radius: var(--r); margin: 8px 0; background: var(--panel); }
+.tl-group > summary { cursor: pointer; padding: 8px 12px; font-size: 13px; }
+.tl-group > summary:hover { background: color-mix(in srgb, var(--code) 60%, transparent); }
+.tl-group .timeline { margin: 0; padding: 8px 12px 12px 26px; }
+.tl-noise { margin: 0 12px 10px 26px; }
+.tl-noise > summary { cursor: pointer; font-size: 12px; }
+.tl-ev.tl-warn > .badge { color: var(--bad); border-color: var(--bad); }
+.tl-ev.tl-error > .badge, .tl-ev.tl-crash > .badge { color: var(--bad); border-color: var(--bad); font-weight: 700; }
+.tl-ev.tl-milestone > .badge, .tl-ev.tl-learning > .badge { color: var(--accent); border-color: var(--accent); }
+.rel-jobs { margin: 6px 0 0; padding-left: 18px; }
+.rel-jobs li { margin: 3px 0; }
+
+/* Responsive down to ~1000px: the meta grid and the four summary blocks stack sensibly. */
+@media (max-width: 1100px) {
+  main { padding: 16px 16px; }
+  .sm-grid { grid-template-columns: 1fr; }
+  .shot-grid { grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); }
+  .jh-meta { grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); }
+}
