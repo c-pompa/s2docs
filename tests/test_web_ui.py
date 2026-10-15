@@ -491,10 +491,20 @@ def test_frontend_diff_clarity_markers(client):
     # zero-change sections collapse to one line; a capped section says how much is hidden
     assert ": no changes" in js and "showing first" in js
     # filters wired through the hash query + the export button and its textarea fallback
-    assert "filter changed names" in js and '["", "all changes"]' in js
+    assert "filter changed names" in js
+    # the change-type dropdown shows per-type totals from the server counts (labels only): its VALUES
+    # stay '' / added / removed / changed so existing ?change= deep links keep working
+    assert '["", `all changes (${c.added + c.removed + c.changed})`]' in js
+    assert '["added", `added (${c.added})`]' in js and '["removed", `removed (${c.removed})`]' in js
+    assert '["changed", `changed (${c.changed})`]' in js
     assert "Copy as Markdown" in js and "data-copy-md" in js and 'id="diff-md"' in js and "bindCopyMd" in js
-    # the header shows both builds' metadata and the added/removed/changed breakdown
+    # the header shows both builds' metadata and the added/removed/changed breakdown, taken from the
+    # server's pre-limit `counts` (falling back to the received rows only for an older server), and it
+    # never presents a filtered subset as the diff's totals
     assert "diff-head" in js and "source_commit" in js and "diffCounts" in js
+    assert "const server = d.counts && Object.keys(d.counts).length ? d.counts : null" in js
+    assert "counted from the rows shown" in js
+    assert "filter active: showing " in js
     # the CSS the layout relies on
     for sel in (".diff-head", ".diff-old", ".diff-new", ".diff-val", ".diff-none", "table.diff"):
         assert sel in css
@@ -538,15 +548,38 @@ def test_diff_render_executes_in_node(client):
             ],
         },
     }
+    # A CAPPED section with the server's pre-limit `counts` (the deadlock 6774->6782 shape): the header
+    # totals must come from `counts`, not from the two rows received, and a filter must not look like
+    # it changes those totals.
+    capped = {
+        "game": "deadlock",
+        "from_build": 6774,
+        "to_build": 6782,
+        "limit": 500,
+        "totals": {"schema": 699},
+        "counts": {"schema": {"added": 459, "removed": 3, "changed": 237}},
+        "sections": {
+            "schema": [
+                {"name": "CCSPlayerPawn.m_flA", "change": "added", "before": None, "after": "float32",
+                 "group": "server:CCSPlayerPawn"},
+                {"name": "CCSPlayerPawn.m_flB", "change": "changed", "before": "float32 1",
+                 "after": "float32 2", "group": "server:CCSPlayerPawn"},
+            ]
+        },
+    }
     script = (
         prologue
         + block
         + "\nconst D = " + json.dumps(data) + ";\n"
+        + "const CAP = " + json.dumps(capped) + ";\n"
         + "const all = () => true;\n"
+        + 'const onlyA = (r) => r.name === "CCSPlayerPawn.m_flA";\n'
         + "console.log(JSON.stringify({\n"
         + "  html: diffSectionsHtml(D, all),\n"
         + "  counts: diffCounts(D),\n"
         + "  md: diffMarkdown(D, all),\n"
+        + "  capRowCounts: diffCounts(CAP),\n"
+        + "  capFiltered: diffCounts(CAP, onlyA),\n"
         + "}));\n"
     )
     proc = subprocess.run([NODE, "-e", script], capture_output=True, text=True, encoding="utf-8", timeout=60)
@@ -574,6 +607,15 @@ def test_diff_render_executes_in_node(client):
     # header counts and the Markdown export
     assert out["counts"]["added"] == 3 and out["counts"]["removed"] == 1 and out["counts"]["changed"] == 1
     assert out["counts"]["truncated"] is True
+    # a CAPPED section: the header totals are the server's pre-limit counts (only 2 rows arrived), not
+    # a count of the rows — and the capped section is named, with `exact` marking the counts as trusted
+    assert out["capRowCounts"]["added"] == 459 and out["capRowCounts"]["removed"] == 3
+    assert out["capRowCounts"]["changed"] == 237 and out["capRowCounts"]["exact"] is True
+    assert out["capRowCounts"]["truncated"] is True and out["capRowCounts"]["capped"] == ["schema"]
+    assert out["capRowCounts"]["total"] == 2  # rows actually received (the section shows 2 of 699)
+    # an active filter reports how many rows match WITHOUT masquerading as the patch's totals
+    assert out["capFiltered"]["matched"] == 1
+    assert out["capFiltered"]["added"] == 459 and out["capFiltered"]["changed"] == 237
     assert "## schema" in out["md"] and "| Change | Group | Name | Before | After |" in out["md"]
     assert "| added | client:C_CSPlayerPawn | `C_CSPlayerPawn.m_flEmitSoundTime_Client` | — | GameTime_t |" in out["md"]
 
