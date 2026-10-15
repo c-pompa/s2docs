@@ -650,8 +650,8 @@ def test_frontend_verification_stepper_and_card_markers(client):
     assert "Sending…" in js and "b.disabled = true" in js and "b.disabled = false" in js
     assert '"Recorded: " + String(verdict.verdict).toUpperCase()' in js and "(via ${esc(verdict.source)})" in js
     assert "Waiting for the demo to move to the next test…" in js
-    # (4) the results summary when the run ends
-    assert "function jobResults" in js and "Run complete" in js and "vx-rtable" in js
+    # (4) the results summary when the run ends (a finished-state banner + the per-step table)
+    assert "function jobResultsTable" in js and "function jobNow" in js and "vx-rtable" in js
     # (5) countdown/spinners stay client-side: the 1 s ticker drives both readout and bar width
     assert "function updateCountdowns" in js and "setInterval(updateCountdowns, 1000)" in js
     assert 'el.hasAttribute("data-vx-fill")' in js and "el.style.width = " in js
@@ -709,6 +709,7 @@ def test_verification_render_executes_in_node(client):
         'const badge = (t, cls = "") => `<span class="badge ${cls}">${esc(t)}</span>`;\n'
     )
     epilogue = (
+        "const fmtTime = (iso) => String(iso ?? '—');\n"
         "const states = (j) => jobVerifications(j).map((x) => [x.id, x.state]);\n"
         "console.log(JSON.stringify({\n"
         "  runningStates: states(RUN),\n"
@@ -719,7 +720,7 @@ def test_verification_render_executes_in_node(client):
         "  curStepper: jobStepper(CUR),\n"
         "  curCard: nowTestingCard(CUR),\n"
         "  doneStates: states(DONE),\n"
-        "  results: jobResults(DONE),\n"
+        "  results: jobNow(DONE) + jobResultsTable(DONE),\n"
         "}));\n"
     )
     # a webapp verdict POSTs without a `step`, so its milestone has no phase: it must still land on the
@@ -761,11 +762,11 @@ def test_verification_render_executes_in_node(client):
     assert out["curStates"][3] == ["s4", "fail"]
     assert "vx-fail" in out["curStepper"] and "vx-current" in out["curStepper"] and "via web" in out["curStepper"]
     assert "Recorded: FAIL" in out["curCard"] and "(via web)" in out["curCard"]
-    # a finished job replaces the card with the results table (milestone verdicts win over done results)
+    # a finished job renders a 'Run …' banner with the counts and the per-step results table
     assert out["doneStates"] == [["s1", "pass"], ["s2", "fail"], ["s3", "skip"],
                                  ["s4", "pass"], ["s5", "pass"], ["s6", "pass"]]
-    assert "Run complete" in out["results"] and "vx-rtable" in out["results"]
-    assert "4</strong> pass" in out["results"] and "via chat" in out["results"]
+    assert "Run failed" in out["results"] and "4</strong> pass" in out["results"]
+    assert "vx-rtable" in out["results"] and "via chat" in out["results"]
 
 
 # ------------------------------------------ Activity page: the unified timeline

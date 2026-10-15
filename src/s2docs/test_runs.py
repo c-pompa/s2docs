@@ -20,7 +20,7 @@ import os
 import secrets
 import sqlite3
 
-from s2docs import evidence, hosts
+from s2docs import evidence, hosts, weburls
 from s2docs import models as m
 from s2docs.db.connection import Database
 from s2docs.db.repository import NotFound
@@ -56,6 +56,7 @@ def _row(row: sqlite3.Row) -> m.TestRun:
         finished_at=row["finished_at"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
+        web_url=weburls.test_run_url(weburls.public_base_url(), row["id"]),
     )
 
 

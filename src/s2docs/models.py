@@ -346,6 +346,9 @@ class ProjectSummary(BaseModel):
     progress: str
     created_at: str
     updated_at: str
+    web_url: str | None = Field(
+        default=None, description="Absolute URL of this project's page in the web UI (Orchestration)"
+    )
 
 
 class Project(BaseModel):
@@ -361,6 +364,9 @@ class Project(BaseModel):
     updated_at: str
     steps: list[ProjectStep] = []
     recent_events: list[ProjectEvent] = []
+    web_url: str | None = Field(
+        default=None, description="Absolute URL of this project's page in the web UI (Orchestration)"
+    )
 
 
 class StepBrief(BaseModel):
@@ -449,6 +455,9 @@ class ServerInfo(BaseModel):
     auth_required: bool = Field(
         default=False, description="True when S2DOCS_AUTH_TOKEN is set (mutating /api and /mcp need a token)"
     )
+    public_url: str = Field(
+        default="", description="Base URL of the web UI (S2DOCS_PUBLIC_URL, else LAN fallback)"
+    )
     confirms_jsonl: str = Field(
         default="", description="Append-only confirm journal a waiting agent watches (data_dir/confirms.jsonl)"
     )
@@ -522,6 +531,9 @@ class BuildRun(BaseModel):
     )
     created_at: str
     updated_at: str
+    web_url: str | None = Field(
+        default=None, description="Absolute URL of this run's page in the web UI (Activity page)"
+    )
 
 
 class BuildLogTail(BaseModel):
@@ -568,6 +580,9 @@ class Deployment(BaseModel):
     notes: str | None = None
     created_at: str
     updated_at: str
+    web_url: str | None = Field(
+        default=None, description="Absolute URL of this deployment's page in the web UI (Activity page)"
+    )
 
 
 # ------------------------------------------------------------------ evidence
@@ -624,6 +639,9 @@ class TestRun(BaseModel):
     )
     created_at: str
     updated_at: str
+    web_url: str | None = Field(
+        default=None, description="Absolute URL of this run's page in the web UI (Activity page)"
+    )
 
 
 # --------------------------------------------------------------------- jobs
@@ -735,3 +753,42 @@ class Job(BaseModel):
     events: list[JobEvent] = []
     links: list[JobLink] = []
     artifacts: list[JobArtifact] = []
+    web_url: str | None = Field(
+        default=None, description="Absolute URL of this job's page in the web UI"
+    )
+
+
+# A screenshot tied to a step / verdict, derived from the job's `screenshot` events. The demo driver
+# posts those events with data {url, md5, bytes, step, step_index, step_total, reason, seq, verdict,
+# full_res, width, height}; older events carry only {url, md5, bytes} and read under 'unassigned'.
+ScreenshotReason = Literal["ready", "periodic", "verdict", "request", "verify"]
+SCREENSHOT_REASONS: tuple[str, ...] = ScreenshotReason.__args__  # type: ignore[attr-defined]
+
+
+class ScreenshotVerdict(BaseModel):
+    """The verdict a screenshot was captured alongside (a verdict-reason shot)."""
+
+    verdict: str
+    source: str | None = None
+    confirm_id: str | None = Field(default=None, description="The human-confirm evidence id to match on")
+    late: bool = False
+
+
+class JobScreenshot(BaseModel):
+    """One screenshot of a job, tied to its step and (optionally) its verdict."""
+
+    seq: int = Field(description="1-based capture order within the job")
+    step: str | None = Field(default=None, description="Step id/phase ('s4'); None = unassigned (older event)")
+    step_index: int | None = None
+    step_total: int | None = None
+    reason: ScreenshotReason | None = Field(default=None, description="Why it was taken; None on older events")
+    url: str = Field(description="REST path serving the bytes ('/api/artifacts/<job>/<name>')")
+    web_url: str = Field(description="Absolute page URL for this shot (the job page)")
+    name: str = Field(description="Artifact file name")
+    md5: str | None = None
+    bytes: int | None = None
+    verdict: ScreenshotVerdict | None = Field(default=None, description="Verdict captured with this shot")
+    full_res: bool | None = Field(default=None, description="True when the capture is full resolution")
+    width: int | None = None
+    height: int | None = None
+    created_at: str

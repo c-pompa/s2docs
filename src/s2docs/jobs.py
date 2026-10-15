@@ -28,7 +28,7 @@ import secrets
 import sqlite3
 from pathlib import Path
 
-from s2docs import evidence, hosts
+from s2docs import evidence, hosts, weburls
 from s2docs import models as m
 from s2docs.config import get_settings
 from s2docs.db.connection import Database
@@ -285,6 +285,9 @@ def _enrich(conn: sqlite3.Connection, job: m.Job, *, with_events: bool = True) -
         for r in conn.execute("SELECT kind, ref_id FROM job_links WHERE job_id = ? ORDER BY kind, ref_id", (job.id,))
     ]
     job.artifacts = _artifacts(job.id)
+    # The page URL in the web UI. Derived from the request in the REST layer (which overrides this);
+    # here it is the setting / LAN fallback, so MCP and CLI callers get a usable URL for free.
+    job.web_url = weburls.job_url(weburls.public_base_url(), job.id)
     return job
 
 
@@ -552,6 +555,73 @@ def read_artifact(db: Database, job_id: str, name: str) -> tuple[bytes, str]:
         raise NotFound(f"no artifact {name!r} for job {job_id}")
     ctype = content_type_for(path.name) or "application/octet-stream"
     return path.read_bytes(), ctype
+
+
+def screenshots(
+    db: Database,
+    job_id: str,
+    *,
+    step: str | None = None,
+    reason: str | None = None,
+) -> list[m.JobScreenshot]:
+    """The job's screenshots, derived from its ``screenshot`` events (newest events keep their own seq).
+
+    Ties each shot to its step and (for a verdict shot) the verdict it was captured alongside. Older
+    events carry only ``{url, md5, bytes}`` — their step is None ('unassigned') and they get a
+    positional ``seq`` by time. ``step``/``reason`` filter the result; ``step='unassigned'`` selects
+    the older, untagged shots.
+    """
+    job = get(db, job_id)  # 404 on an unknown job
+    if reason is not None and reason not in m.SCREENSHOT_REASONS:
+        raise JobValidationError(f"reason must be one of {m.SCREENSHOT_REASONS}, not {reason!r}", ["reason"])
+    base = weburls.public_base_url()
+    out: list[m.JobScreenshot] = []
+    auto = 0
+    for e in job.events:
+        if e.level != "screenshot":
+            continue
+        d = e.data if isinstance(e.data, dict) else {}
+        url = d.get("url")
+        if not url:
+            continue
+        auto += 1
+        raw_seq = d.get("seq")
+        seq = int(raw_seq) if isinstance(raw_seq, (int, float)) and not isinstance(raw_seq, bool) else auto
+        raw_reason = d.get("reason")
+        shot_reason = raw_reason if raw_reason in m.SCREENSHOT_REASONS else None
+        vd = d.get("verdict") if isinstance(d.get("verdict"), dict) else None
+        shot_verdict = None
+        if vd and vd.get("verdict"):
+            shot_verdict = m.ScreenshotVerdict(
+                verdict=str(vd["verdict"]),
+                source=vd.get("source"),
+                confirm_id=vd.get("confirm_id"),
+                late=bool(vd.get("late")),
+            )
+        out.append(
+            m.JobScreenshot(
+                seq=seq,
+                step=d.get("step") or e.phase or None,
+                step_index=d.get("step_index"),
+                step_total=d.get("step_total"),
+                reason=shot_reason,
+                url=url,
+                web_url=weburls.screenshot_url(base, job.id),
+                name=str(url).rsplit("/", 1)[-1],
+                md5=d.get("md5"),
+                bytes=d.get("bytes"),
+                verdict=shot_verdict,
+                full_res=d.get("full_res"),
+                width=d.get("width"),
+                height=d.get("height"),
+                created_at=e.created_at,
+            )
+        )
+    if step is not None:
+        out = [s for s in out if (s.step is None if step == "unassigned" else s.step == step)]
+    if reason is not None:
+        out = [s for s in out if s.reason == reason]
+    return out
 
 
 def link(db: Database, job_id: str, *, kind: str, ref_id: str) -> m.Job:

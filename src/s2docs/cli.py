@@ -573,6 +573,8 @@ def _cmd_test(args: argparse.Namespace) -> int:
 
 def _human_job(job) -> list[str]:
     out = [f"{job.id}  {job.kind:5}  {job.status:12}  pos={job.position}  {job.title}"]
+    if getattr(job, "web_url", None):
+        out.append(f"  VIEW: {job.web_url}")
     out.append(f"  target: {job.target}")
     if job.host_id:
         out.append(f"  host: {job.host_id}")
@@ -684,6 +686,16 @@ def _cmd_job(args: argparse.Namespace) -> int:
         if args.job_cmd == "restatus":
             job = jobs.restatus(db, args.job_id, status=args.status, reason=args.reason)
             return _emit(args, {"job": job.model_dump()}, _human_job(job))
+        if args.job_cmd == "screenshots":
+            shots = jobs.screenshots(db, args.job_id, step=args.step, reason=args.reason)
+            human = [f"{len(shots)} screenshot(s)"] + [
+                f"  #{s.seq}  {s.reason or '-'}  {s.step or 'unassigned'}  {s.name}  {s.web_url}" for s in shots
+            ]
+            return _emit(
+                args,
+                {"job_id": args.job_id, "screenshots": [s.model_dump() for s in shots]},
+                human if shots else ["no screenshots"],
+            )
         if args.job_cmd == "watch":
             return _watch_job(db, args.job_id)
     except NotFound as exc:
@@ -978,6 +990,10 @@ def main(argv: list[str] | None = None) -> int:
         help=" | ".join(_JOB_TERMINAL_STATUSES) + " (validated in the service -> exit 9)",
     )
     q.add_argument("--reason", required=True, help="Why the ledger is being corrected (recorded on the timeline)")
+    q = jc.add_parser("screenshots", help="List a job's screenshots tied to their step and verdict")
+    q.add_argument("job_id")
+    q.add_argument("--step", help="Filter by step id ('s4'); 'unassigned' = untagged shots")
+    q.add_argument("--reason", help="ready | periodic | verdict | request | verify")
     q = jc.add_parser("watch", help="Tail a job's events until it ends")
     q.add_argument("job_id")
     p.set_defaults(fn=_cmd_job)

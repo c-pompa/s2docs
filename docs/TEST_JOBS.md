@@ -30,6 +30,7 @@ pass/fail), `screenshots` (`each_step` default | `on_request` | `none`), `watchi
 | `POST /jobs/{id}/event {level, phase?, message, data?}` | append timeline; a `phase` updates `jobs.phase`; `error`/`crash` need a message and should carry `data.log_tail` (capped 64 KB) |
 | `PUT /jobs/{id}/artifacts/{name}` | raw body, `Content-Type` one of `image/jpeg\|png`, `text/plain`, `application/json`, `application/zip`, `application/octet-stream` (crash dumps `.dmp`/`.mdmp`, Windows event logs `.evtx`); stored under `<data_dir>/artifacts/<job_id>/<name>`, ≤ 25 MB, name `^[A-Za-z0-9._-]{1,120}$`, no overwrite (`409`). An image auto-adds a `screenshot` event; any upload clears `pending_shot` |
 | `GET /artifacts/{job_id}/{name}` | serve the file with the content type derived from its extension; non-images (logs, json, dumps, zips) come back as a download (`Content-Disposition: attachment`), images stay inline |
+| `GET /jobs/{id}/screenshots?step=&reason=` | the job's screenshots tied to their step and verdict (`seq`, `step`, `step_index`, `step_total`, `reason` ready\|periodic\|verdict\|request\|verify, `url`, `web_url`, `name`, `md5`, `bytes`, `verdict{verdict,source,confirm_id,late}`, `full_res`, `width`, `height`, `created_at`). `step='unassigned'` selects the older shots with no step tag; a bad `reason` is `422` — see **Screenshots** below |
 | `POST /jobs/{id}/link {kind, ref_id}` | attach a test run / build / deploy / evidence / project |
 | `POST /jobs/{id}/verdict {verdict, notes?, step?, source?}` | answer the running job's step with a human verdict — see **Verdicts** below |
 | `POST /jobs/{id}/screenshot-request {note}` | adds an `info` event and sets `params.pending_shot=true`; the runner answers by uploading |
@@ -98,7 +99,7 @@ re-states the verdict.
 
 ## MCP
 
-`job_enqueue, job_list, job_get, job_next, job_assign, job_start, job_event, job_attach(job_id, path),
+`job_enqueue, job_list, job_get, job_screenshots, job_next, job_assign, job_start, job_event, job_attach(job_id, path),
 job_request_screenshot, job_link, job_verdict, job_finish, job_restatus, job_cancel`. `job_attach` runs on the Mac and copies a
 local file into the job's artifacts (`path`, optional `name`); `job_verdict` answers the running job's step
 (`verdict` pass|fail|skip, optional `notes`/`step`, and `source` — use `coordinator` when relaying a verdict the
@@ -122,8 +123,12 @@ s2docs job verdict <id> --verdict pass|fail|skip [--notes ...] [--step ...] [--s
 s2docs job finish <id> --status S --what W --why Y --learned L --next N   # S: passed|failed|error|cancelled|inconclusive
 s2docs job restatus <id> --status S --reason R   # correct a FINISHED job (terminal -> terminal; reason required)
 s2docs job cancel <id> --reason R
+s2docs job screenshots <id> [--step S] [--reason R]
 s2docs job watch <id>          # tail events until the job ends
 ```
+
+Every `s2docs job` command prints a `VIEW: <url>` line (the job's web page) in its human output; the
+same URL rides in the JSON as `job.web_url`.
 
 `job verdict` is how the coordinator relays a verdict the user typed in the Hermes chat; its `--source`
 defaults to `coordinator` (the webapp posts `web`).
@@ -141,16 +146,68 @@ on stdout.
   red; a finished-jobs table below. A job that ended without a verdict shows the `inconclusive` badge
   (muted, dashed — never the amber of `passed`), in the finished table, on the job page and on the
   Activity page's chain heading. Auto-refreshes every 5 s while a job is running, 15 s when idle.
-- `#/jobs/<id>` — the job page: while the job is running a prominent **NOW TESTING** card leads (step
-  `k/n`, phase, prompt, what to look for, a live countdown to `deadline_utc`, the respond hint, and
-  Pass / Fail / Skip buttons + a note input that POST `/jobs/{id}/verdict`); once a verdict arrives —
-  from these buttons or in game (`chat`/`console`) — the card shows the recorded verdict with its source
-  badge. Then the close-out **summary card** first on a finished job, then the intake
-  (purpose, expected, cap, confirm gate), a "Request screenshot" button (a themed input for the capture
-  note), the screenshot gallery (inline `<img>` from `/api/artifacts/...` with the md5 wrapped inside the
-  card), then a **Files** list of the non-image artifacts (`log`/`txt`/`json`/`dmp`/`zip`) with download
-  links, linked records, and the timeline (levels coloured, `crash`/`error` expanded with the log tail in
-  a `<pre>`; a verdict `milestone` also shows its `verdict` + `via <source>` badges).
+- `#/jobs/<id>` — the job page, organized into a fixed hierarchy so a long run scans:
+  **HEADER** (title, status/kind badges, host/kind/worker/phase, started/finished/duration, project,
+  purpose + expected, and a **Copy job URL** button) → **NOW / STATE** (the current-test card with the
+  `TEST k/n` stepper, what-is-tested, what-you-should-see, a client-side countdown to `deadline_utc`,
+  the camera line, and Pass/Fail/Skip; when the job is finished this collapses to a compact
+  "Run passed/failed/…" banner plus the stepper) → **RESULTS** (one row per step: verdict badge, source,
+  note, late flag, when, and its screenshots with the verdict shot marked "screenshot at verdict") →
+  **SUMMARY** (four labelled blocks what/why/learned/next) → **INTAKE & CLEANUP** → **EVIDENCE**
+  (screenshots grouped by step, click-to-enlarge at full resolution) → **LINKS** (test run, project,
+  related jobs) → **TIMELINE** (grouped by step into collapsible blocks, level-coloured; routine info
+  lines — heartbeats, repeated screenshot/poll lines — fold into a "show N more" toggle while
+  warn/error/crash/milestone/learning and user-feedback/ledger-correction stay visible).
+  Auto-refreshes every 5 s. The verdict + screenshot-request forms are bound by ONE **delegated**
+  `submit` listener (not per form), so a refresh can never leave the Pass/Fail/Skip buttons without a
+  handler and silently drop a verdict; a stale `?verdict=…` query is stripped and shown as a dismissible
+  "please re-send" notice instead of being auto-submitted.
+- **SETTING UP / CLEANING UP** — while a demo driver stages the next test (or tears down the last) it
+  posts an `info` event `{phase:'setup'|'cleanup', data:{countdown_s, until:<UTC ISO>, step,
+  step_index, step_total, name, next}}`. The NOW area shows a banner (`SETTING UP: TEST k/n NAME  8s` /
+  `CLEANING UP: TEST k/n → next: …  6s`) ticking down client-side from `until`, and the verdict buttons
+  are disabled — reading "opens in Ns" during setup, "window closed" (with "recorded" if a verdict
+  landed) during cleanup. A later step prompt or verdict supersedes the banner.
+
+## web_url everywhere
+
+Every REST row for a **job**, **test run**, **project**, **build run** and **deployment** carries an
+absolute `web_url` the caller can open (single + list). It is `<base>/#/<route>`:
+
+| entity | route |
+|---|---|
+| job | `#/jobs/<id>` |
+| project | `#/<game>/projects/<id>` |
+| test run / build / deploy | `#/activity` (these have no dedicated page; they are shown on Activity) |
+
+The `<base>` resolves in this order (`s2docs/weburls.py`):
+1. **`S2DOCS_PUBLIC_URL`** setting, when set (trailing slash stripped);
+2. else the incoming REST request's `scheme://host:port` — a browser on `http://10.88.15.208:8812`
+   gets URLs back on that same origin;
+3. else the LAN fallback `http://10.88.15.208:8812` — used by the MCP tools and the CLI, which have
+   no request.
+
+`GET /api/health` (and MCP `server_info`) carry **`public_url`**. `s2docs job …` prints a
+`VIEW: <url>` line; the MCP `job_get`/`job_list` results carry it too.
+
+## Screenshots — tied to steps and verdicts
+
+A `screenshot` job event may carry (the demo driver adds these; older events keep only `url`, `md5`,
+`bytes` and read as **unassigned**):
+
+```
+{ url, md5, bytes, step, step_index, step_total, reason, seq,
+  verdict: { verdict, source, confirm_id, late } | null, full_res, width, height }
+```
+
+`reason` ∈ `ready | periodic | verdict | request | verify`; `seq` is 1-based per job. The web page
+groups shots by step (captions `#seq · reason · HH:MM:SS · step`, plus the verdict + source on verdict
+shots), shows them as thumbnails in the RESULTS table, as a click-to-enlarge grid under EVIDENCE, and
+as a camera line in the NOW card (`📷 N shots this test — last HH:MM:SS (reason)`); a recorded verdict
+links its shot (matched on `verdict.confirm_id`, else the step, else the newest verdict shot) and says
+"a screenshot will be saved with your verdict" until it arrives. `GET /api/jobs/{id}/screenshots`
+(and MCP `job_screenshots`) returns the same list, filterable by `step`/`reason`, for a coordinator
+pulling image context after a run.
 
 ## Push file
 
