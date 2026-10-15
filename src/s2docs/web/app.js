@@ -1949,22 +1949,12 @@ const ROUTES = {
       ${diffSectionsHtml(d, match)}`;
   },
 
-  // Game-independent: ONE dashboard for the whole workflow, organized into VIEWS. A pulse strip
-  // (the numbers that matter) sits on top of every view; a segmented switcher picks how the same
-  // data is organized — Board (now / queued / finished), Timeline, Hosts, Jobs — deep-linkable as
-  // ?view=. All views read the same endpoints once and are read-only; each row links to its page.
-  async overview(_, p) {
-    const VIEWS = [
-      ["board", "Board", "now / queued / finished, side by side"],
-      ["timeline", "Timeline", "one chronological sequence of every run"],
-      ["hosts", "Hosts", "one card per host: lease, phase, recent runs"],
-      ["jobs", "Jobs", "the ledger: status counts + full history table"],
-    ];
-    const view = VIEWS.some(([v]) => v === p.view) ? p.view : "board";
-    const switcher = `<div style="display:flex;gap:6px;flex-wrap:wrap;margin:10px 0 2px">${
-      VIEWS.map(([v, label, tip]) =>
-        `<a class="badge ${v === view ? "kind" : ""}" style="padding:4px 12px;${v === view ? "" : "opacity:.65"}" href="#/overview?view=${v}" title="${esc(tip)}">${esc(label)}</a>`).join("")}</div>`;
-
+  // Game-independent: ONE mission-control wallboard, not a tabbed copy of the other pages. It is
+  // organized as: a HERO (the one thing happening right now, biggest text), a machine DOCK (one LED
+  // chip per host: pulsing gold = busy, red = STUCK, gray = idle), then three lanes — the QUEUE
+  // rail, the VERDICT WALL (one colored tile per job, like a CI status board) and a compact FEED.
+  // Every tile/line links to its detail page; polls like Activity (5 s live, 15 s idle).
+  async overview() {
     const body = async () => {
       const [builds, tests, deploys, jobs, hosts, projects] = await Promise.all([
         api("/builds"),
@@ -1975,145 +1965,138 @@ const ROUTES = {
         api("/projects", { limit: 50 }).catch(() => []),
       ]);
       const isActiveBuild = (b) => b.status === "running" || b.status === "queued";
-      const activeBuilds = builds.filter(isActiveBuild);
+      const activeBuilds = builds.filter((b) => b.status === "running");
       const queuedBuilds = builds.filter((b) => b.status === "queued");
       const activeTests = tests.filter((t) => t.state === "running");
-      const runningJobs = jobs.filter((j) => j.status === "running" || j.status === "queued");
-      const openJobs = runningJobs;
+      const openJobs = jobs.filter((j) => j.status === "running" || j.status === "queued");
       // Drives the poll cadence (same contract as the Activity and Jobs pages).
       state.activityActive = activeBuilds.length > 0 || activeTests.length > 0;
       state.jobsActive = openJobs.length > 0;
 
-      // ---- PULSE (every view): the numbers that matter, in one strip.
-      const busyHosts = hosts.filter((h) => h.lock && h.lock.fresh && h.lock.owner).length;
       const idle = [builds, tests, deploys, jobs].flat().map((r) => r.updated_at || r.created_at || "").filter(Boolean).sort().pop();
-      const pulse = `<div style="display:flex;gap:8px;flex-wrap:wrap;margin:6px 0 14px">
-        <span class="card" style="padding:6px 12px">${badge("running", "kind")} <strong>${activeTests.length + activeBuilds.filter((b) => b.status === "running").length}</strong> running</span>
-        <span class="card" style="padding:6px 12px">${badge("queued")} <strong>${queuedBuilds.length + jobs.filter((j) => j.status === "queued").length}</strong> queued</span>
-        <span class="card" style="padding:6px 12px">🖥 <strong>${busyHosts}</strong>/${hosts.length} hosts busy</span>
-        <span class="card" style="padding:6px 12px"><strong>${openJobs.length}</strong> open job${openJobs.length === 1 ? "" : "s"}</span>
-        <span class="card" style="padding:6px 12px">${idle ? `<span class="muted">last activity</span> <strong>${fmtTime(idle)}</strong>` : `<span class="muted">no activity recorded</span>`}</span>
-        ${openProjectsOf(projects)}</div>`;
 
-      function openProjectsOf(ps) {
-        const open = ps.filter((x) => (x.status || "active") === "active");
-        return `<span class="card" style="padding:6px 12px">🗂 <strong>${open.length}</strong> open plan${open.length === 1 ? "" : "s"} · ${link([state.game, "projects"], "plans →")}</span>`;
-      }
-
-      // ---- NOW cards (board view + the empty board states).
-      const ts = (r) => (r.updated_at || r.created_at || r.started_at || "");
-      const nowCards = [];
+      // ---- HERO: the one thing happening right now. A running test leads (it is what a human is
+      // being asked to watch); a running build is the next hero; queued jobs are a quieter hero.
+      const heroParts = [];
       activeTests
         .slice()
-        .sort((a, b) => (ts(a) < ts(b) ? 1 : -1))
-        .forEach((t) =>
-          nowCards.push(
-            `<div class="card" style="margin-bottom:8px">${stateBadge(t.state)} <strong>TEST</strong> ${esc(t.name)} —
-             <span class="mono">${esc(t.step || "(no step)")}</span>
-             <span class="muted">· ${human(t.elapsed_sec)} · host ${
-               t.host_id ? link(["hosts", t.host_id], t.host_id) : "—"
-             }</span>${lockStuckBadge(t.lock)}</div>`,
-          ),
-        );
+        .sort((a, b) => ((a.updated_at || "") < (b.updated_at || "") ? 1 : -1))
+        .forEach((t, i) => {
+          heroParts.push(
+            `<div class="ovw-hero"><div style="display:flex;align-items:center;gap:10px">${badge("running", "kind")}` +
+            `<span class="ovw-st" style="font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.09em;color:var(--muted)">test</span>` +
+            `${i === 0 ? `<span class="muted" style="font-size:12px">${human(t.elapsed_sec)} in</span>` : ""}` +
+            `${t.host_id ? `<span class="muted" style="font-size:12px;margin-left:auto">on ${link(["hosts", t.host_id], t.host_id)}</span>` : ""}</div>` +
+            `<h2 style="margin-top:6px">${esc(t.name)}</h2>` +
+            `<div class="mono" style="margin-top:4px">${esc(t.step || "(no step)")}</div>` +
+            `${t.lock ? `<div style="margin-top:6px">${lockCell(t.lock)}${lockStuckBadge(t.lock)}</div>` : ""}</div>`,
+          );
+        });
       activeBuilds
         .slice()
-        .sort((a, b) => (ts(a) < ts(b) ? 1 : -1))
-        .forEach((b) =>
-          nowCards.push(
-            `<div class="card" style="margin-bottom:8px">${stateBadge(b.status)} <span class="mono">${esc(b.id)}</span> on ${link(
-              ["hosts", b.host_id],
-              b.host_id,
-            )} <span class="muted">· ${esc(b.kind)} · up ${runTime(b)}</span>${materialWarning(b)}${
-              runPhase(b) ? `<div class="muted mono">${esc(runPhase(b))}</div>` : `<div class="muted mono">${esc(b.command)}</div>`
-            }</div>`,
-          ),
+        .sort((a, b) => ((a.updated_at || "") < (b.updated_at || "") ? 1 : -1))
+        .forEach((b) => {
+          heroParts.push(
+            `<div class="ovw-hero"><div style="display:flex;align-items:center;gap:10px">${stateBadge(b.status)}` +
+            `<span class="ovw-st" style="font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.09em;color:var(--muted)">build</span>` +
+            `<span class="muted" style="font-size:12px">${runTime(b)} in</span>` +
+            `${b.host_id ? `<span class="muted" style="font-size:12px;margin-left:auto">on ${link(["hosts", b.host_id], b.host_id)}</span>` : ""}</div>` +
+            `<h2 style="margin-top:6px">${esc(b.kind === "compile" ? "Compiling" : b.kind || "Building")}</h2>` +
+            `<div class="mono" style="margin-top:4px">${esc(runPhase(b) || b.command || b.id)}</div>` +
+            `${materialWarning(b)}</div>`,
+          );
+        });
+      if (!heroParts.length) {
+        const openQueued = [...jobs.filter((j) => j.status === "queued")];
+        heroParts.push(
+          openQueued.length
+            ? `<div class="ovw-hero"><h2>Queued: ${link(["jobs", openQueued[0].id], openQueued[0].title || openQueued[0].id)}</h2>` +
+              `<div class="muted" style="margin-top:4px">${openQueued[0].kind} · waiting for a free host${idle ? ` · last activity ${fmtTime(idle)}` : ""}</div></div>`
+            : `<div class="ovw-hero"><h2>All quiet</h2><div class="muted" style="margin-top:4px">Nothing running, nothing queued.` +
+              `${idle ? ` Last activity ${fmtTime(idle)}.` : ""} Start something from ${link(["jobs"], "Jobs")} or MCP.</div></div>`,
         );
-      openJobs.forEach((j) =>
-        nowCards.push(
-          `<div class="card" style="margin-bottom:8px">${stateBadge(j.status)} <strong>JOB</strong> ${link(
-            ["jobs", j.id],
-            j.id,
-          )} — ${esc(j.title || "(untitled)")} <span class="muted">· ${esc(j.kind)}${
-            j.host_id ? ` · host ${link(["hosts", j.host_id], j.host_id)}` : ""
-          }</span></div>`,
-        ),
-      );
+      }
+      const hero = heroParts.join("");
 
-      // ---- BOARD: the workflow as three side-by-side columns.
-      const col = (title, count, inner) =>
-        `<div class="card" style="padding:10px 12px;min-width:0">
-           <h3 style="margin:0 0 8px">${title} <span class="muted">${count}</span></h3>${inner}</div>`;
-      const queuedCards = [
-        ...queuedBuilds.map((b) =>
-          `<div class="card" style="margin-bottom:8px">${stateBadge(b.status)} <span class="mono">${esc(b.id)}</span> on ${link(["hosts", b.host_id], b.host_id)} <span class="muted">· ${esc(b.kind)}</span></div>`),
+      // ---- DOCK: one LED chip per host — liveness at a glance, click for detail.
+      const dock = hosts.length
+        ? hosts
+            .map((h) => {
+              const busy = h.lock && h.lock.fresh && h.lock.owner;
+              const stuck = h.lock && h.lock.stuck;
+              return `<a href="${`#/hosts/${enc(h.id)}`}" title="${esc(gpuOf(h))}${h.lock && h.lock.owner ? ` · ${h.lock.owner}${h.lock.phase ? ` — ${h.lock.phase}` : ""}` : " · idle"}">` +
+                `<span class="ovw-led ${stuck ? "stuck" : busy ? "busy" : ""}"></span><span><strong>${esc(h.id)}</strong>` +
+                `<div class="muted" style="font-size:11px">${esc(h.lock && h.lock.phase ? h.lock.phase : stuck ? "STUCK" : busy ? "busy" : "idle")}</div></span></a>`;
+            })
+            .join("")
+        : `<span class="muted">no hosts registered</span>`;
+      const dockHtml = `<div style="display:flex;align-items:baseline;gap:10px;margin:2px 0 6px"><span class="ovw-st" style="font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.09em;color:var(--muted)">Machines</span>` +
+        `<span class="muted" style="font-size:12px">${hosts.filter((h) => h.lock && h.lock.fresh && h.lock.owner).length}/${hosts.length} busy</span></div>` +
+        `<div class="ovw-dock">${dock}</div>`;
+
+      // ---- LANES: queue rail | verdict wall | feed.
+      const queueLine = (badgeHtml, html) =>
+        `<div class="ovw-line">${badgeHtml}<span style="min-width:0">${html}</span></div>`;
+      const queueItems = [
         ...jobs.filter((j) => j.status === "queued").map((j) =>
-          `<div class="card" style="margin-bottom:8px">${stateBadge(j.status)} <strong>JOB</strong> ${link(["jobs", j.id], j.id)} — ${esc(j.title || "(untitled)")} <span class="muted">· ${esc(j.kind)}${j.host_id ? ` · ${link(["hosts", j.host_id], j.host_id)}` : ""}</span></div>`),
+          queueLine(stateBadge(j.status), `<strong>JOB</strong> ${link(["jobs", j.id], j.id)} — ${esc(j.title || "")}` +
+            `${j.host_id ? ` <span class="muted">· ${esc(j.host_id)}</span>` : ""}`)),
+        ...queuedBuilds.map((b) =>
+          queueLine(stateBadge(b.status), `<span class="mono">${esc(b.id)}</span> <span class="muted">· ${esc(b.kind)} · ${b.host_id ? esc(b.host_id) : "unassigned"}</span>`)),
       ];
-      const allRows = activityRows(builds, tests, deploys, jobs);
-      // Finished = the row's own state says it ended (never running/queued) — one check covers
-      // builds, tests and deploys since the row's state is normalised to the run's own field.
-      const finished = allRows.filter((r) => r.state !== "running" && r.state !== "queued").slice(0, 8);
-      const board = `<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:12px">
-        ${col("Now", nowCards.length, nowCards.join("") || `<p class="muted">Nothing running${idle ? ` — last activity ${fmtTime(idle)}` : ""}.</p>`)}
-        ${col("Queued", queuedCards.length, queuedCards.join("") || `<p class="muted">Nothing queued.</p>`)}
-        ${col("Recently finished", "", finished.length ? activityTimelineHtml(finished) : `<p class="muted">No finished runs yet.</p>`)}
-      </div>`;
+      const queueRail = `<div class="ovw-panel"><div class="ovw-st" style="font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.09em;color:var(--muted);margin-bottom:6px">Queued</div>` +
+        (queueItems.length ? queueItems.join("") : `<p class="muted" style="margin:0">Nothing queued.</p>`) + `</div>`;
 
-      // ---- HOSTS view: one card per host with its lease and recent-run counts.
-      const hostCards = hosts.map((h) => {
-        const hb = builds.filter((b) => b.host_id === h.id);
-        const ht = tests.filter((t) => t.host_id === h.id);
-        const hd = deploys.filter((d) => d.host_id === h.id);
-        return `<div class="card" style="min-width:0">
-          <h3 style="margin:0 0 6px">${link(["hosts", h.id], h.id)} ${lockCell(h.lock)}</h3>
-          <p class="muted" style="margin:0 0 6px">${esc(gpuOf(h))} · probed ${h.probed_at ? fmtTime(h.probed_at) : "never"}</p>
-          <p style="margin:0"><span class="badge">${hb.length} build${hb.length === 1 ? "" : "s"}</span> <span class="badge">${ht.length} test${ht.length === 1 ? "" : "s"}</span> <span class="badge">${hd.length} deploy${hd.length === 1 ? "" : "s"}</span></p>
-          ${h.lock && h.lock.fresh && h.lock.owner ? `<p class="mono muted" style="margin:6px 0 0">${esc(h.lock.owner)}${h.lock.phase ? ` — ${esc(h.lock.phase)}` : ""}</p>` : ""}
-        </div>`;
-      }).join("");
-      const hostsView = hostCards
-        ? `<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:12px">${hostCards}</div>`
-        : `<p class="muted">No hosts registered — the ${link(["hosts"], "Hosts page")} has the register commands.</p>`;
-
-      // ---- JOBS view: status counts on top, then the most recent history. The ledger's statuses
-      // the STATE_CLASS map does not know are coloured here (passed=good, error=warn).
-      const jcls = { passed: "kind", error: "warn" };
-      const counts = {};
-      jobs.forEach((j) => { counts[j.status] = (counts[j.status] || 0) + 1; });
-      const countBadges = Object.entries(counts)
-        .map(([s, n]) => `<span class="badge ${jcls[s] ?? STATE_CLASS[s] ?? ""}">${esc(s)} ${n}</span>`)
-        .join(" ");
+      // The verdict wall: one tile per job, newest first, like a CI status board — a screenful of
+      // colour answers "is the suite healthy?" faster than any table. Tile colour is the job's
+      // status; the label is the id; the tooltip carries the full title.
+      const TILE = {
+        passed: "passed", running: "running", queued: "queued", failed: "failed", error: "failed",
+        cancelled: "cancelled", inconclusive: "inconclusive",
+      };
       const recentJobs = jobs
         .slice()
         .sort((a, b) => ((a.created_at || "") < (b.created_at || "") ? 1 : -1))
-        .slice(0, 30);
-      const jobRows = recentJobs
-        .map(
-          (j) =>
-            `<tr><td>${link(["jobs", j.id], j.id)}</td><td>${stateBadge(j.status)}</td><td>${esc(j.kind)}</td>` +
-            `<td>${esc(j.title || "")}</td><td class="muted">${j.host_id ? link(["hosts", j.host_id], j.host_id) : "—"}</td>` +
-            `<td class="muted">${fmtTime(j.created_at)}</td></tr>`,
+        .slice(0, 40);
+      const wall = recentJobs
+        .map((j) => {
+          const cls = TILE[j.status] || "inconclusive";
+          return `<a class="ovw-tile ${cls}" href="${`#/jobs/${enc(j.id)}`}" title="${esc(`${j.id} — ${j.title || ""} · ${j.status}${j.created_at ? ` · ${fmtTime(j.created_at)}` : ""}`)}">` +
+            `<span class="ovw-st">${esc(j.status)}</span><div class="ovw-id">${esc(j.id)}</div>` +
+            `<div class="ovw-age">${esc(j.kind)}${j.created_at ? ` · ${fmtTime(j.created_at)}` : ""}</div></a>`;
+        })
+        .join("");
+      const wallHtml = `<div class="ovw-panel"><div style="display:flex;align-items:baseline;gap:10px;margin-bottom:8px">` +
+        `<span class="ovw-st" style="font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.09em;color:var(--muted)">Verdict wall</span>` +
+        `<span class="muted" style="font-size:12px">${jobs.length} job${jobs.length === 1 ? "" : "s"} · ${link(["jobs"], "full ledger →")}</span></div>` +
+        (wall || `<p class="muted" style="margin:0">No jobs recorded yet.</p>`) + `</div>`;
+
+      // The feed: the newest runs as one-liners (the Activity table stays the full record).
+      const allRows = activityRows(builds, tests, deploys, jobs);
+      const feed = allRows
+        .slice(0, 14)
+        .map((r) =>
+          queueLine(badge(r.type, "tl-" + r.type), `${esc(r.name)} ${stateBadge(r.state)} ` +
+            `<span class="muted">· ${fmtTime(r.at)} · ${r.host ? esc(r.host) : "—"}${r.job ? ` · ${link(["jobs", r.job], r.job)}` : ""}</span>`),
         )
         .join("");
-      const jobsView = `<p>${countBadges || `<span class="muted">no jobs recorded</span>`} <span class="muted">· ${link(["jobs"], "full ledger →")}</span></p>
-        ${jobs.length ? `<table><tr><th>Job</th><th>Status</th><th>Kind</th><th>Title</th><th>Host</th><th>Created</th></tr>${jobRows}</table>` : ""}`;
+      const feedHtml = `<div class="ovw-panel"><div style="display:flex;align-items:baseline;gap:10px;margin-bottom:6px">` +
+        `<span class="ovw-st" style="font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.09em;color:var(--muted)">Feed</span>` +
+        `<span class="muted" style="font-size:12px">${allRows.length} run${allRows.length === 1 ? "" : "s"} · ${link(["activity"], "Activity →")}</span></div>` +
+        (feed || `<p class="muted" style="margin:0">No runs recorded yet.</p>`) + `</div>`;
 
-      // ---- TIMELINE view: the full shared sequence (newest first), all run types.
-      const timelineView = allRows.length
-        ? `<p class="muted">${allRows.length} run${allRows.length === 1 ? "" : "s"} · ordered by when each started · ${link(["activity"], "Activity page →")}</p>
-           ${activityTimelineHtml(allRows)}`
-        : `<p class="muted">No build/test/deploy run recorded yet — ${link(["activity"], "Activity")} explains how to start one.</p>`;
+      const plans = projects.filter((x) => (x.status || "active") === "active");
+      const plansHtml = plans.length
+        ? `<div class="ovw-panel" style="margin-bottom:12px"><div class="ovw-st" style="font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.09em;color:var(--muted);margin-bottom:6px">Open plans</div>` +
+          `<p style="margin:0">${plans.slice(0, 6).map((x) => link([state.game, "projects", x.id], x.title || x.id)).join(" · ")} · ${link([state.game, "projects"], "all →")}</p></div>`
+        : "";
 
-      const content = { board, timeline: timelineView, hosts: hostsView, jobs: jobsView }[view];
-      return pulse + content;
+      return hero + plansHtml + dockHtml +
+        `<div class="ovw-lanes">${queueRail}${wallHtml}${feedHtml}</div>`;
     };
     liveBody("#live", body, () => (state.activityActive || state.jobsActive ? 5000 : 15000));
-    return `<h1>Overview</h1>${pipelineStrip("")}${switcher}
-      <p class="muted">The whole workflow in one place. <strong>Board</strong> shows now / queued / finished side by side;
-      <strong>Timeline</strong> is one chronological sequence of every run; <strong>Hosts</strong> is one card per machine with its
-      lease and recent runs; <strong>Jobs</strong> is the ledger with status counts and history. The pulse strip (running /
-      queued / hosts busy / open plans / last activity) sits on top of every view. Read-only — rows link to their
-      detail pages. Auto-refreshes every 5 s while anything is live, 15 s when idle.</p>
+    return `<h1>Overview</h1>${pipelineStrip("")}
+      <p class="muted" style="max-width:900px">Mission control. The live thing up top, machines below it, then queue / verdict wall / feed — every tile links to its record; refreshes every 5 s while anything is live.</p>
       <div id="live">${await body()}</div>`;
   },
 

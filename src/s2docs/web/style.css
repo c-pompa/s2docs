@@ -308,10 +308,53 @@ table.timeline { margin-top: 6px; }
 .rel-jobs { margin: 6px 0 0; padding-left: 18px; }
 .rel-jobs li { margin: 3px 0; }
 
+/* OVERVIEW: mission-control wallboard — one hero, a machine dock with live LEDs, the verdict wall
+   (one tile per job) and a compact feed. All colour mixes the theme tokens so light mode works too,
+   and the radius stays the one --r token (square design). */
+.ovw-hero { border: 1px solid var(--border); border-radius: var(--r); background: var(--panel);
+            padding: 14px 16px; margin-bottom: 12px; }
+.ovw-hero h2 { margin: 0; font-size: 20px; word-break: normal; }
+.ovw-panel { border: 1px solid var(--border); border-radius: var(--r); background: var(--panel);
+             padding: 12px 14px; min-width: 0; }
+.ovw-st { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .09em; color: var(--muted); }
+.ovw-dock { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 14px; }
+.ovw-dock > a { display: flex; align-items: center; gap: 9px; padding: 7px 12px;
+                border: 1px solid var(--border); border-radius: var(--r); background: var(--panel); color: var(--fg); }
+.ovw-dock > a:hover { text-decoration: none; border-color: var(--muted); }
+.ovw-led { width: 9px; height: 9px; border-radius: 50%; flex: none; background: var(--muted); }
+.ovw-led.busy { background: var(--accent); animation: ovw-pulse 1.6s ease-in-out infinite; }
+.ovw-led.stuck { background: var(--bad); animation: ovw-pulse .8s ease-in-out infinite; }
+@keyframes ovw-pulse { 50% { opacity: .3; } }
+.ovw-lanes { display: grid; grid-template-columns: 250px minmax(0, 1fr) 320px; gap: 12px; align-items: start; }
+.ovw-line { display: flex; gap: 8px; padding: 6px 0; border-bottom: 1px solid var(--border);
+            font-size: 12.5px; align-items: baseline; }
+.ovw-line:last-child { border-bottom: none; }
+.ovw-line > .badge { flex: none; }
+.ovw-wall { display: grid; grid-template-columns: repeat(auto-fill, minmax(104px, 1fr)); gap: 8px; }
+.ovw-tile { display: block; border: 1px solid transparent; border-radius: var(--r); padding: 8px 9px 7px;
+            color: var(--fg); min-width: 0; overflow: hidden; }
+.ovw-tile:hover { text-decoration: none; border-color: var(--muted); }
+.ovw-tile .ovw-id { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 11px; opacity: .85; }
+.ovw-tile .ovw-st { font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; }
+.ovw-tile .ovw-age { font-size: 11px; opacity: .7; }
+.ovw-tile.passed { background: color-mix(in srgb, var(--ok) 16%, var(--panel)); }
+.ovw-tile.passed .ovw-st { color: var(--ok); }
+.ovw-tile.failed { background: color-mix(in srgb, var(--bad) 16%, var(--panel)); }
+.ovw-tile.failed .ovw-st { color: var(--bad); }
+.ovw-tile.running { background: color-mix(in srgb, var(--link) 18%, var(--panel)); }
+.ovw-tile.running .ovw-st { color: var(--link); }
+.ovw-tile.queued { background: color-mix(in srgb, var(--accent) 14%, var(--panel)); }
+.ovw-tile.queued .ovw-st { color: var(--accent); }
+.ovw-tile.cancelled { background: var(--code); }
+.ovw-tile.cancelled .ovw-st { color: var(--muted); }
+.ovw-tile.inconclusive { background: var(--code); border-style: dashed; border-color: var(--border); }
+.ovw-tile.inconclusive .ovw-st { color: var(--muted); }
+
 /* Responsive down to ~1000px: the meta grid and the four summary blocks stack sensibly. */
 @media (max-width: 1100px) {
   main { padding: 16px 16px; }
   .sm-grid { grid-template-columns: 1fr; }
   .shot-grid { grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); }
   .jh-meta { grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); }
+  .ovw-lanes { grid-template-columns: 1fr; }
 }
