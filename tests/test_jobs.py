@@ -235,6 +235,35 @@ def test_screenshot_event_auto_added_for_images(client):
     assert {a["name"] for a in j["artifacts"]} == {"hud.png", "notes.txt"}
 
 
+def test_image_upload_tagged_via_event_query_param_lands_one_tagged_event(client):
+    """A tagged upload (?event=) makes the single auto screenshot event carry step/reason/seq, so a
+    client that uploads tagged must NOT also POST its own event (that produced two rows per shot)."""
+    jid = _enq(client).json()["id"]
+    png = _png()
+    spec = {"message": "screenshot #3 (s3 periodic): shot-x.jpg",
+            "data": {"step": "s3", "reason": "periodic", "seq": 3, "step_index": 3,
+                     "step_total": 4, "full_res": True, "width": 1920, "height": 1080}}
+    r = client.put(f"/api/jobs/{jid}/artifacts/shot3.png", content=png,
+                   headers={"content-type": "image/png"},
+                   params={"event": json.dumps(spec)})
+    assert r.status_code == 200, r.text
+    shots = [e for e in client.get(f"/api/jobs/{jid}").json()["events"] if e["level"] == "screenshot"]
+    assert len(shots) == 1, shots
+    assert shots[0]["message"] == spec["message"]
+    d = shots[0]["data"]
+    assert d["step"] == "s3" and d["reason"] == "periodic" and d["seq"] == 3
+    assert d["url"] == f"/api/artifacts/{jid}/shot3.png"
+    assert d["md5"] == hashlib.md5(png).hexdigest() and d["bytes"] == len(png)
+    # the derived screenshot list shows this shot EXACTLY ONCE, tagged
+    shots_api = client.get(f"/api/jobs/{jid}/screenshots").json()
+    assert len(shots_api) == 1, shots_api
+    assert shots_api[0]["step"] == "s3" and shots_api[0]["reason"] == "periodic"
+    # an unparseable event param is a validation error (422), not a silent drop
+    bad = client.put(f"/api/jobs/{jid}/artifacts/shot4.png", content=png,
+                     headers={"content-type": "image/png"}, params={"event": "{not json"})
+    assert bad.status_code == 422
+
+
 def test_crash_artifacts_dmp_mdmp_evtx_zip_served_as_attachment(client, jdb):
     """Crash artifacts (.dmp/.mdmp/.evtx) are octet-stream downloads; .zip keeps its own type. No
     screenshot event for any of them (images only), still <= 25 MB / name-guarded / no overwrite."""
