@@ -5,9 +5,14 @@
 # docs/CLI_PLAN.md ("Process lifecycle: serve, mcp, sync, load are CLI-only ... heavy local ingest is a
 # human/cron action"). The web UI therefore has no "sync" button; this is what runs instead.
 #
-# Install (macOS): scripts/launchd/com.s2docs.sync.plist calls this twice a day. Run it by hand with
+# Run it by hand with
 #   scripts/sync_index.sh                 # both games + source2.wiki
 #   scripts/sync_index.sh --game cs2      # one game (extra args go straight to `s2docs sync`)
+#
+# Scheduled runs do NOT use this file: scripts/launchd/com.s2docs.sync.plist execs
+# `.venv/bin/python -m s2docs.cli sync` directly, because a launchd-spawned /bin/bash cannot read files
+# under /Volumes/SSD_2 (it exits 126, "Operation not permitted"). This script is the human path, and the
+# reference for what the agent runs.
 #
 # It always writes to <repo>/data: the data dir must be the one the running `s2docs serve` reads, and a
 # source checkout resolves its default to <checkout>/data. S2DOCS_DATA_DIR is therefore pinned here so a
