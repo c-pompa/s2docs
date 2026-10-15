@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Iterator
 from typing import Annotated, Literal
 
@@ -742,9 +743,24 @@ def job_event(job_id: str, body: JobEventIn, db: Db):
 
 @router.put("/jobs/{job_id}/artifacts/{name}", response_model=m.JobArtifact)
 async def put_job_artifact(job_id: str, name: str, request: Request, db: Db):
-    """Store a raw-body artifact (append-only, <= 25 MB, name `^[A-Za-z0-9._-]{1,120}$`)."""
+    """Store a raw-body artifact (append-only, <= 25 MB, name `^[A-Za-z0-9._-]{1,120}$`).
+
+    An image upload may carry the shot's event tag as ``?event=<json>`` (``{"message": str,
+    "data": {...}}``); the server's single auto ``screenshot`` event then carries that tag, so a
+    client that uploads tagged does NOT also POST its own event (one event per shot).
+    """
     content = await request.body()
-    return jobs.save_artifact(db, job_id, name, content, request.headers.get("content-type", ""))
+    raw_event = request.query_params.get("event")
+    image_event = None
+    if raw_event:
+        try:
+            image_event = json.loads(raw_event)
+        except (ValueError, TypeError) as exc:
+            raise HTTPException(422, detail="event query param must be JSON") from exc
+        if not isinstance(image_event, dict):
+            raise HTTPException(422, detail="event query param must be a JSON object")
+    return jobs.save_artifact(db, job_id, name, content,
+                              request.headers.get("content-type", ""), image_event=image_event)
 
 
 @router.get("/artifacts/{job_id}/{name}")
