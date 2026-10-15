@@ -38,6 +38,60 @@ def _placeholders(values: Sequence[object]) -> str:
     return ", ".join("?" for _ in values)
 
 
+# One SQL template per diff section, selecting three columns for a SINGLE build (bound by `?`):
+#   g = parent key (class / entity / event / library), NULL when the section has no parent
+#   n = fully-qualified member name, e.g. 'CCSPlayerPawn.m_hActiveMinimapVolume'
+#   v = that member's own value (type / default / signature) — never a whole-class blob
+# diff_builds joins the two builds on (g, n), so one field added/removed/changed is exactly one row.
+# `n` carries an entity member's kind ('Kill (input)') and a Pulse binding's kind, because the same
+# name can exist under several kinds in one class/library; without that the join would drop rows.
+DIFF_SECTIONS: dict[str, str] = {
+    "convars": (
+        "SELECT NULL AS g, kind || ':' || name AS n, "
+        "trim(coalesce(default_value, '') || ' ' || coalesce(description, '')) AS v "
+        "FROM convars WHERE build_id = ?"
+    ),
+    # Entity members: the same class can declare one name twice (e.g. `origin` nested under a
+    # component AND at top level), so the component is part of the identity — otherwise those rows
+    # would collide and the join would emit bogus changed pairs. Value = type + runtime notes.
+    "entities": (
+        "SELECT e.side || ':' || e.classname AS g, "
+        "e.classname || '.' || m.name || ' (' || m.kind || "
+        "CASE WHEN coalesce(m.component, '') <> '' THEN ', ' || m.component ELSE '' END || ')' AS n, "
+        "trim(coalesce(m.type, '') || ' ' || coalesce(m.notes, '')) AS v "
+        "FROM entities e JOIN entity_members m ON m.entity_id = e.id WHERE e.build_id = ?"
+    ),
+    "schema": (
+        "SELECT s.module || ':' || s.name AS g, s.name || '.' || f.name AS n, "
+        "trim(coalesce(f.type, '') || ' ' || coalesce(f.value, '')) AS v "
+        "FROM schema_classes s JOIN schema_fields f ON f.class_id = s.id WHERE s.build_id = ?"
+    ),
+    "events": (
+        "SELECT e.source_file || ':' || e.name AS g, e.name || '.' || f.name AS n, "
+        "trim(f.type || ' ' || coalesce(f.description, '')) AS v "
+        "FROM game_events e JOIN game_event_fields f ON f.event_id = e.id WHERE e.build_id = ?"
+    ),
+    # script symbols key on stable identity (api/parent/name/kind), NOT on `ordinal`: reordering
+    # symbols is not a change. Overloads share that identity, so the value is the symbol's whole
+    # signature SET (ordered), and a reorder leaves it identical while a real signature edit shows.
+    "script_api": (
+        "SELECT s.api || ':' || coalesce(s.parent, '') || '.' || s.name || ':' || s.kind AS g, "
+        "s.api || ':' || coalesce(s.parent, '') || '.' || s.name AS n, "
+        "group_concat(s.signature, '  |  ' ORDER BY s.signature) AS v "
+        "FROM script_symbols s WHERE s.build_id = ? GROUP BY g"
+    ),
+    "pulse": (
+        "SELECT module || ':' || library AS g, "
+        "library || '.' || name || ' (' || kind || ')' AS n, signature AS v "
+        "FROM pulse_bindings WHERE build_id = ?"
+    ),
+    "hammer_classes": (
+        "SELECT root AS g, classname AS n, class_type || ' ' || coalesce(tool_name, '') AS v "
+        "FROM hammer_classes WHERE build_id = ?"
+    ),
+}
+
+
 class Repository:
     def __init__(self, conn: sqlite3.Connection):
         self.conn = conn
@@ -883,49 +937,44 @@ class Repository:
         else:
             from_id, from_num = self.build_id(game, from_build), from_build
 
-        def keyed(sql: str) -> list[m.DiffEntry]:
-            """`sql` selects (key, value) for build ?; compare the two builds."""
-            out: list[m.DiffEntry] = []
-            q = f"""
-                WITH a AS ({sql.replace("?", ":a")}), b AS ({sql.replace("?", ":b")})
-                SELECT b.k AS name, 'added' AS change, NULL AS before, b.v AS after
-                  FROM b LEFT JOIN a ON a.k = b.k WHERE a.k IS NULL
-                UNION ALL
-                SELECT a.k, 'removed', a.v, NULL FROM a LEFT JOIN b ON a.k = b.k WHERE b.k IS NULL
-                UNION ALL
-                SELECT a.k, 'changed', a.v, b.v FROM a JOIN b ON a.k = b.k WHERE a.v IS NOT b.v
-                ORDER BY 2, 1 LIMIT :lim
-            """
-            for r in self.conn.execute(q, {"a": from_id, "b": to_id, "lim": limit}):
-                out.append(m.DiffEntry(name=r[0], change=r[1], before=r[2], after=r[3]))
-            return out
+        def keyed(sql: str) -> tuple[list[m.DiffEntry], int]:
+            """`sql` selects (group g, name n, value v) for build ?; diff the two builds member-by-member.
 
-        sections = {
-            "convars": keyed(
-                "SELECT kind || ':' || name AS k, coalesce(default_value, '') || ' ' || coalesce(description, '') AS v "
-                "FROM convars WHERE build_id = ?"
-            ),
-            "entities": keyed(
-                "SELECT e.side || ':' || e.classname AS k, (SELECT group_concat(kind || ' ' || name, ', ') FROM "
-                "(SELECT kind, name FROM entity_members WHERE entity_id = e.id ORDER BY kind, name)) AS v "
-                "FROM entities e WHERE e.build_id = ?"
-            ),
-            "schema": keyed(
-                "SELECT s.module || ':' || s.name AS k, (SELECT group_concat(name || ' ' || coalesce(type, value, ''), "
-                "'; ') FROM (SELECT name, type, value FROM schema_fields WHERE class_id = s.id ORDER BY ordinal)) AS v "
-                "FROM schema_classes s WHERE s.build_id = ?"
-            ),
-            "events": keyed(
-                "SELECT e.source_file || ':' || e.name AS k, (SELECT group_concat(name || ' ' || type, ', ') FROM "
-                "(SELECT name, type FROM game_event_fields WHERE event_id = e.id ORDER BY ordinal)) AS v "
-                "FROM game_events e WHERE e.build_id = ?"
-            ),
-            "script_api": keyed(
-                "SELECT api || ':' || coalesce(parent || '.', '') || name || '#' || ordinal AS k, signature AS v "
-                "FROM script_symbols WHERE build_id = ?"
-            ),
-        }
-        return m.BuildDiff(game=game, from_build=from_num, to_build=to_num, sections=sections)
+            Both builds are UNIONed and grouped on (g, n) in ONE pass. A CTE join with NULL-safe
+            equality (needed because a flat section's group is NULL) cannot use an index and degrades to
+            a quadratic scan — this stays O(N log N). Returns the (capped) entries and the full count.
+            """
+            body = f"""
+                WITH both AS (
+                    SELECT 0 AS side, g, n, v FROM ({sql.replace("?", ":a")})
+                    UNION ALL
+                    SELECT 1 AS side, g, n, v FROM ({sql.replace("?", ":b")})
+                ),
+                agg AS (
+                    SELECT g, n,
+                           max(CASE WHEN side = 0 THEN v END) AS av,
+                           max(CASE WHEN side = 1 THEN v END) AS bv,
+                           sum(side = 0) AS na, sum(side = 1) AS nb
+                    FROM both GROUP BY g, n
+                )
+                SELECT g, n,
+                       CASE WHEN na = 0 THEN 'added' WHEN nb = 0 THEN 'removed' ELSE 'changed' END AS change,
+                       av AS before, bv AS after
+                FROM agg WHERE na = 0 OR nb = 0 OR av IS NOT bv
+            """
+            params = {"a": from_id, "b": to_id}
+            total = self.conn.execute(f"SELECT count(*) FROM ({body})", params).fetchone()[0]
+            rows = self.conn.execute(f"{body} ORDER BY 3, 1, 2 LIMIT :lim", {**params, "lim": limit}).fetchall()
+            entries = [m.DiffEntry(name=r[1], change=r[2], before=r[3], after=r[4], group=r[0]) for r in rows]
+            return entries, total
+
+        sections: dict[str, list[m.DiffEntry]] = {}
+        totals: dict[str, int] = {}
+        for name, sql in DIFF_SECTIONS.items():
+            sections[name], totals[name] = keyed(sql)
+        return m.BuildDiff(
+            game=game, from_build=from_num, to_build=to_num, sections=sections, totals=totals, limit=limit
+        )
 
     # ------------------------------------------------------------------ stats
     def stats(self) -> m.Stats:

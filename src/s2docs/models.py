@@ -201,10 +201,14 @@ class PulseBinding(BaseModel):
 
 
 class DiffEntry(BaseModel):
-    name: str
+    name: str = Field(description="Fully-qualified member name, e.g. 'C_CSPlayerPawn.m_hActiveMinimapVolume'")
     change: Literal["added", "removed", "changed"]
     before: str | None = None
     after: str | None = None
+    group: str | None = Field(
+        default=None,
+        description="Parent key when the section diffs members (class/entity/event/library); None for flat sections",
+    )
 
 
 class BuildDiff(BaseModel):
@@ -212,6 +216,11 @@ class BuildDiff(BaseModel):
     from_build: int
     to_build: int
     sections: dict[str, list[DiffEntry]]
+    totals: dict[str, int] = Field(
+        default_factory=dict,
+        description="Full change count per section, before the per-section `limit` truncation",
+    )
+    limit: int = Field(default=500, description="Row cap applied to each section")
 
 
 class Stats(BaseModel):
