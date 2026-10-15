@@ -71,10 +71,12 @@ uv run s2docs mcp                     # MCP over stdio
 
 `s2docs serve` mounts a small vanilla-JS SPA at `/` (hash routes, no framework, no build step). Besides the browse/search sections (`#/<game>/…`) it has install-wide operations pages for watching work on remote hosts, and a page for the server's orchestration plans:
 
-- **Overview** (`#/overview`) — the whole workflow on one dashboard: what is running right now (live
-  test/build runs + open jobs), the job ledger's status counts and most recent history, the host
-  registry with live lock state, the newest run-timeline rows, and the open orchestration plans.
-  Read-only; every block links to its detail page. Same auto-refresh cadence as Activity.
+- **Overview** (`#/overview`) — the whole workflow on one dashboard with four views, picked by a
+  segmented switcher and deep-linked as `?view=`: **Board** (now / queued / recently finished side
+  by side), **Timeline** (one chronological sequence of every run), **Hosts** (one card per machine:
+  lease, phase, recent-run counts), **Jobs** (status counts + history table). A **pulse strip**
+  (running / queued / hosts busy / open jobs / open plans / last activity) sits on top of every view.
+  Read-only; every row links to its detail page. Same auto-refresh cadence as Activity.
 - **Hosts** (`#/hosts`) — the registry plus live lock state: shell, GPU (from the last probe), how long ago it was probed, and the current lock owner with fresh/stale + heartbeat age, its **phase** (what the owner is doing) and a **STUCK** badge. A lock is STUCK when its heartbeat is fresh but its phase has not moved for longer than the server's threshold — liveness is not progress, so a worker that heartbeats faithfully while its compile hangs still shows up. Clicking a host opens `#/hosts/<id>` with its facts JSON, **lock history** (claim / takeover / release / phase-change events) and its recent builds, deployments and test runs. Read-only; auto-refreshes every 5 s while open.
 - **Activity** (`#/activity`) — the page to watch instead of tailing logs: a **Now** section (the running test run — the same `name / step / state / elapsed` fields as the in-game TEST STATUS HUD strip — and active/queued build runs, freshest first), a **By host** section grouping every recent build run, test run and deployment under the host it ran on, and a collapsed full history. Auto-refreshes every 5 s while a run is active, 15 s when idle.
 - **Orchestration** (`#/<game>/projects`) — the multi-step **orchestration DAGs** (distinct from runs): each project opens to a step-level view with a dependency graph, and per step its state, gate, evidence counts, updated time and notes. For the build/test/deploy runs those steps drive, use Activity.
