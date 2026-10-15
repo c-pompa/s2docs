@@ -937,12 +937,14 @@ class Repository:
         else:
             from_id, from_num = self.build_id(game, from_build), from_build
 
-        def keyed(sql: str) -> tuple[list[m.DiffEntry], int]:
+        def keyed(sql: str) -> tuple[list[m.DiffEntry], dict[str, int], int]:
             """`sql` selects (group g, name n, value v) for build ?; diff the two builds member-by-member.
 
             Both builds are UNIONed and grouped on (g, n) in ONE pass. A CTE join with NULL-safe
             equality (needed because a flat section's group is NULL) cannot use an index and degrades to
-            a quadratic scan — this stays O(N log N). Returns the (capped) entries and the full count.
+            a quadratic scan — this stays O(N log N). Returns the (capped) entries, the FULL
+            per-change-type counts (one GROUP BY over the same aggregated rows, so they are exact even
+            when `limit` truncates the row list) and the full total.
             """
             body = f"""
                 WITH both AS (
@@ -963,17 +965,28 @@ class Repository:
                 FROM agg WHERE na = 0 OR nb = 0 OR av IS NOT bv
             """
             params = {"a": from_id, "b": to_id}
-            total = self.conn.execute(f"SELECT count(*) FROM ({body})", params).fetchone()[0]
+            # The pre-limit per-change-type counts, in one GROUP BY over the same aggregated rows the
+            # (capped) SELECT below reads from — replaces the old `count(*)` pass, so no extra work.
+            counts: dict[str, int] = {"added": 0, "removed": 0, "changed": 0}
+            for change, n in self.conn.execute(f"SELECT change, count(*) FROM ({body}) GROUP BY change", params):
+                counts[change] = n
             rows = self.conn.execute(f"{body} ORDER BY 3, 1, 2 LIMIT :lim", {**params, "lim": limit}).fetchall()
             entries = [m.DiffEntry(name=r[1], change=r[2], before=r[3], after=r[4], group=r[0]) for r in rows]
-            return entries, total
+            return entries, counts, sum(counts.values())
 
         sections: dict[str, list[m.DiffEntry]] = {}
         totals: dict[str, int] = {}
+        counts: dict[str, dict[str, int]] = {}
         for name, sql in DIFF_SECTIONS.items():
-            sections[name], totals[name] = keyed(sql)
+            sections[name], counts[name], totals[name] = keyed(sql)
         return m.BuildDiff(
-            game=game, from_build=from_num, to_build=to_num, sections=sections, totals=totals, limit=limit
+            game=game,
+            from_build=from_num,
+            to_build=to_num,
+            sections=sections,
+            totals=totals,
+            counts=counts,
+            limit=limit,
         )
 
     # ------------------------------------------------------------------ stats
