@@ -33,7 +33,8 @@ pass/fail), `screenshots` (`each_step` default | `on_request` | `none`), `watchi
 | `POST /jobs/{id}/link {kind, ref_id}` | attach a test run / build / deploy / evidence / project |
 | `POST /jobs/{id}/verdict {verdict, notes?, step?, source?}` | answer the running job's step with a human verdict — see **Verdicts** below |
 | `POST /jobs/{id}/screenshot-request {note}` | adds an `info` event and sets `params.pending_shot=true`; the runner answers by uploading |
-| `POST /jobs/{id}/finish {status, summary}` | gate: all four of `what`/`why`/`learned`/`next` non-empty, each ≤ 600 chars (`422` + `fields` otherwise); queued/running only |
+| `POST /jobs/{id}/finish {status, summary}` | gate: all four of `what`/`why`/`learned`/`next` non-empty, each ≤ 600 chars (`422` + `fields` otherwise); queued/running only. `status` ∈ `passed`/`failed`/`error`/`cancelled`/`inconclusive` — see **Inconclusive** below |
+| `POST /jobs/{id}/restatus {status, reason}` | correct a **finished** job's terminal status (terminal → terminal) with a mandatory `reason`; queued/running is `409`, a no-op change is `409`, a non-terminal target or a missing reason is `422` — see **Inconclusive** below |
 | `POST /jobs/{id}/cancel {reason}` | queued/running → cancelled (the reason is recorded) |
 
 `422` carries `{"detail", "fields"}`; a state conflict is `409` (`{"detail", "conflict": true}`); an
@@ -75,10 +76,30 @@ Per step the driver posts an `info` event with `phase` = the step id and
 `milestone` event carrying `data.verdict` — is newer than the prompt, from **any** source). It is
 `null` when no prompt has been posted. `list_jobs` does not compute it (no events loaded).
 
+## Inconclusive — a run that ended without a verdict
+
+A step-gated demo the user stopped answering has no verdict to report (pass=0, fail=0, no-verdict=1).
+It used to finish `passed`, which made the ledger claim a verdict nobody made. `status='inconclusive'`
+is the terminal status such a run ends as; it carries the **same** close-out summary gate as any other
+finish, so the record still says what happened and what is next. A demo driver posts it to
+`POST /jobs/{id}/finish` (falling back to `error` if the gate returns `422`).
+
+`inconclusive` is terminal: it counts as finished in the webapp (badge amber/grey, **never** the amber
+of `passed` or the red of `failed`), it is excluded from `status=active`, and `s2docs job watch` treats
+it as an end (exit `1`, like any non-`passed` end).
+
+**Correcting a close-out** — `POST /jobs/{id}/restatus {status, reason}` (CLI `s2docs job restatus`)
+re-states a finished job between terminal statuses, for a mis-recorded verdict. Only terminal →
+terminal (a queued/running job finishes or is cancelled; `restatus` never reopens one, so it can never
+re-enter a queue), the target must differ from the current status, and `reason` is **mandatory** —
+it lands as a `milestone` timeline event (`data.restatus {from, to, reason}`) so the correction is
+auditable. `finished_at` and the summary are left untouched: the run ended when it ended, this only
+re-states the verdict.
+
 ## MCP
 
 `job_enqueue, job_list, job_get, job_next, job_assign, job_start, job_event, job_attach(job_id, path),
-job_request_screenshot, job_link, job_verdict, job_finish, job_cancel`. `job_attach` runs on the Mac and copies a
+job_request_screenshot, job_link, job_verdict, job_finish, job_restatus, job_cancel`. `job_attach` runs on the Mac and copies a
 local file into the job's artifacts (`path`, optional `name`); `job_verdict` answers the running job's step
 (`verdict` pass|fail|skip, optional `notes`/`step`, and `source` — use `coordinator` when relaying a verdict the
 user typed in the Hermes chat). Readers advertise `read_only_hint`; writers set `read_only_hint=False`, and every
@@ -98,7 +119,8 @@ s2docs job event <id> --level L --message M [--phase P] [--data JSON] [--log-fil
 s2docs job attach <id> <file> [--name NAME]
 s2docs job shot-request <id> [--note ...]
 s2docs job verdict <id> --verdict pass|fail|skip [--notes ...] [--step ...] [--source coordinator]
-s2docs job finish <id> --status S --what W --why Y --learned L --next N
+s2docs job finish <id> --status S --what W --why Y --learned L --next N   # S: passed|failed|error|cancelled|inconclusive
+s2docs job restatus <id> --status S --reason R   # correct a FINISHED job (terminal -> terminal; reason required)
 s2docs job cancel <id> --reason R
 s2docs job watch <id>          # tail events until the job ends
 ```
@@ -116,7 +138,9 @@ on stdout.
 
 - `#/jobs` — the **queue board**: one column per registered host (plus "unassigned"), the running job
   on top with phase + elapsed, then queued jobs by position; status badges and error/crash counts in
-  red; a finished-jobs table below. Auto-refreshes every 5 s while a job is running, 15 s when idle.
+  red; a finished-jobs table below. A job that ended without a verdict shows the `inconclusive` badge
+  (muted, dashed — never the amber of `passed`), in the finished table, on the job page and on the
+  Activity page's chain heading. Auto-refreshes every 5 s while a job is running, 15 s when idle.
 - `#/jobs/<id>` — the job page: while the job is running a prominent **NOW TESTING** card leads (step
   `k/n`, phase, prompt, what to look for, a live countdown to `deadline_utc`, the respond hint, and
   Pass / Fail / Skip buttons + a note input that POST `/jobs/{id}/verdict`); once a verdict arrives —
