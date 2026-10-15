@@ -7,8 +7,9 @@ human-confirm row to two files the agent watches instead.
 
 ## What the server writes
 
-On every `POST /api/evidence` with `kind="human-confirm"` (and only that kind), the server also
-writes into the data dir (`S2DOCS_DATA_DIR`, e.g. `…/valve-mcp-api-project/data`):
+On every human-confirm row — a `POST /api/evidence` with `kind="human-confirm"`, or a verdict from
+the job page's Pass/Fail/Skip buttons (`POST /api/jobs/{id}/verdict`, see *Where a verdict comes
+from*) — the server also writes into the data dir (`S2DOCS_DATA_DIR`, e.g. `…/valve-mcp-api-project/data`):
 
 | File | Shape | Write |
 | --- | --- | --- |
@@ -29,6 +30,30 @@ latest the confirm I'm waiting for?" is a string compare.
 
 The push is best-effort: the durable evidence row is committed to the DB first, so a filesystem
 error is logged and swallowed, never returned to the caller.
+
+## Where a verdict comes from
+
+Every human-confirm row is one verdict, and the server records which channel produced it in
+`data.source` (`models.ConfirmSource`):
+
+| source | channel |
+| --- | --- |
+| `chat` | in-game chat — `!pass` / `!fail` / `!skip` plus a note typed in chat |
+| `console` | the game console |
+| `key` | **KP_ENTER** — the confirm key bind |
+| `web` | the **job page's** Pass/Fail/Skip buttons |
+| `coordinator` | a Hermes coordinator relaying a verdict the user typed in chat |
+| `director` | the in-game confirm gate's own producer |
+
+Whichever channel it came from, the row lands in the DB and fires the same push files. A verdict made
+from the **job page** (`POST /api/jobs/{id}/verdict`) goes through the same `evidence.add_and_publish`
+path as `POST /api/evidence`, so it too lands in `confirms.jsonl` + `latest_confirm.json`. Its row
+anchors to the job's current/last linked test run (`test_run_id`), carries `ref` = the job id so the
+confirm traces back to the page it came from, and tags its note `"… via job page"` — so a waiting agent
+can tell a page verdict from a chat/console/key one.
+
+A verdict needs a linked test run to anchor on: a job-page verdict on a job with none is a 409 and
+nothing is pushed. And only a real verdict publishes — other job events (log lines, progress) do not.
 
 ## Discovering the paths
 
