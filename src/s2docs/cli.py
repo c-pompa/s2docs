@@ -670,6 +670,17 @@ def _cmd_learning(args: argparse.Namespace) -> int:
             else:
                 human = [f"not appended ({out['reason']}): job {out['job_id']} is already a golden case"]
             return _emit(args, out, human)          # a duplicate is EXIT_OK — a double click is not an error
+        if args.learning_cmd == "rewrite":
+            from s2docs.learning import rewrite as RW
+
+            r = RW.rewrite(args.text)
+            human = [
+                f"query: {r.query}",
+                f"game: {r.game or 'undetermined'}",
+                f"dropped: {' '.join(r.dropped) or '(none)'}",
+            ] + [f"  note: {n}" for n in r.notes]
+            return _emit(args, {"rewrite": {"query": r.query, "game": r.game,
+                                            "dropped": list(r.dropped), "notes": list(r.notes)}}, human)
     except LearningSourceMissing as exc:
         return _fail(str(exc), EXIT_PARTIAL)  # 6: a source was unreadable — a skip is not a pass
     except KeyError as exc:                    # review.promote on a job with no correction row
@@ -1097,6 +1108,9 @@ def main(argv: list[str] | None = None) -> int:
     q.add_argument("--query", help="What the gate will search with (default: the derived subject of the "
                                    "run's goal — not the whole brief, which nothing can match)")
     q.add_argument("--checker", default="exact", help="Checker the labs use for this case (default: exact)")
+    q.add_argument("--json", action="store_true", help="Machine-readable output")
+    q = lc.add_parser("rewrite", help="Deterministically rewrite prose into search keywords (+ game)")
+    q.add_argument("text", help="A user's question, e.g. 'how do I make a breakable prop'")
     q.add_argument("--json", action="store_true", help="Machine-readable output")
     p.set_defaults(fn=_cmd_learning)
 
