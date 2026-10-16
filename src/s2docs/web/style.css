@@ -31,18 +31,48 @@ input:not([type=checkbox]):not([type=radio]) {
   background: var(--bg); color: var(--fg); font: inherit; }
 select#game { width: auto; }
 
-.layout { display: grid; grid-template-columns: 190px 1fr; min-height: calc(100vh - 54px); }
-nav { border-right: 1px solid var(--border); padding: 12px 8px; }
+.layout { display: grid; grid-template-columns: 208px 1fr; min-height: calc(100vh - 54px); }
+#side { border-right: 1px solid var(--border); padding: 12px 8px; }
+/* The filter sits above #nav and is NOT re-rendered with it, so typing survives a badge repaint. */
+#nav-filter { margin-bottom: 10px; padding: 5px 8px; font-size: 12px; background: var(--panel); }
 nav a { display: block; padding: 6px 10px; border-radius: var(--r); color: var(--fg); }
-nav a.active { background: var(--code); color: var(--accent); }
 nav a.disabled { color: var(--muted); pointer-events: none; }
 /* Sidebar grouping: the sections are clustered by intent (Reference / Workflow / Authoring / Index),
-   so 17 links read as four short lists instead of one. The Workflow group carries a one-line hint
-   naming the pipeline order, since those four pages are stages of one loop, not four tools. */
-.nav-group { margin: 12px 0 2px; padding: 0 10px; font-size: 11px; font-weight: 600;
-             text-transform: uppercase; letter-spacing: .09em; color: var(--muted); }
+   so 18 links read as four short lists instead of one. The Workflow group carries a one-line hint
+   naming the pipeline order, since those four pages are stages of one loop, not four tools.
+   Each header is also a fold toggle, and the three groups that carry pending work (Jobs, Activity,
+   Hosts) wear a live count, so the sidebar answers "is anything waiting on me?" without a click. */
+.nav-group { display: flex; align-items: center; gap: 5px; width: 100%; margin: 12px 0 2px;
+             padding: 0 10px; background: none; border: 0; text-align: left; cursor: pointer;
+             font: inherit; font-size: 11px; font-weight: 600; text-transform: uppercase;
+             letter-spacing: .09em; color: var(--muted); }
 .nav-group:first-child { margin-top: 0; }
+.nav-group:hover { color: var(--fg); }
+.nav-group .nav-caret { font-size: 9px; opacity: .7; transition: transform .12s; }
+.nav-group.folded .nav-caret { transform: rotate(-90deg); }
+/* The group holding the current page says so even while it is folded. */
+.nav-group.has-active { color: var(--accent); }
+.nav-group.has-active .nav-caret { opacity: 1; }
 .nav-hint { padding: 0 10px 4px; font-size: 11px; line-height: 1.35; color: var(--muted); }
+/* A live count on a group header: queued+running jobs, runs in flight, machines under lease. */
+.nav-badge { margin-left: auto; font-size: 10px; font-weight: 700; padding: 0 5px; border-radius: 8px;
+             background: color-mix(in srgb, var(--accent) 20%, transparent); color: var(--accent);
+             font-variant-numeric: tabular-nums; }
+
+/* The active page is a NOTCH ON A RAIL, not a filled pill. Every group's links hang off one hairline
+   rule in a reserved gutter, and the current page's notch (a 3px accent bar) sits ON that rail — so
+   "you are here" reads as a position inside its group rather than a row of tinted background, which
+   in a list this long is indistinguishable from the pointer's hover state. The notch grows into
+   place, and the label carries the accent + weight, so the position is legible from the text alone. */
+.nav-links { border-left: 1px solid var(--border); margin-left: 11px; }
+/* Flex (not block) so a link's live badge sits flush right against its label. */
+nav .nav-link { position: relative; display: flex; align-items: center; padding: 6px 10px 6px 14px; }
+nav .nav-link::before { content: ""; position: absolute; left: -1px; top: 50%; bottom: 50%; width: 3px;
+                        background: var(--accent); transition: top .12s, bottom .12s; }
+nav .nav-link.active::before { top: 2px; bottom: 2px; }
+nav .nav-link.active { color: var(--accent); font-weight: 600;
+                       background: color-mix(in srgb, var(--accent) 8%, transparent); }
+nav .nav-link.active:hover { text-decoration: none; }
 main { padding: 18px 24px; max-width: 1200px; overflow-x: auto; }
 
 /* The workflow pipeline strip: shown on Orchestration / Jobs / Activity / Hosts / Validate so the
@@ -101,7 +131,13 @@ button:disabled { opacity: .4; cursor: default; }
 .dag-node.skipped { opacity: .6; }
 .err { color: var(--bad); }
 .inherited td { opacity: .78; }
-@media (max-width: 760px) { .layout { grid-template-columns: 1fr; } nav { display: flex; overflow-x: auto; border: 0; } }
+/* Narrow screens: STACK the sidebar above the page instead of turning it into a horizontal scroller.
+   The flex row put the group HEADERS on the same line as the links, so the grouping vanished exactly
+   where a long list needs it most; a capped, scrollable column keeps the structure intact. */
+@media (max-width: 760px) {
+  .layout { grid-template-columns: 1fr; }
+  #side { border-right: 0; border-bottom: 1px solid var(--border); max-height: 46vh; overflow-y: auto; }
+}
 
 /* ---- Job page: verification stepper, NOW TESTING card, results ---------------- */
 /* The stepper across the top of the job page: one chip per test, coloured by outcome. */

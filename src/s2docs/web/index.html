@@ -16,7 +16,12 @@
     <span id="build" class="muted"></span>
   </header>
   <div class="layout">
-    <nav id="nav" aria-label="Sections"></nav>
+    <aside id="side">
+      <!-- The filter sits OUTSIDE #nav on purpose: #nav is re-rendered on every route change and on
+           every badge poll, and this input must keep its focus and its text across all of that. -->
+      <input id="nav-filter" type="search" placeholder="Filter sections…" autocomplete="off" aria-label="Filter sections">
+      <nav id="nav" aria-label="Sections"></nav>
+    </aside>
     <main id="view" tabindex="-1"><p class="muted">Loading…</p></main>
   </div>
   <script src="/app.js" type="module"></script>

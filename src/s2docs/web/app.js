@@ -3,7 +3,8 @@
 
 const $ = (sel) => document.querySelector(sel);
 const view = $("#view");
-const state = { games: [], game: localStorage.getItem("s2docs.game") || "cs2", activityActive: false, jobsActive: false };
+const state = { games: [], game: localStorage.getItem("s2docs.game") || "cs2", activityActive: false, jobsActive: false,
+                navBadges: { jobs: 0, activity: 0, hosts: 0 } };
 
 const esc = (v) =>
   String(v ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
@@ -982,7 +983,7 @@ async function api(path, params = {}) {
 }
 
 // ------------------------------------------------------------------ routing
-// The sidebar, clustered by intent instead of one flat list of 17 links:
+// The sidebar, clustered by intent instead of one flat list of 18 links:
 //   Reference — the indexed game data you look things up in (the app's primary purpose)
 //   Workflow  — the run pipeline, read top-down as its lifecycle (plan → queue → run → machines)
 //   Authoring — offline helpers used while writing scripts/configs
@@ -1014,6 +1015,62 @@ const NAV_GROUPS = [
 const SECTIONS = NAV_GROUPS.flatMap(([, items]) => items);
 // Pages that are about the whole install (hosts/runs/jobs), not one game — routed as #/<section>, no game prefix.
 const GLOBAL_SECTIONS = new Set(["overview", "hosts", "jobs", "activity"]);
+
+// ---- Sidebar: collapsible groups, a filter, and live badges --------------------------------
+// Grouping alone left 18 equal-weight links on screen. Three mechanisms fix the remaining weight,
+// and none of them changes the taxonomy above:
+//   (1) FOLD — a group header folds its links away. The folded titles persist in localStorage, so
+//       the sidebar the user shaped is the sidebar they get back on the next visit.
+//   (2) FILTER — one input above the list narrows by label across every group at once, so a section
+//       the user half-remembers is two keystrokes away instead of a hunt down a 10-item list. A
+//       folded group is force-opened while a query is active, or it would hide its own match.
+//   (3) BADGES — Jobs / Activity / Hosts are the pages that carry queued work and held leases, and
+//       the sidebar said nothing about them. Each of those three LINKS wears its own live count, so
+//       the sidebar answers "is anything waiting on me?" without opening a page. A FOLDED group sums
+//       its children's counts into the header, because a fold must never hide the number the badge
+//       exists to surface. Keys are section ids (jobs/activity/hosts), not group titles.
+// navHtml() is pure (it takes the groups/active/collapsed/badges and returns a string) so the
+// tests lift it out of the shipped file and execute the fold + filter + badge logic in node,
+// rather than asserting on strings.
+// nav-helpers:start
+const NAV_COLLAPSE_KEY = "s2docs.nav.collapsed";
+const navCollapsed = (raw) => {
+  try {
+    const a = JSON.parse(raw || "[]");
+    return new Set(Array.isArray(a) ? a.filter((x) => typeof x === "string") : []);
+  } catch { return new Set(); } // a corrupt value must cost the user nothing but their folds
+};
+const navMatch = (label, q) => !q || label.toLowerCase().includes(q);
+const navBadge = (n, title) => (n ? `<span class="nav-badge" title="${esc(title || "")}">${esc(n)}</span>` : "");
+function navHtml(opts) {
+  const { groups, active, collapsed, badges = {}, badgeTitles = {}, query = "", hrefFor, disabledFor = () => false } = opts;
+  const folded = collapsed || new Set();
+  const q = String(query || "").trim().toLowerCase();
+  const out = [];
+  for (const [title, items, hint] of groups) {
+    const hits = items.filter(([id, label]) => navMatch(label, q));
+    if (!hits.length) continue; // a group with no match is hidden, so the matches ARE the list
+    const open = !folded.has(title) || !!q; // a query opens every group: a fold must not hide a hit
+    const here = hits.some(([id]) => id === active);
+    // Folded, the group's pending work has to be readable from the header: the counts of the links
+    // that are currently away are summed onto it, so folding can never swallow the badge.
+    const rolled = open ? 0 : items.reduce((n, [id]) => n + (badges[id] || 0), 0);
+    out.push(`<button type="button" class="nav-group${open ? "" : " folded"}${here ? " has-active" : ""}"` +
+      ` data-nav-group="${esc(title)}" aria-expanded="${open}"><span class="nav-caret">▾</span>` +
+      `${esc(title)}${navBadge(rolled, badgeTitles.group)}</button>`);
+    if (!open) continue;
+    if (hint && !q) out.push(`<div class="nav-hint">${esc(hint)}</div>`);
+    out.push(`<div class="nav-links">`);
+    for (const [id, label] of hits) {
+      const off = disabledFor(id);
+      out.push(`<a href="${hrefFor(id)}" class="nav-link${id === active ? " active" : ""}${off ? " disabled" : ""}"` +
+        `${id === active ? ' aria-current="page"' : ""}>${esc(label)}${navBadge(badges[id], badgeTitles[id])}</a>`);
+    }
+    out.push(`</div>`);
+  }
+  return out.join("") || `<div class="nav-hint">no section matches “${esc(query)}”</div>`;
+}
+// nav-helpers:end
 
 // The workflow pages are stages of ONE loop, so each of them carries this strip: the whole pipeline in
 // order with the current stage lit, plus the offline Validate check on the side. It answers "how do
@@ -1050,20 +1107,103 @@ const link = (parts, label, params = {}) => {
   return `<a href="#/${parts.map(enc).join("/")}${qs ? "?" + qs : ""}">${esc(label)}</a>`;
 };
 
-function renderNav(active) {
-  const g = state.games.find((x) => x.id === state.game);
-  const item = ([id, label]) => {
-    const disabled = (id === "script" || id === "examples") && !g?.script_api;
-    const href = sectionHref(id);
-    return `<a href="${href}" class="${id === active ? "active" : ""} ${disabled ? "disabled" : ""}">${esc(label)}</a>`;
+// The sidebar's own state: which page is lit, the filter's current query, and the folded groups.
+// `navActive` is remembered so a fold toggle or a filter keystroke can re-render the list in place
+// without a route() (which would re-render the whole page and jump the scroll).
+let navActive = "search";
+let navQuery = "";
+const navStoredFolds = () => {
+  try { return localStorage.getItem(NAV_COLLAPSE_KEY); } catch { return null; } // private mode: no folds, no error
+};
+const navFold = navCollapsed(navStoredFolds());
+// The badge tooltips spell out what the number counts, since a link shows only its total. Counts are
+// keyed by SECTION id (the link that wears them), with `group` for a folded group's roll-up.
+const navBadgeTitles = () => {
+  const d = state.navBadgeDetail || {};
+  const pl = (n, s) => `${n} ${s}${n === 1 ? "" : "s"}`;
+  return {
+    jobs: `${d.queued || 0} queued · ${d.running || 0} running`,
+    activity: `${pl(d.builds || 0, "build")} + ${pl(d.tests || 0, "test")} running`,
+    hosts: `${d.leased || 0} of ${pl(d.hosts || 0, "host")} leased`,
+    group: "pending work in the folded links above",
   };
-  $("#nav").innerHTML = NAV_GROUPS.map(
-    ([title, items, hint]) =>
-      `<div class="nav-group">${esc(title)}</div>${hint ? `<div class="nav-hint">${esc(hint)}</div>` : ""}${items
-        .map(item)
-        .join("")}`,
-  ).join("");
+};
+function renderNav(active) {
+  if (active != null) navActive = active;
+  const g = state.games.find((x) => x.id === state.game);
+  $("#nav").innerHTML = navHtml({
+    groups: NAV_GROUPS,
+    active: navActive,
+    collapsed: navFold,
+    badges: state.navBadges,
+    badgeTitles: navBadgeTitles(),
+    query: navQuery,
+    hrefFor: sectionHref,
+    disabledFor: (id) => (id === "script" || id === "examples") && !g?.script_api,
+  });
   $("#build").textContent = g?.current_build ? `build ${g.current_build} · ${g.patch_version || ""}` : "not indexed";
+}
+
+// Fold + filter wiring, bound ONCE on the container (delegated), so the periodic re-render of #nav
+// can never unbind it. The filter input lives OUTSIDE #nav, so re-rendering the list never disturbs
+// the text the user is typing into it.
+function bindNav() {
+  $("#nav").addEventListener("click", (e) => {
+    const head = e.target.closest("[data-nav-group]");
+    if (!head) return;
+    const title = head.dataset.navGroup;
+    if (navFold.has(title)) navFold.delete(title); else navFold.add(title);
+    try { localStorage.setItem(NAV_COLLAPSE_KEY, JSON.stringify([...navFold])); } catch { /* not persisted is fine */ }
+    renderNav();
+  });
+  const f = $("#nav-filter");
+  if (!f) return;
+  f.addEventListener("input", () => { navQuery = f.value; renderNav(); });
+  // Enter jumps to the first surviving section, so the filter is a way to REACH a page, not just find it.
+  f.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") { f.value = ""; navQuery = ""; renderNav(); return; }
+    if (e.key !== "Enter") return;
+    const first = $("#nav").querySelector("a.nav-link:not(.disabled)");
+    if (!first) return;
+    e.preventDefault();
+    location.hash = first.getAttribute("href").slice(1);
+  });
+}
+
+// ---- Live badge counts ---------------------------------------------------------------------
+// Four cheap reads in parallel (the same endpoints the Activity/Overview pages already use — no new
+// API surface) give the three numbers a person actually wants from outside the page: is anything
+// queued or running, are runs in flight, is a machine held. A change re-renders only #nav, and only
+// when a number actually MOVED, so an idle install costs no render churn.
+let navBadgeTimer = null;
+async function refreshNavBadges() {
+  try {
+    const [jobs, hosts, builds, tests] = await Promise.all([
+      api("/jobs", { status: "active" }).catch(() => []),
+      api("/hosts").catch(() => []),
+      api("/builds", { active: true }).catch(() => []),
+      api("/test-runs", { state: "running" }).catch(() => []),
+    ]);
+    const queued = jobs.filter((j) => j.status === "queued").length;
+    state.navBadgeDetail = {
+      queued, running: jobs.length - queued, builds: builds.length, tests: tests.length,
+      leased: hosts.filter((h) => h.lock).length, hosts: hosts.length,
+    };
+    const next = { jobs: jobs.length, activity: builds.length + tests.length, hosts: state.navBadgeDetail.leased };
+    const moved = Object.keys(next).some((k) => next[k] !== state.navBadges[k]);
+    state.navBadges = next;
+    // Numbers moved: repaint the LIST only (the filter input lives outside #nav, so it keeps its focus
+    // and its text). An unmoved poll repaints nothing, so an idle install costs no render churn.
+    if (moved) renderNav();
+  } catch { /* badges are decoration: a failed poll must never break the page */ }
+}
+function startNavBadges() {
+  // The first fetch is route()'s (boot() ends by calling it); this only owns the SLOW path — a timer
+  // for a tab left open, plus a catch-up the moment a backgrounded tab is looked at again. A hidden
+  // tab polls nothing, so an install nobody is watching costs no requests.
+  clearInterval(navBadgeTimer);
+  navBadgeTimer = setInterval(() => { if (!document.hidden) refreshNavBadges(); }, 20000);
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) refreshNavBadges(); });
 }
 
 // A stale tab loaded with `?verdict=…` in location.search is the signature of the old native-GET
@@ -1099,6 +1239,9 @@ async function route() {
   }
   const [section = "search", ...rest] = parts;
   renderNav(section);
+  // Refresh the counts on every navigation, not just on the timer: an action the user just took (queue
+  // a job, claim a host) then shows up the moment they move, instead of up to 20 s later.
+  refreshNavBadges();
   document.title = "Source 2 Docs"; // a fresh page resets the tab title (job pages re-set it below)
   clearTimeout(liveTimer); // any auto-refresh from the previous page stops now
   liveTimer = null;
@@ -2771,6 +2914,8 @@ async function boot() {
     e.preventDefault();
     go([state.game, "search"], { q: $("#q").value.trim() });
   });
+  bindNav();           // fold toggles + the section filter (delegated, bound once)
+  startNavBadges();    // live counts on the Jobs / Activity / Hosts group headers
   document.addEventListener("keydown", (e) => {
     if (e.key === "/" && document.activeElement.tagName !== "INPUT" && document.activeElement.tagName !== "TEXTAREA") {
       e.preventDefault();
