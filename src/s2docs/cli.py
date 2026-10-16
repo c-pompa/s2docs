@@ -685,8 +685,12 @@ def _cmd_learning(args: argparse.Namespace) -> int:
         if args.learning_cmd == "rewrite-eval":
             from s2docs.learning import rewrite_eval as RE
 
-            out = RE.evaluate()                             # RE.main's own 0/1/2 contract, mapped below
-            mapped = _map_gate_exit(out["code"])            # could-not-evaluate (2) -> EXIT_PARTIAL (6)
+            spec = getattr(args, "rewriter", None)
+            # Lazy: the import path is only resolved when --rewriter is given. A bad path (or a
+            # callable that raises) surfaces as RewriteEvalError -> EXIT_PARTIAL (6), never a traceback.
+            rewriter = RE.load_rewriter(spec) if spec else None
+            out = RE.evaluate(rewriter=rewriter)             # RE.main's own 0/1/2 contract, mapped below
+            mapped = _map_gate_exit(out["code"])             # could-not-evaluate (2) -> EXIT_PARTIAL (6)
             if getattr(args, "json", False):
                 print(json.dumps({"schema": "s2docs/v1", "rewrite_eval": out}))
             else:
@@ -1132,6 +1136,16 @@ def main(argv: list[str] | None = None) -> int:
     q = lc.add_parser("rewrite-eval",
                       help="Measure the rewriter over the frozen eval set (exit 6 when it cannot evaluate)")
     q.add_argument("--json", action="store_true", help="Machine-readable output")
+    q.add_argument("--rewriter", metavar="MODULE:FUNCTION",
+                   help="Score a supplied rewriter -- any callable f(text)->Rewrite, e.g. a trained "
+                        "model (dotted import path, 'pkg.module:function') -- as a FOURTH 'model' "
+                        "condition alongside baseline/rewrite/oracle. ACCEPTANCE RULE: with "
+                        "--rewriter the exit code is decided on the model's score, and the floor is "
+                        "the deterministic rewriter's recall@5 (0.40) -- a model must BEAT the "
+                        "deterministic rewriter to be adopted; equal is not beating it. Without "
+                        "--rewriter the gate is decided on the deterministic condition, exactly as "
+                        "before. A path that cannot be imported, or a callable that raises, exits 6 "
+                        "(could not evaluate) -- never a pass, never a traceback.")
     p.set_defaults(fn=_cmd_learning)
 
     p = sub.add_parser("test", help="In-game test-run records (mirror of the TEST STATUS HUD strip)")
