@@ -19,12 +19,15 @@ Everything here is offline and deterministic: the search function is a module-le
 
 from __future__ import annotations
 
-from s2docs.learning.rewrite import rewrite
+from s2docs.learning.rewrite import Rewrite, rewrite
 from s2docs.learning.rewrite_eval import (
     FLOORS,
     decide,
     eval_set,
+    evaluate,
+    load_rewriter,
     main,
+    report_lines,
     score,
 )
 
@@ -309,3 +312,211 @@ def test_cli_rewrite_eval_human_and_json(monkeypatch, tmp_path, capsys):
     payload = _json.loads(capsys.readouterr().out)
     assert payload["schema"] == "s2docs/v1"
     assert payload["rewrite_eval"]["conditions"]["oracle"]["recall@5"] == 1.0
+
+
+# --------------------------------------------------------------------- a supplied rewriter (the model)
+
+
+def _perfect(text):
+    """A local stand-in that maps 'what is alpha' -> 'alpha' (the key the canned search returns)."""
+    return Rewrite(query=text.replace("what is ", ""), game=None, dropped=(), notes=())
+
+
+def _junk(text):
+    """A stand-in whose query nothing can match — always below the floor."""
+    return Rewrite(query="zzz nothing matches this", game=None, dropped=(), notes=())
+
+
+def _boom(text):
+    """A stand-in that cannot run (model unavailable) — must be could-not-evaluate, never a pass."""
+    raise RuntimeError("inference exploded")
+
+
+def _oracle_and_deterministic_hits():
+    """A canned search that lets the oracle, the deterministic rewriter AND a prose-echoing supplied
+    rewriter meet their floors, so only the model condition can decide the outcome. Offline."""
+    rows = eval_set()["rows"]
+    prose = {r["prose"].strip(): r["expect_key"] for r in rows}
+    kw = {r["keywords"]: r["expect_key"] for r in rows}
+    rwh = {rewrite(r["prose"]).query: r["expect_key"] for r in rows}
+
+    def search(query, game=None, limit=10):
+        for table in (kw, rwh, prose):
+            if query in table:
+                return [{"key": table[query]}]
+        return []
+
+    return search
+
+
+def test_the_default_path_still_scores_only_the_three_conditions():
+    """No rewriter supplied -> exactly the three documented conditions; the record must not gain a
+    model row just because the seam exists."""
+    s = score(_rows(), search=_fake({}))
+    assert set(s["conditions"]) == {"baseline", "rewrite", "oracle"}
+
+
+def test_a_supplied_rewriter_adds_a_fourth_model_condition():
+    """A supplied callable joins as a FOURTH condition labelled 'model', scored on its own queries,
+    alongside the deterministic 'rewrite' condition which keeps using the built-in rewriter."""
+    fake = _fake({"alpha": ["alpha"], "beta": ["beta"]})
+    s = score(_rows(), search=fake, rewriter=_perfect)
+    assert set(s["conditions"]) == {"baseline", "rewrite", "oracle", "model"}
+    assert s["conditions"]["model"]["recall@5"] == 1.0
+    assert s["conditions"]["model"]["recall@1"] == 1.0
+
+
+def test_the_model_condition_uses_the_supplied_rewriter_not_the_deterministic_one():
+    """The seam is observable: the model condition searches with the supplied callable's query; the
+    rewrite condition still searches with the deterministic rewriter's output."""
+    calls = []
+
+    def spy(query, game=None, limit=10):
+        calls.append(query)
+        return []
+
+    score(_rows(), search=spy, rewriter=_perfect)
+    assert "alpha" in calls                     # model: the supplied rewriter said 'alpha'
+    assert "alpha" in calls and "what is alpha" in calls  # baseline prose still recorded too
+
+
+def test_a_perfect_rewriter_passes_and_a_junk_rewriter_exits_one(capsys):
+    """The acceptance rule end to end: oracle and the deterministic rewriter hold their floors, so the
+    decision rides entirely on the model. Perfect -> 0; junk (below the 0.40 floor) -> 1."""
+    assert main([], search=_oracle_and_deterministic_hits(), rewriter=_perfect) == 0
+
+    capsys.readouterr()
+    rc = main([], search=_oracle_and_deterministic_hits(), rewriter=_junk)
+    err = capsys.readouterr().err
+    assert rc == 1
+    assert "model" in err.lower()
+
+
+def test_decide_requires_the_model_to_strictly_beat_the_deterministic_floor():
+    """Equal-to is NOT beating: a model exactly at the deterministic floor is rejected (exit 1)."""
+    scores = {"conditions": {"baseline": {"recall@5": 0.20},
+                             "rewrite": {"recall@5": 0.40},
+                             "oracle": {"recall@5": 1.00},
+                             "model": {"recall@5": 0.40}}}
+    code, reason = decide(scores)
+    assert code == 1
+    assert reason is not None and "model" in reason
+
+
+def test_decide_passes_when_the_model_beats_the_deterministic_floor():
+    scores = {"conditions": {"baseline": {"recall@5": 0.20},
+                             "rewrite": {"recall@5": 0.40},
+                             "oracle": {"recall@5": 1.00},
+                             "model": {"recall@5": 0.60}}}
+    assert decide(scores) == (0, None)
+
+
+def test_a_raising_rewriter_is_could_not_evaluate_not_a_pass(capsys):
+    """A model that raises is 'could not evaluate' (module code 2), never a stack trace and never a
+    pass — an unavailable model must not be silently scored as a pile of zeros."""
+    rc = main([], search=_fake({}), rewriter=_boom)
+    err = capsys.readouterr().err
+    assert rc == 2
+    assert "COULD NOT EVALUATE" in err
+    assert "Traceback" not in err
+
+
+def test_evaluate_reports_a_model_floor_equal_to_the_deterministic_floor():
+    """The result exposes the model's floor (the deterministic rewrite floor, 0.40) so the report can
+    show it without mutating the frozen FLOORS constant."""
+    out = evaluate(search=_fake({}), rewriter=_perfect)
+    assert out["floors"]["model"] == FLOORS["rewrite"] == 0.40
+    assert FLOORS == {"baseline": 0.20, "rewrite": 0.40, "oracle": 1.00}   # unchanged
+
+
+def test_the_four_condition_table_renders():
+    """The human report must show all four condition rows, including the model."""
+    out = evaluate(search=_fake({}), rewriter=_perfect)
+    text = "\n".join(report_lines(out))
+    assert "model" in text.lower()
+    for name in ("baseline", "rewrite", "oracle", "model"):
+        assert name in text.lower()
+
+
+def test_load_rewriter_resolves_a_real_module():
+    fn = load_rewriter("tests.fake_rewriter:echo_prose")
+    assert callable(fn)
+    assert fn("  HOW do I make  a prop ").query == "how do i make a prop"
+
+
+def test_load_rewriter_rejects_a_bad_spec_and_an_unimportable_module():
+    from s2docs.learning.rewrite_eval import RewriteEvalError
+
+    for spec in ("nocolon", "no_such_pkg_xyz:nope", "tests.fake_rewriter:missing_attr"):
+        try:
+            load_rewriter(spec)
+        except RewriteEvalError:
+            continue
+        raise AssertionError(f"{spec!r} should not resolve")
+
+
+# --------------------------------------------------------------------- the CLI --rewriter flag
+
+
+def _cli_search_hitting_prose_keywords_and_rewrite():
+    """Lets the oracle, the deterministic rewriter AND (via echo_prose's query) a supplied model all
+    meet their floors, so the model's own score is what decides the exit code."""
+    from s2docs.learning import rewrite_eval
+
+    rows = rewrite_eval.eval_set()["rows"]
+    prose = {r["prose"].strip().lower(): r["expect_key"] for r in rows}
+    kw = {r["keywords"]: r["expect_key"] for r in rows}
+    rwh = {rewrite(r["prose"]).query: r["expect_key"] for r in rows}
+
+    def search(query, game=None, limit=10):
+        for table in (kw, rwh, prose):
+            if query in table:
+                return [{"key": table[query]}]
+        return []
+
+    return search
+
+
+def test_cli_rewriter_scored_from_an_import_path_renders_four_conditions(monkeypatch, tmp_path, capsys):
+    from s2docs.learning import rewrite_eval
+
+    monkeypatch.setattr(rewrite_eval, "_default_search", _cli_search_hitting_prose_keywords_and_rewrite())
+    rc = _run_cli(monkeypatch, tmp_path,
+                  ["learning", "rewrite-eval", "--rewriter", "tests.fake_rewriter:echo_prose"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "model" in out.lower()
+
+
+def test_cli_rewriter_below_the_floor_exits_one(monkeypatch, tmp_path, capsys):
+    from s2docs.learning import rewrite_eval
+
+    monkeypatch.setattr(rewrite_eval, "_default_search", _oracle_and_deterministic_hits())
+    rc = _run_cli(monkeypatch, tmp_path,
+                  ["learning", "rewrite-eval", "--rewriter", "tests.fake_rewriter:junk"])
+    assert rc == 1
+    assert "model" in capsys.readouterr().err.lower()
+
+
+def test_cli_unimportable_rewriter_exits_six(monkeypatch, tmp_path, capsys):
+    from s2docs.learning import rewrite_eval
+
+    monkeypatch.setattr(rewrite_eval, "_default_search", _fake({}))
+    rc = _run_cli(monkeypatch, tmp_path,
+                  ["learning", "rewrite-eval", "--rewriter", "no_such_pkg_xyz:nope"])
+    err = capsys.readouterr().err
+    assert rc == 6
+    assert "COULD NOT EVALUATE" in err
+    assert "Traceback" not in err
+
+
+def test_cli_rewriter_that_raises_exits_six_without_a_traceback(monkeypatch, tmp_path, capsys):
+    from s2docs.learning import rewrite_eval
+
+    monkeypatch.setattr(rewrite_eval, "_default_search", _fake({}))
+    rc = _run_cli(monkeypatch, tmp_path,
+                  ["learning", "rewrite-eval", "--rewriter", "tests.fake_rewriter:boom"])
+    err = capsys.readouterr().err
+    assert rc == 6
+    assert "COULD NOT EVALUATE" in err
+    assert "Traceback" not in err

@@ -11,6 +11,18 @@ Three retrieval conditions are scored over the same rows:
     rewrite   = the deterministic rewriter's query+game   (what we built)
     oracle    = the curated keyword form, game-scoped      (upper bound: perfect rewriting)
 
+A *fourth* condition, ``model``, joins when a caller supplies its own rewriter — the seam a fine-tune
+is scored through. ``score``/``evaluate``/``main`` take a ``rewriter`` callable (``f(text) -> Rewrite``)
+and the CLI exposes it as ``--rewriter pkg.module:function``. The supplied callable is scored as an
+additional condition; the ``rewrite`` condition keeps measuring the built-in deterministic rewriter, so
+the two can be compared directly on the same frozen rows.
+
+**Acceptance rule.** With a supplied rewriter the exit code is decided on the *model's* score, and the
+model's floor is the deterministic rewriter's own recall@5 (0.40). A model must **beat** the
+deterministic rewriter to be adopted — equal-to is not beating it, so that comparison is strict. When
+no rewriter is supplied, behaviour is exactly as before: the gate is decided on the deterministic
+``rewrite`` condition.
+
 If ``oracle`` is high and ``rewrite`` is low, the rewriter is the problem, not the corpus. If
 ``oracle`` is also low, the corpus changed underneath and no rewriter can be judged — that is
 *could-not-evaluate*, not a rewrite regression.
@@ -37,13 +49,19 @@ import sys
 import urllib.error
 import urllib.parse
 import urllib.request
-from importlib import resources
+from collections.abc import Callable
+from importlib import import_module, resources
+from typing import cast
 
 from s2docs.config import DEFAULT_PUBLIC_URL, get_settings
-from s2docs.learning.rewrite import rewrite
+from s2docs.learning.rewrite import Rewrite, rewrite
 
-__all__ = ["FLOORS", "K", "RewriteEvalError", "eval_set", "score", "decide", "evaluate",
-           "report_lines", "main"]
+__all__ = ["FLOORS", "K", "RewriteEvalError", "eval_set", "load_rewriter", "score", "decide",
+           "evaluate", "report_lines", "main"]
+
+# The rewriter seam: anything that turns prose into a ``Rewrite`` (the deterministic function, or a
+# trained model). Named here so the pluggable parameters read the same everywhere.
+Rewriter = Callable[[str], Rewrite]
 
 # The measured baselines, recorded as floors. Measured on 2026-10-16 against the live index
 # (http://10.88.15.208:8812/api/search), recall@5: baseline (prose, unscoped) 0.20, deterministic
@@ -58,12 +76,38 @@ _LABELS: dict[str, str] = {
     "baseline": "baseline (prose, unscoped)",
     "rewrite": "rewrite (deterministic)",
     "oracle": "oracle (curated kw, scoped)",
+    "model": "model (supplied rewriter)",
 }
 
 
 class RewriteEvalError(RuntimeError):
     """Could not evaluate: a declared input (the eval set, or the live index) was missing or
     unreadable — an error, never a pass. The analogue of ``gate.GateError``."""
+
+
+def load_rewriter(spec: str) -> Rewriter:
+    """Resolve ``'pkg.module:function'`` to a rewriter callable, or raise ``RewriteEvalError``.
+
+    Lazy and total: a bad spec, an unimportable module, a missing attribute, a non-callable, or an
+    exception raised *inside* the callable all become a ``RewriteEvalError`` (could-not-evaluate). A
+    model that is unavailable must never be scored as a pile of zeros and reported as a pass — it is
+    'could not evaluate', and the CLI maps that to exit 6.
+    """
+    if ":" not in spec:
+        raise RewriteEvalError(f"--rewriter must be 'module:function', got {spec!r}")
+    module_name, _, attr = spec.partition(":")
+    if not module_name or not attr:
+        raise RewriteEvalError(f"--rewriter must be 'module:function', got {spec!r}")
+    try:
+        module = import_module(module_name)
+    except Exception as exc:                                  # ImportError, or a module that fails to run
+        raise RewriteEvalError(f"cannot import --rewriter module {module_name!r}: {exc}") from exc
+    fn = getattr(module, attr, None)
+    if fn is None:
+        raise RewriteEvalError(f"--rewriter {spec!r}: module {module_name!r} has no {attr!r}")
+    if not callable(fn):
+        raise RewriteEvalError(f"--rewriter {spec!r} resolved to {type(fn).__name__}, not a callable")
+    return cast(Rewriter, fn)
 
 
 def eval_set() -> dict:
@@ -110,17 +154,40 @@ def _conditions():
     }
 
 
-def score(rows: list[dict], *, search=None, k: int = K) -> dict:
-    """Score all three conditions over ``rows`` and return per-condition metrics + the fixable misses.
+def _model_condition(rewriter: Rewriter):
+    """The fourth condition: the supplied rewriter, with its own exceptions recast as
+    ``RewriteEvalError`` so a model that cannot run is could-not-evaluate, not a crash or a zero."""
+    def cond(row):
+        try:
+            rw = rewriter(row["prose"])
+        except RewriteEvalError:
+            raise
+        except Exception as exc:
+            raise RewriteEvalError(f"supplied rewriter raised on row {row['id']!r}: {exc}") from exc
+        return rw.query, rw.game
+
+    return cond
+
+
+def score(rows: list[dict], *, search=None, k: int = K, rewriter: Rewriter = rewrite) -> dict:
+    """Score the conditions over ``rows`` and return per-condition metrics + the fixable misses.
 
     ``search`` is the injectable seam (default ``_default_search``); tests pass canned hits so this
-    runs with no server. Returns ``{"n", "conditions": {name: {recall@1, recall@5, mrr, per}},
-    "fixable": [...]}`` where ``per`` is one ``{"id", "rank"}`` per row (rank ``None`` = miss)."""
+    runs with no server. ``rewriter`` is the pluggable rewriter seam; it *defaults to the built-in
+    deterministic* ``rewrite``, so omitting it changes nothing. Pass a different callable (a trained
+    model, say) to score it as an additional ``model`` condition alongside the deterministic
+    ``rewrite`` condition — the two are then directly comparable on the same rows.
+
+    Returns ``{"n", "conditions": {name: {recall@1, recall@5, mrr, per}}, "fixable": [...]}`` where
+    ``per`` is one ``{"id","rank"}`` per row (rank ``None`` = miss)."""
     do_search = search if search is not None else _default_search
     n = len(rows)
+    conds = _conditions()
+    if rewriter is not rewrite:                 # an explicitly supplied model joins as a fourth condition
+        conds["model"] = _model_condition(rewriter)
     conditions: dict[str, dict] = {}
     ranks: dict[str, dict[str, int | None]] = {}
-    for name, cond in _conditions().items():
+    for name, cond in conds.items():
         hits1 = hits5 = 0
         rr = 0.0
         per: list[dict] = []
@@ -160,25 +227,46 @@ def score(rows: list[dict], *, search=None, k: int = K) -> dict:
 
 
 def decide(scores: dict, *, floors: dict[str, float] | None = None) -> tuple[int, str | None]:
-    """The gate: ``(exit_code, reason)``. Oracle first — it is the corpus canary."""
+    """The gate: ``(exit_code, reason)``. Oracle first — it is the corpus canary.
+
+    With no supplied rewriter this is decided on the deterministic ``rewrite`` condition (at or above
+    its floor passes). With a supplied rewriter the gate is decided on the ``model`` condition, whose
+    floor is the deterministic rewriter's recall@5: **a model must beat the deterministic rewriter to
+    be adopted, and equal-to is not beating it** — so that comparison is strict (``<=`` fails)."""
     f = floors or FLOORS
     conds = scores["conditions"]
     oracle = conds["oracle"]["recall@5"]
     if oracle < f["oracle"]:
         return 2, (f"oracle recall@5 {oracle:.0%} < floor {f['oracle']:.0%} — the corpus or the index "
                    "changed underneath; the rewriter cannot be judged")
+    if "model" in conds:
+        model = conds["model"]["recall@5"]
+        det = conds["rewrite"]["recall@5"]
+        floor = f["rewrite"]
+        if model <= floor:
+            return 1, (f"model recall@5 {model:.0%} <= deterministic floor {floor:.0%} "
+                       f"(deterministic rewriter scored {det:.0%}) — a model must BEAT the "
+                       "deterministic rewriter to be adopted; equal is not beating it")
+        return 0, None
     rw = conds["rewrite"]["recall@5"]
     if rw < f["rewrite"]:
         return 1, f"rewrite recall@5 {rw:.0%} < floor {f['rewrite']:.0%}"
     return 0, None
 
 
-def evaluate(*, search=None, rows: list[dict] | None = None) -> dict:
-    """Score the eval set and apply the gate. A JSON-friendly result for the CLI."""
+def evaluate(*, search=None, rows: list[dict] | None = None, rewriter: Rewriter | None = None) -> dict:
+    """Score the eval set and apply the gate. A JSON-friendly result for the CLI.
+
+    ``rewriter`` is the optional pluggable rewriter (``f(text) -> Rewrite``). ``None`` keeps the
+    three-condition behaviour; a callable adds the fourth ``model`` condition and makes the gate
+    decide on it."""
     data = eval_set()
     rws = rows if rows is not None else data["rows"]
-    scores = score(rws, search=search)
+    scores = score(rws, search=search, rewriter=rewriter if rewriter is not None else rewrite)
     code, reason = decide(scores)
+    floors = dict(FLOORS)
+    if "model" in scores["conditions"]:            # the model's floor is the deterministic floor
+        floors["model"] = FLOORS["rewrite"]
     return {
         "code": code,
         "reason": reason,
@@ -186,17 +274,20 @@ def evaluate(*, search=None, rows: list[dict] | None = None) -> dict:
         "known_gaps": len(data["known_gaps"]),
         "conditions": {name: {kk: vv for kk, vv in metrics.items() if kk != "per"}
                        for name, metrics in scores["conditions"].items()},
-        "floors": dict(FLOORS),
+        "floors": floors,
         "fixable": scores["fixable"],
     }
 
 
 def report_lines(result: dict) -> list[str]:
-    """The human report: the three-condition table, then the fixable misses (rewriter missed, oracle
-    hit). Also used by the CLI, so the human view has exactly one definition."""
+    """The human report: the condition table (three rows, or four with a supplied rewriter), then the
+    fixable misses (rewriter missed, oracle hit). Also used by the CLI, so the human view has exactly
+    one definition."""
     lines = [f"rewrite-eval: {result['n']} rows + {result['known_gaps']} known gaps", ""]
     lines.append(f"{'condition':32} {'recall@1':>9} {'recall@5':>9} {'MRR':>7}   floor")
     for name, label in _LABELS.items():
+        if name not in result["conditions"]:       # only render conditions actually scored
+            continue
         c = result["conditions"][name]
         lines.append(f"{label:32} {c['recall@1']:9.0%} {c['recall@5']:9.0%} {c['mrr']:7.3f}"
                      f"   {result['floors'][name]:.0%}")
@@ -213,10 +304,13 @@ def report_lines(result: dict) -> list[str]:
     return lines
 
 
-def main(argv: list[str] | None = None, *, search=None) -> int:
-    """Standalone entry point (``python -m`` / tests). Prints the report and returns the gate code."""
+def main(argv: list[str] | None = None, *, search=None, rewriter: Rewriter | None = None) -> int:
+    """Standalone entry point (``python -m`` / tests). Prints the report and returns the gate code.
+
+    ``rewriter`` is the optional pluggable rewriter; a callable raised from it surfaces here as
+    ``COULD NOT EVALUATE`` (code 2) rather than a traceback."""
     try:
-        result = evaluate(search=search)
+        result = evaluate(search=search, rewriter=rewriter)
     except RewriteEvalError as exc:
         print(f"COULD NOT EVALUATE: {exc}", file=sys.stderr)
         return 2
