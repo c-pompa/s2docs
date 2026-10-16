@@ -176,18 +176,23 @@ def _case(case_id: str) -> dict:
 
 
 def _seed_two_corrections(db, tmp_path):
-    """Two failed jobs over an existing index, both whose goal the index can *ground*.
+    """Two failed jobs with DISTINCT subjects that both retrieve ``mp_roundtime``, so the only thing
+    that decides whether the gate passes is the human's ``expected`` value.
 
-    ``Repository.search`` ANDs up to 12 query tokens (``build_match_query``), so the correction's
-    question — ``title`` + ``target`` + ``Purpose:``/``Expected:`` lines — is made retrievable by
-    padding the title with twelve ``roundtime`` tokens, which fills the token budget before the
-    literals ``Purpose``/``Expected`` are reached. Both queries therefore return ``mp_roundtime``;
-    the only thing that decides pass/fail is the human's ``expected`` value.
+    The subjects must differ or ``promote`` correctly calls the second one a duplicate — the same
+    question with a different answer must not be filed twice. Verified against the mini index:
+    ``roundtime`` and ``mp_roundtime`` both return ``mp_roundtime`` at rank 1.
+
+    (This helper used to make the two rows differ only in their ``Purpose:``/``Expected:`` brief and
+    pad the title with twelve ``roundtime`` tokens to exhaust ``build_match_query``'s 12-token budget.
+    That padding was a workaround for the defect ``promote`` had — filing the whole goal brief as the
+    query — so it is gone along with the defect.)
     """
     out = []
-    for purpose in ("alpha", "beta"):        # distinct questions -> no dedupe
-        job = _enqueue(db, origin="human", title=" ".join(["roundtime"] * 12),
-                       target="roundtime", purpose=purpose, expected=purpose)
+    for title in ("roundtime", "mp_roundtime"):        # distinct subjects -> no dedupe
+        job = _enqueue(db, origin="human", title=title,
+                       target=f"ws/{title}@abc123",
+                       purpose="verify the round timer", expected="the timer is 1.5s")
         jobs.start(db, job.id, worker="ws/learning")
         run = test_runs.start(db, "iso_test")
         jobs.link(db, job.id, kind="test_run", ref_id=run.id)
@@ -197,3 +202,33 @@ def _seed_two_corrections(db, tmp_path):
                     summary={"what": "w", "why": "y", "learned": "l", "next": "n"})
         out.append(jobs.get(db, job.id))
     return out
+
+
+def test_promote_files_the_subject_not_the_whole_brief(tmp_path: Path, seeded_db):
+    """The defect this fixes. ``corrections`` records the run's whole goal text — title, target, then the
+    ``Purpose:``/``Expected:`` brief — and ``Repository.search`` ANDs up to 12 query tokens
+    (``build_match_query``). Filed verbatim as the query, a real correction demands that a document
+    contain every prose word in the brief *and* the target's branch/sha, so the case scores nothing for
+    a reason that has nothing to do with the human's answer. The promoted case must carry the goal's
+    SUBJECT — which is what ``promote()`` does when the caller does not hand it a query."""
+    db = seeded_db
+    job = _enqueue(db, origin="human", title="roundtime", target="ws/roundtime@abc123",
+                   purpose="verify the round timer", expected="the timer is 1.5s")
+    jobs.start(db, job.id, worker="ws/learning")
+    run = test_runs.start(db, "iso_test")
+    jobs.link(db, job.id, kind="test_run", ref_id=run.id)
+    evidence.add(db, kind="human-confirm", test_run_id=run.id, ref=job.id,
+                 data={"verdict": "fail", "source": "chat"})
+    jobs.finish(db, job.id, status="failed",
+                summary={"what": "w", "why": "y", "learned": "l", "next": "n"})
+
+    out = review.promote(db, job.id, expected="mp_roundtime")
+
+    # the filed query is the subject line — not the brief, not the target's sha
+    assert out["query"] == "roundtime", f"filed the brief as the query: {out['query']!r}"
+    assert "Purpose" not in out["query"] and "Expected" not in out["query"]
+    assert "abc123" not in out["query"]
+
+    # and because it is the subject, the case is actually retrievable — the whole point
+    s = gate.run(db, questions=[_case(out["id"])], record=False)
+    assert s["recall"] == 1.0, "a promoted case must be retrievable by its subject"

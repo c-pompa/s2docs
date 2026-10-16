@@ -68,16 +68,25 @@ def _write_golden():
 
 
 def test_corpus_is_behaviour_one_block_per_approved_job(tmp_path, monkeypatch):
-    """Plain text, `## job <id> — <title>` blocks carrying request/proved/learned/next — and it
-    self-reports how many blocks and bytes it produced (lab-4 chunks it at seq_len 256)."""
+    """Plain text, `## job <id> — <title>` blocks carrying request/proved/learned/next — and PURE
+    blocks: every byte is training text, so no manifest line lives in it. The readiness numbers (which
+    lab-4 needs, since it needs >= 8 chunks at seq_len 256 or it exits) are reported beside the file,
+    where an operator reads them before a run rather than from a failed one."""
     _seed_approved(tmp_path, title="occluder wire")
     _seed_approved(tmp_path, title="also approved")
     db = db_for(tmp_path)
 
-    corpus = Path(export.corpus(db, origin="human")).read_text()
+    path = export.corpus(db, origin="human")
+    corpus = Path(path).read_text()
     assert corpus.lower().count("## job") == 2
     assert "learned" in corpus.lower() and "proved:" in corpus.lower()
-    assert "job block" in corpus.lower() and "bytes" in corpus.lower(), "the file states its size"
+    assert corpus.lstrip().startswith("## job"), "the corpus is pure blocks, with no manifest line"
+
+    stats = export.corpus_stats(path)
+    assert stats["blocks"] == 2
+    assert stats["bytes"] == len(corpus.encode("utf-8"))
+    assert stats["min_chunks"] == 8 and stats["val_chunks"] == 5
+    assert stats["lab4_ready"] is False, "two small blocks are far short of lab4's 8-chunk minimum"
 
 
 def test_corpus_skips_a_run_no_human_judged(tmp_path, monkeypatch):
@@ -151,7 +160,10 @@ def test_everything_writes_all_three_in_the_consumers_shapes(tmp_path, monkeypat
         assert Path(out[key]).exists() or key == "dir"
 
     corpus = Path(out["corpus"]).read_text()
-    assert "learned" in corpus.lower() and "## job" in corpus.lower()
+    assert "learned" in corpus.lower() and corpus.lstrip().startswith("## job")
+    # the readiness numbers travel with the export result, not inside the training text
+    assert out["corpus_stats"]["blocks"] == 1
+    assert out["corpus_stats"]["lab4_ready"] is False
     problems = json.loads(Path(out["problems"]).read_text())
     assert problems and set(problems[0]) >= {"problem", "answer", "checker"}
     cases = [json.loads(line) for line in Path(out["cases"]).read_text().splitlines() if line.strip()]

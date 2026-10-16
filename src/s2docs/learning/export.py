@@ -54,9 +54,11 @@ def corpus(db: Database, *, origin: str = "human", since_days: int | None = None
     own close-out words. Deliberately NOT the indexed API facts (those stay in RAG) and NOT a raw
     transcript dump (trajectory distillation beats raw-log prompting).
 
-    lab4 chunks this at ``seq_len`` (256) and holds the last 5 chunks out as val, so it needs ≥ 8 full
-    chunks of ~1 KB to run; the header line records how many blocks and approximate bytes this run
-    produced.
+    The file is PURE blocks — no manifest or count line — because every byte of it is training text and
+    a header would be a large fraction of a small corpus. lab4 chunks this at ``seq_len`` (256) and
+    holds the last 5 chunks out as val, so it needs >= 8 full chunks of ~1 KB *or it exits*, so
+    readiness is reported by ``corpus_stats()`` (and by ``everything()``) where an operator reads it
+    before a training run rather than from a failed one.
     """
     from s2docs.learning import _cutoff
 
@@ -78,17 +80,26 @@ def corpus(db: Database, *, origin: str = "human", since_days: int | None = None
             f"next: {s.get('next', '')}",
             "",
         ]))
-    body = "\n".join(blocks)
-    n_bytes = len(body.encode("utf-8"))
-    chunks = max(1, n_bytes // _CHUNK_BYTES)
-    header = (
-        f"# s2docs learning export — behaviour corpus: {len(blocks)} approved job block(s), "
-        f"~{n_bytes} bytes (~{chunks} chunk(s) at seq_len 256; lab4 needs >= {_MIN_CHUNKS} chunks "
-        f"and holds the last {_VAL_CHUNKS} out as val).\n\n"
-    )
     path = _dir() / "corpus.txt"
-    path.write_text(header + body, encoding="utf-8")
+    path.write_text("\n".join(blocks), encoding="utf-8")
     return path
+
+
+def corpus_stats(path: str | Path) -> dict:
+    """Blocks, bytes and the approximate chunk count of a written corpus.
+
+    The readiness number for whoever runs the training: lab4's ``load_corpus`` chunks at ``seq_len``
+    (256) and exits when it cannot find ``_MIN_CHUNKS`` full chunks, so a corpus too small to train on
+    should be obvious from the export instead of from a failed run. Reported here rather than inside
+    ``corpus.txt``, because that file is training text.
+    """
+    p = Path(path)
+    text = p.read_text(encoding="utf-8") if p.exists() else ""
+    n_bytes = len(text.encode("utf-8"))
+    chunks = max(1, n_bytes // _CHUNK_BYTES)
+    return {"blocks": text.count("## job"), "bytes": n_bytes, "chunks_approx": chunks,
+            "min_chunks": _MIN_CHUNKS, "val_chunks": _VAL_CHUNKS,
+            "lab4_ready": chunks >= _MIN_CHUNKS}
 
 
 def problems(db: Database, *, origin: str = "human") -> Path:
@@ -147,9 +158,11 @@ def cases(db: Database) -> Path:
 
 
 def everything(db: Database, *, origin: str = "human", since_days: int | None = None) -> dict:
-    """Run all three exports and return their paths."""
+    """Run all three exports and return their paths, plus the corpus readiness numbers."""
+    corpus_path = corpus(db, origin=origin, since_days=since_days)
     return {
-        "corpus": str(corpus(db, origin=origin, since_days=since_days)),
+        "corpus": str(corpus_path),
+        "corpus_stats": corpus_stats(corpus_path),
         "problems": str(problems(db, origin=origin)),
         "cases": str(cases(db)),
         "dir": str(_dir()),

@@ -7,7 +7,7 @@ Produced by `uv run s2docs learning export` into `$S2DOCS_DATA_DIR/learning/expo
 
 | file | consumer | shape |
 |---|---|---|
-| `corpus.txt` | `lab/lab4_distill/distill.py` — drop-in replacement for `lab/lab4_distill/corpus.txt` | plain text, one `## job <id> — <title>` block per approved run (request / proved / learned / next). The lab chunks it at `seq_len` (256) and holds the last 5 chunks out as val, so it needs ≥ 8 full chunks of ~1 KB each to run at all. |
+| `corpus.txt` | `lab/lab4_distill/distill.py` — drop-in replacement for `lab4_distill/corpus.txt` | plain text, one `## job <id> — <title>` block per approved run (request / proved / learned / next), and **nothing else**: every byte is training text, so there is no manifest or count line inside it. The lab chunks it at `seq_len` (256) and holds the last 5 chunks out as val, so it needs ≥ 8 full chunks of ~1 KB each or `load_corpus` exits. Read that readiness from the exporter's `corpus_stats` (`blocks`, `bytes`, `chunks_approx`, `lab4_ready`) — never from a failed training run. |
 | `problems.json` | `lab/lab5_grpo` | `[{"problem", "answer", "checker", "job_id", "evidence_ref"}]`. Every entry carries a checker, because an answer nothing can verify is a preference pair in disguise. |
 | `golden_cases.jsonl` | `scripts/eval/golden_set.jsonl` (then `split_golden.py`) | `{"id","category","prompt","checker","expected"}` |
 
