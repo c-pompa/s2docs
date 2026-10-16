@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
+import io
 import json
 import logging
 import os
@@ -39,6 +41,9 @@ _TEST_STATES = ("idle", "running", "pass", "fail")
 # (the service validates too, so a drift here is a 9, never a bad row).
 _JOB_FINISH_STATUSES = ("passed", "failed", "error", "cancelled", "inconclusive")
 _JOB_TERMINAL_STATUSES = ("passed", "failed", "error", "cancelled", "inconclusive")
+# Who asked for the run (mirrors models.JOB_ORIGINS; migration 0014). The learning loop reads the job
+# ledger by origin, so a synthetic caller must tag itself here or it inflates a training artifact.
+_JOB_ORIGINS = ("human", "agent", "driver", "eval", "probe", "warmup")
 
 
 def _parse_duration(value: str) -> int:
@@ -524,6 +529,158 @@ def _cmd_evidence(args: argparse.Namespace) -> int:
     return _fail(f"unknown evidence command {args.evidence_cmd!r}", EXIT_ERROR)
 
 
+def _human_learning_report(out: dict) -> list[str]:
+    return [f"jobs: {out['jobs_total']}  by origin: {json.dumps(out['jobs_by_origin'])}",
+            f"real usage: {out['real_usage_jobs']}  synthetic: {out['synthetic_jobs']}",
+            f"events: {out['events_total']}  learning dir: {out['learning_dir']}"]
+
+
+def _map_gate_exit(rc: int) -> int:
+    """Translate the eval gate's OWN exit codes into this repo's stable contract.
+
+    ``s2docs/learning/gate.py`` uses 0 pass · 1 regression · 2 could-not-evaluate (its ``main`` and
+    ``self_test`` return those). In THIS repo, ``2`` is EXIT_LOCKED (a host lease). So a
+    could-not-evaluate MUST be remapped to EXIT_PARTIAL (6): an agent branches on the code, and 2
+    would make it retry a lock that does not exist instead of fixing the missing/short golden set.
+    gate ``1`` (regression) is a domain failure and stays EXIT_ERROR (1). Documented in
+    docs/CLI_PLAN.md §2.
+    """
+    return {0: EXIT_OK, 1: EXIT_ERROR, 2: EXIT_PARTIAL}.get(rc, EXIT_ERROR)
+
+
+def _human_learning_digest(out: dict) -> list[str]:
+    """Report path, signal count and counts by class, plus the harness notes (rule 6: name the source)."""
+    lines = [f"report: {out['report']}", f"signals: {out['signals']}"]
+    classes = [f"  {klass}: {n}" for klass, n in sorted(out["counts"].items(), key=lambda kv: (-kv[1], kv[0]))]
+    lines += classes or ["  (no signals in the window)"]
+    lines += [f"  note: {n}" for n in out["notes"]]
+    return lines
+
+
+def _cmd_learning(args: argparse.Namespace) -> int:
+    """`s2docs learning`: the loop's read/measure/prepare surface over the job ledger.
+
+    Exit 6 (EXIT_PARTIAL) when a declared source could not be read (an empty artifact is worse than a
+    named skip) OR when the eval gate could not evaluate. Exit 3 for an unknown job on `promote`.
+    Exit 9 when SFT prep refuses for want of a baseline. `promote` treats a duplicate as EXIT_OK — a
+    double click is not an error.
+    """
+    from s2docs.learning import LearningSourceMissing
+    from s2docs.learning import harvest as H
+    from s2docs.learning import report as L
+    from s2docs.learning.gate import GateError
+    from s2docs.learning.sft import SftGateError
+
+    db = Database(get_settings().db_path)
+    try:
+        if args.learning_cmd == "report":
+            out = L(db, since_days=args.since_days)
+            return _emit(args, out, _human_learning_report(out))
+        if args.learning_cmd == "harvest":
+            origin = None if args.origin == "all" else args.origin
+            out = H.harvest(db, origin=origin, since_days=args.since_days,
+                            search=lambda q: H.search_terms(db, q))
+            human = [f"{k}: {v}" for k, v in out["counts"].items()] or ["nothing harvested"]
+            return _emit(args, out, human)
+        if args.learning_cmd == "digest":
+            from s2docs.learning import digest as D
+
+            out = D.digest(db, since_days=args.since_days)
+            if getattr(args, "json", False):
+                print(json.dumps({"schema": "s2docs/v1", **out}))
+            else:
+                for line in _human_learning_digest(out):
+                    print(line)
+            # The digest never raises for an unreadable source (that is its design) — it reports it in
+            # `notes`. At the CLI boundary a reported skip is not a pass: exit 6 and name it on stderr.
+            if out["notes"]:
+                return _fail("declared source unreadable: " + "; ".join(out["notes"]), EXIT_PARTIAL)
+            return EXIT_OK
+        if args.learning_cmd == "gate":
+            from s2docs.learning import gate as G
+
+            gate_argv = (["--self-test"] if args.self_test else []) + (["-v"] if args.learning_verbose else [])
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):           # gate.main prints human metrics to stdout
+                rc = G.main(gate_argv)
+            mapped = _map_gate_exit(rc)                     # gate 2 (could not evaluate) -> 6, never 2
+            lines = buf.getvalue().strip().splitlines()
+            if getattr(args, "json", False):
+                print(json.dumps({"schema": "s2docs/v1",
+                                  "gate": {"exit": rc, "exit_code": mapped, "output": lines}}))
+            else:
+                for line in lines:
+                    print(line)
+            return mapped
+        if args.learning_cmd == "sft":
+            from s2docs.learning import sft as S
+
+            out = S.prep(db, require_baseline=args.require_baseline, since_days=args.since_days)
+            rep = S.report(db)
+            human = [
+                f"examples: {out['examples']}  -> {out['dataset']}",
+                f"config: {out['config']}",
+                f"ready_to_train: {rep['ready_to_train']} (min {rep['min_examples']}, "
+                f"target {rep['target_examples']})  eval baseline recall: {rep['eval_baseline_recall']}",
+                rep["honest_note"],
+            ]
+            return _emit(args, {**out, "report": rep}, human)
+        if args.learning_cmd == "export":
+            from s2docs.learning import export as X
+
+            out = X.everything(db, since_days=args.since_days)
+            st = out["corpus_stats"]
+            human = [
+                f"corpus: {out['corpus']}  blocks={st['blocks']} bytes={st['bytes']} "
+                f"chunks~{st['chunks_approx']} lab4_ready={st['lab4_ready']} "
+                f"(needs {st['min_chunks']}, +{st['val_chunks']} val)",
+                f"problems: {out['problems']}",
+                f"cases: {out['cases']}",
+                f"dir: {out['dir']}",
+            ]
+            return _emit(args, out, human)
+        if args.learning_cmd == "exemplars":
+            from s2docs.learning import exemplar as E
+
+            out = E.export_approved(db, since_days=args.since_days)
+            human = [f"written: {len(out['written'])}  dir: {out['dir']}"]
+            human += [f"  {p}" for p in out["written"]]
+            # A skipped row is the guard working, not an error: report it, exit 0.
+            human += [f"  skipped {r['job_id']}: {'; '.join(r['reasons'])}" for r in out["skipped"]]
+            if not out["written"] and not out["skipped"]:
+                human.append("  (no approved confirmations in the window)")
+            return _emit(args, out, human)
+        if args.learning_cmd == "review":
+            from s2docs.learning import review as R
+
+            rows = R.queue(db, since_days=args.since_days)
+            human = [
+                f"{r['job_id']}  {r['failure_mode']:12}  promoted={r['promoted']}  "
+                f"{' '.join((r.get('question') or '').split())[:80]}"
+                for r in rows
+            ]
+            return _emit(args, {"rows": rows}, human or ["no corrections in the window"])
+        if args.learning_cmd == "promote":
+            from s2docs.learning import review as R
+
+            out = R.promote(db, args.job, expected=args.expect, query=args.query, checker=args.checker)
+            if out.get("appended"):
+                human = [f"appended: {out['id']}", f"query (the gate will search with): {out['query']!r}",
+                         f"expected: {out['expect_key']}"]
+            else:
+                human = [f"not appended ({out['reason']}): job {out['job_id']} is already a golden case"]
+            return _emit(args, out, human)          # a duplicate is EXIT_OK — a double click is not an error
+    except LearningSourceMissing as exc:
+        return _fail(str(exc), EXIT_PARTIAL)  # 6: a source was unreadable — a skip is not a pass
+    except KeyError as exc:                    # review.promote on a job with no correction row
+        return _fail(str(exc), EXIT_NOT_FOUND)
+    except SftGateError as exc:
+        return _fail(str(exc), EXIT_VALIDATION)  # 9: no eval baseline — refuse to prep a fine-tune
+    except GateError as exc:                    # export.cases(): the golden set is a declared source
+        return _fail(f"COULD NOT EVALUATE: {exc}", EXIT_PARTIAL)
+    return _fail(f"unknown learning command {args.learning_cmd!r}", EXIT_ERROR)
+
+
 def _human_test(run) -> list[str]:
     out = [f"{run.id}  {run.name}  {run.state}  step={run.step or '-'}  elapsed={run.elapsed_sec}s"]
     if run.host_id:
@@ -628,6 +785,7 @@ def _cmd_job(args: argparse.Namespace) -> int:
                 branch=args.branch,
                 commit=args.commit,
                 requested_by=args.requested_by,
+                origin=args.origin,
             )
             return _emit(args, {"job": job.model_dump()}, _human_job(job))
         if args.job_cmd == "list":
@@ -901,6 +1059,47 @@ def main(argv: list[str] | None = None) -> int:
     q.add_argument("evidence_id")
     p.set_defaults(fn=_cmd_evidence)
 
+    p = sub.add_parser("learning", help="Learning loop: harvest job outcomes into eval/training signal")
+    lc = p.add_subparsers(dest="learning_cmd", required=True)
+    q = lc.add_parser("report", help="Readiness: counts by origin, artifacts on disk")
+    q.add_argument("--since-days", type=int, default=None)
+    q.add_argument("--json", action="store_true", help="Machine-readable output")
+    q = lc.add_parser("harvest", help="Write the four artifacts from the job ledger")
+    q.add_argument("--since-days", type=int, default=None)
+    q.add_argument("--origin", default="human", choices=[*_JOB_ORIGINS, "all"])
+    q.add_argument("--json", action="store_true", help="Machine-readable output")
+    q = lc.add_parser("digest", help="Classify outcomes into signals, a report and lesson proposals")
+    q.add_argument("--since-days", type=int, default=30)
+    q.add_argument("--json", action="store_true", help="Machine-readable output")
+    q = lc.add_parser("gate", help="Score the golden-question eval (exit 6 when it cannot evaluate)")
+    q.add_argument("--self-test", action="store_true",
+                   help="Falsify the gate itself: a planted impossible expectation must fail it")
+    q.add_argument("-v", "--verbose", action="store_true", dest="learning_verbose",
+                   help="Print per-question pass/fail detail")
+    q.add_argument("--json", action="store_true", help="Machine-readable output")
+    q = lc.add_parser("sft", help="Build the SFT dataset + train config (trains nothing)")
+    q.add_argument("--require-baseline", action="store_true",
+                   help="Refuse to prepare without a recorded eval baseline (exit 9)")
+    q.add_argument("--since-days", type=int, default=None)
+    q.add_argument("--json", action="store_true", help="Machine-readable output")
+    q = lc.add_parser("export", help="Write the lab4/lab5 export artifacts (corpus, problems, cases)")
+    q.add_argument("--since-days", type=int, default=None)
+    q.add_argument("--json", action="store_true", help="Machine-readable output")
+    q = lc.add_parser("exemplars", help="One exemplar doc per approved confirmation (skips reported)")
+    q.add_argument("--since-days", type=int, default=None)
+    q.add_argument("--json", action="store_true", help="Machine-readable output")
+    q = lc.add_parser("review", help="The human correction queue: job id, failure mode, question, promoted")
+    q.add_argument("--since-days", type=int, default=None)
+    q.add_argument("--json", action="store_true", help="Machine-readable output")
+    q = lc.add_parser("promote", help="File a human's known answer as a frozen golden case")
+    q.add_argument("--job", required=True, help="Job id of the correction being answered")
+    q.add_argument("--expect", required=True, help="The expected key/keyword the run should have produced")
+    q.add_argument("--query", help="What the gate will search with (default: the derived subject of the "
+                                   "run's goal — not the whole brief, which nothing can match)")
+    q.add_argument("--checker", default="exact", help="Checker the labs use for this case (default: exact)")
+    q.add_argument("--json", action="store_true", help="Machine-readable output")
+    p.set_defaults(fn=_cmd_learning)
+
     p = sub.add_parser("test", help="In-game test-run records (mirror of the TEST STATUS HUD strip)")
     tc = p.add_subparsers(dest="test_cmd", required=True)
     q = tc.add_parser("start", help="Start a test session (claims the host lease if --host is given)")
@@ -937,6 +1136,15 @@ def main(argv: list[str] | None = None) -> int:
     q.add_argument("--confirm", action="store_true", help="The human iso_confirm gate decides pass/fail")
     q.add_argument("--screenshots", default="each_step", choices=["each_step", "on_request", "none"])
     q.add_argument("--watching", action="store_true", help="The user is watching this run live")
+    q.add_argument(
+        "--origin",
+        choices=_JOB_ORIGINS,
+        default=None,
+        help=(
+            "Who asked for this run (default: agent). The learning loop reads the ledger by origin: "
+            "tag tooling/driver/eval/probe runs so they cannot be mistaken for a person's."
+        ),
+    )
     q.add_argument("--branch")
     q.add_argument("--commit")
     q.add_argument("--requested-by", help="Coordinator session id")

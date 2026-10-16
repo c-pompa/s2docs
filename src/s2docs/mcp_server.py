@@ -837,6 +837,16 @@ def create_mcp_server(db: Database, workspace: Path | None = None) -> MCPServer:
         cleanup: Annotated[list[str] | None, Field(description="Things that must be gone at the end")] = None,
         requested_by: Annotated[str | None, Field(description="Coordinator session id")] = None,
         project_id: Annotated[str | None, Field(description="Project this job belongs to")] = None,
+        origin: Annotated[
+            str | None,
+            Field(
+                description=(
+                    "Who asked for this run: human | agent | driver | eval | probe | warmup "
+                    "(default agent). The learning loop reads the ledger by origin, so tag synthetic "
+                    "runs (driver/eval/probe/warmup) — an untagged repeat inflates a training artifact."
+                )
+            ),
+        ] = None,
     ) -> m.Job:
         """Enqueue a job (validated intake -> queued). The intake is the gate: every missing required field
         comes back in one error with a field list. Set `host_choice='ask'` to queue unassigned."""
@@ -860,6 +870,7 @@ def create_mcp_server(db: Database, workspace: Path | None = None) -> MCPServer:
                 cleanup=cleanup,
                 requested_by=requested_by,
                 project_id=project_id,
+                origin=origin,
             )
         )
 
