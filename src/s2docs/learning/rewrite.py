@@ -62,14 +62,14 @@ STOPWORDS: frozenset[str] = frozenset(
     not no nor yes very just also too any some all more most much many own same such only
     please want wanted need needed like get got gets use uses used using make makes made
     think thought know knows look looks help helps show shows shown tell tells say says said
-    research create creates created make also allow allows specific certain general thing things
+    research create creates created make also allow allows specific certain general thing things work
     """.split()
 )
 
 # Multi-word phrasings -> the engine's own term. Longest first so 'players info ui' wins over
 # 'player info'. Each entry cites (in tests/test_learning_rewrite.py) why it is real.
+# The 'see through walls' family is NOT here: it is sense-dependent (see _WALL_SENSE_PHRASES).
 _PHRASE_LIST: tuple[tuple[str, str], ...] = (
-    ("see through walls", "occluder"),
     ("behind a wall", "occluder"),
     ("middle of the screen", "panorama hud"),
     ("players info ui", "spectator"),
@@ -80,8 +80,28 @@ _PHRASE_LIST: tuple[tuple[str, str], ...] = (
 # Pre-sorted longest-first, deterministic.
 PHRASES: tuple[tuple[str, str], ...] = tuple(sorted(_PHRASE_LIST, key=lambda kv: (-len(kv[0]), kv[0])))
 
-# Single-token synonyms: a .dll is a code addon in Source 2.
-TOKEN_SYNONYMS: dict[str, str] = {"dll": "addon"}
+# What a user means by 'see through walls' depends on the SENSE, and the corpus indexes the two senses
+# under different terms:
+#   * SPECTATOR/player/outline intent -> xray  (spec_show_xray: "you can see player outlines ... through
+#     walls"). The map-compile term 'occluder' here retrieves r_csgo_sky_occluder (a skybox convar) — a miss.
+#   * MAP/VIS intent (visibility, compile, geometry) -> occluder (server:prop_static's "Vis Occluder",
+#     the precomputed-visibility system).
+# Longest first so 'see players through walls' wins over 'through walls'.
+_WALL_SENSE_PHRASES: tuple[str, ...] = (
+    "see players through walls", "see through walls", "through walls",
+)
+_SPECTATOR_SENSE: frozenset[str] = frozenset(
+    {"spectator", "spectators", "spec", "player", "players", "outline", "outlines", "xray", "x_ray",
+     "enemy", "teammate", "teammates", "silhouette", "glow", "hud"}
+)
+
+# Single-token synonyms: a .dll is a code addon in Source 2, and the corpus names the VIS system's
+# contributors ("all meshes are VIS contributors") where users write the verb 'contributes'.
+TOKEN_SYNONYMS: dict[str, str] = {
+    "dll": "addon",
+    "contributes": "contributor",
+    "contribute": "contributor",
+}
 
 # Explicit in-text game names. 'counter-strike'/'counter strike' are handled as substrings.
 _CS2_WORDS: frozenset[str] = frozenset({"cs2", "csgo", "counterstrike"})
@@ -102,8 +122,33 @@ _DOMAIN_VOCAB: frozenset[str] = frozenset(
         "spawn", "trigger", "nav", "cs_script", "weapon", "item", "particle", "material", "texture",
         "model", "map", "sound", "keyvalues", "hammer", "cs2", "deadlock", "citadel", "ability",
         "hero", "patron", "urn", "mp_roundtime", "mp_roundvtime", "dust2",
+        "xray", "vis", "visibility", "occluder", "contributor", "contributors",
     }
 )
+
+
+def _game_filter_tokens(game: str) -> frozenset[str]:
+    """The bare game NAMES that merely establish ``game`` — a filter, not a keyword.
+
+    Identifiers that contain a game name (``cs_script``, ``mp_roundtime``,
+    ``citadel_spectator_mode``) are NOT here: they are real content tokens and are never stripped.
+    """
+    if game == "cs2":
+        return _CS2_WORDS | {"counter", "strike"}  # 'counter-strike' tokenises to counter + strike
+    if game == "deadlock":
+        return _DEADLOCK_WORDS
+    return frozenset()
+
+
+def _wall_sense(raw: str) -> tuple[str, str]:
+    """Resolve the 'see through walls' sense from context: (corpus term, sense label).
+
+    Spectator/player/outline intent is the xray sense (spec_show_xray), everything else is the
+    map/vis occluder sense.
+    """
+    if set(_TOKEN_RE.findall(raw)) & _SPECTATOR_SENSE:
+        return "xray", "spectator/xray; spec_show_xray: see player outlines through walls"
+    return "occluder", "map/vis"
 
 
 def _score(tok: str) -> int:
@@ -153,6 +198,13 @@ def rewrite(text: str) -> Rewrite:
     # 1. Phrase synonyms, on the raw text (before stopword removal, so multi-word phrases that contain
     #    stopwords — 'middle of the screen' — still match).
     work = raw
+    # 1a. The sense-dependent 'see through walls' family: resolve against the whole raw text first.
+    for phrase in _WALL_SENSE_PHRASES:
+        pat = _phrase_pattern(phrase)
+        if pat.search(work):
+            target, sense = _wall_sense(raw)
+            work = pat.sub(target, work)
+            notes.append(f"synonym: {phrase} -> {target} (sense={sense})")
     for phrase, target in PHRASES:
         pat = _phrase_pattern(phrase)
         if pat.search(work):
@@ -179,6 +231,19 @@ def rewrite(text: str) -> Rewrite:
         seen.add(tok)
         kept.append(tok)
 
+    # 3.5 The game NAME is a FILTER, not a keyword: it is carried by Rewrite.game. Under the
+    #     engine's AND semantics a bare 'cs2' costs real hits ('spectators allowed match' hits,
+    #     '... cs2 ...' scores nothing), so strip it — before the cap, so budget goes to real tokens.
+    #     Only when a game was actually established; identifiers (cs_script, citadel_*_mode) are untouched.
+    game = _detect_game(raw, _TOKEN_RE.findall(raw))
+    if game:
+        names = _game_filter_tokens(game)
+        stripped = [tok for tok in kept if tok in names]
+        if stripped:
+            kept = [tok for tok in kept if tok not in names]
+            dropped.extend(stripped)
+            notes.append(f"filter: dropped game name(s) {', '.join(stripped)} (game={game})")
+
     # 4. Cap, preferring the most specific tokens; preserve original order in the output.
     if len(kept) > _MAX_TOKENS:
         chosen = set(sorted(kept, key=_score, reverse=True)[:_MAX_TOKENS])
@@ -191,5 +256,4 @@ def rewrite(text: str) -> Rewrite:
         kept = final
 
     query = " ".join(kept)
-    game = _detect_game(raw, _TOKEN_RE.findall(raw))
     return Rewrite(query=query, game=game, dropped=tuple(dropped), notes=tuple(notes))
