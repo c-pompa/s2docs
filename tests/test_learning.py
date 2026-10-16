@@ -200,3 +200,82 @@ def test_mcp_job_enqueue_carries_origin(tmp_path):
     assert res.structured_content["origin"] == "eval"
     with db.reader() as conn:
         assert conn.execute("SELECT origin FROM jobs").fetchone()[0] == "eval"
+
+
+# ------------------------------------------------------- readers: scope by origin
+# The conftest fixture points S2DOCS_DATA_DIR at tmp_path/data, which is also where the job-event
+# journal lands, so both the DB and the JSONL are per-test and never touch a checkout.
+
+
+def db_for(tmp_path: Path) -> Database:
+    """The database the CLI/settings/loop all resolve: ``<data_dir>/s2docs.db``."""
+    return Database(tmp_path / "data" / "s2docs.db")
+
+
+def _seed_job(tmp_path: Path, *, origin: str = "human", status: str = "passed", title: str = "occluder wire"):
+    """One job with a timeline event and a close-out: the minimum any reader needs."""
+    db = db_for(tmp_path)
+    job = _enqueue(db, origin=origin, title=title, target=f"ws/{title}@abc123")
+    jobs.start(db, job.id, worker="ws/learning")
+    jobs.event(db, job.id, level="info", message="launch", data={"step": "s3"})
+    jobs.finish(db, job.id, status=status,
+                summary={"what": "w", "why": "y", "learned": "l", "next": "n"})
+    return db, jobs.get(db, job.id)
+
+
+def test_events_are_scoped_by_the_jobs_origin_and_report_their_sample(tmp_path: Path):
+    """Rule 2: the default read is real usage. A driver run's events are in the log and must not
+    appear in a `human` read — but they are reachable with an explicit `origin=None`."""
+    from s2docs.learning import events
+
+    db, human = _seed_job(tmp_path, origin="human", title="human run")
+    _seed_job(tmp_path, origin="driver", title="driver run")
+
+    scoped = events(db)                       # default: origin='human'
+    assert {e["job_id"] for e in scoped} == {human.id}
+    assert all(e["origin"] == "human" for e in scoped)
+    assert scoped[0]["level"] == "info" and scoped[0]["job"]["status"] == "passed"
+
+    every = events(db, origin=None)
+    assert len(every) == 2, "the driver run is reachable, explicitly"
+
+    with pytest.raises(ValueError):
+        events(db, origin="not-an-origin")
+
+
+def test_events_refuse_a_missing_source_instead_of_returning_nothing(tmp_path: Path):
+    """Rule 6, the load-bearing one: an unreadable source raises. A loop that reports '0 signals'
+    because it could not read its input reads as a quiet week, which is a lie of omission."""
+    from s2docs.learning import events, LearningSourceMissing
+
+    db = db_for(tmp_path)                     # no journal has been written yet
+    with pytest.raises(LearningSourceMissing) as exc:
+        events(db, origin=None)
+    assert "job-event log" in str(exc.value)
+
+
+def test_report_counts_jobs_by_origin_and_flags_the_thin_sample(tmp_path: Path):
+    """Rule 5: the readiness number ships the sample, and 'real usage' is counted separately from
+    synthetic traffic so a loop built on driver runs cannot look busy."""
+    from s2docs.learning import report
+
+    db, _ = _seed_job(tmp_path, origin="human")
+    _seed_job(tmp_path, origin="driver", title="d1")
+    _seed_job(tmp_path, origin="eval", title="e1")
+
+    out = report(db)
+    assert out["jobs_by_origin"] == {"driver": 1, "eval": 1, "human": 1}
+    assert out["jobs_total"] == 3
+    assert out["real_usage_jobs"] == 1
+    assert out["synthetic_jobs"] == 2
+    assert out["events_total"] == 3
+
+
+def test_learning_dir_follows_the_data_dir_and_creates_itself(tmp_path: Path):
+    """A per-call derivation: the dir follows S2DOCS_DATA_DIR (the test fixture moves it), and asking
+    for it is enough to create it — every writer below assumes that."""
+    from s2docs.learning import learning_dir
+
+    d = learning_dir()
+    assert d == tmp_path / "data" / "learning"
+    assert d.is_dir()
