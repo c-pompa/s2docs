@@ -198,6 +198,13 @@ Exit codes are a stable contract:
 | 6 | partial (a batch had some failures; per-item detail in `--json`) |
 | 7 | timeout or cancelled |
 
+The learning loop reuses the same contract (`docs/LEARNING_LOOP.md`):
+
+```
+learning gate    0 pass · 1 regression (recall below floor or a trap failed) · 2 could not evaluate
+learning harvest 0 ok            · 6 a declared source could not be read (never an empty artifact)
+```
+
 ## 3. Efficiency
 
 - **Single-shot process per call — no CLI daemon.** Measured on this repo (`.venv/bin/python`,

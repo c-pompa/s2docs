@@ -527,6 +527,39 @@ def _cmd_evidence(args: argparse.Namespace) -> int:
     return _fail(f"unknown evidence command {args.evidence_cmd!r}", EXIT_ERROR)
 
 
+def _human_learning_report(out: dict) -> list[str]:
+    return [f"jobs: {out['jobs_total']}  by origin: {json.dumps(out['jobs_by_origin'])}",
+            f"real usage: {out['real_usage_jobs']}  synthetic: {out['synthetic_jobs']}",
+            f"events: {out['events_total']}  learning dir: {out['learning_dir']}"]
+
+
+def _cmd_learning(args: argparse.Namespace) -> int:
+    """`s2docs learning`: run the harvesters over the job ledger.
+
+    Exit 6 (EXIT_PARTIAL) when a declared source could not be read — never an empty artifact. Only
+    `report` and `harvest` are wired here; the digest/gate/sft/exemplar/review verbs arrive with their
+    modules, so an unimplemented one fails loudly instead of pretending to run.
+    """
+    from s2docs.learning import LearningSourceMissing
+    from s2docs.learning import harvest as H
+    from s2docs.learning import report as L
+
+    db = Database(get_settings().db_path)
+    try:
+        if args.learning_cmd == "report":
+            out = L(db, since_days=args.since_days)
+            return _emit(args, out, _human_learning_report(out))
+        if args.learning_cmd == "harvest":
+            origin = None if args.origin == "all" else args.origin
+            out = H.harvest(db, origin=origin, since_days=args.since_days,
+                            search=lambda q: H.search_terms(db, q))
+            human = [f"{k}: {v}" for k, v in out["counts"].items()] or ["nothing harvested"]
+            return _emit(args, out, human)
+    except LearningSourceMissing as exc:
+        return _fail(str(exc), EXIT_PARTIAL)  # 6: a source was unreadable — a skip is not a pass
+    return _fail(f"unknown learning command {args.learning_cmd!r}", EXIT_ERROR)
+
+
 def _human_test(run) -> list[str]:
     out = [f"{run.id}  {run.name}  {run.state}  step={run.step or '-'}  elapsed={run.elapsed_sec}s"]
     if run.host_id:
@@ -904,6 +937,17 @@ def main(argv: list[str] | None = None) -> int:
     q = ev.add_parser("show", help="Show one evidence row")
     q.add_argument("evidence_id")
     p.set_defaults(fn=_cmd_evidence)
+
+    p = sub.add_parser("learning", help="Learning loop: harvest job outcomes into eval/training signal")
+    lc = p.add_subparsers(dest="learning_cmd", required=True)
+    q = lc.add_parser("report", help="Readiness: counts by origin, artifacts on disk")
+    q.add_argument("--since-days", type=int, default=None)
+    q.add_argument("--json", action="store_true", help="Machine-readable output")
+    q = lc.add_parser("harvest", help="Write the four artifacts from the job ledger")
+    q.add_argument("--since-days", type=int, default=None)
+    q.add_argument("--origin", default="human", choices=[*_JOB_ORIGINS, "all"])
+    q.add_argument("--json", action="store_true", help="Machine-readable output")
+    p.set_defaults(fn=_cmd_learning)
 
     p = sub.add_parser("test", help="In-game test-run records (mirror of the TEST STATUS HUD strip)")
     tc = p.add_subparsers(dest="test_cmd", required=True)
