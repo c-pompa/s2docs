@@ -1,0 +1,243 @@
+{
+  "version": 1,
+  "status": "expectations verified by reading the target document; none derived from search ranking",
+  "rows": [
+    {
+      "id": "cs2-spectator-xray-walls",
+      "prose": "How do I make spectators see enemy player outlines through walls when watching a CS2 match?",
+      "keywords": "spec_show_xray player outlines through walls",
+      "game": "cs2",
+      "expect_key": "spec_show_xray",
+      "expect_kind": "convar",
+      "evidence": "description: \"If set to 1, you can see player outlines and name IDs through walls - who you can see depends on your team and mode\" (default_value 1; flags archive, clientdll, release)",
+      "source": "user ask (a) spectators see through walls / (g) outlines when behind things"
+    },
+    {
+      "id": "cs2-spec-glow-silent-factor",
+      "prose": "What convar scales how much the xray glow shows on a lurking, silent player?",
+      "keywords": "spec_glow_silent_factor xray glow scaling lurking",
+      "game": "cs2",
+      "expect_key": "spec_glow_silent_factor",
+      "expect_kind": "convar",
+      "evidence": "description: \"Lurking player xray glow scaling.\" (default_value 0.4, min 0, max 1)",
+      "source": "derived from spectator xray theme (a)"
+    },
+    {
+      "id": "cs2-spec-glow-spike-factor",
+      "prose": "What setting adds a spike to the xray glow of players who make noise?",
+      "keywords": "xray glow spike noisy player factor",
+      "game": "cs2",
+      "expect_key": "spec_glow_spike_factor",
+      "expect_kind": "convar",
+      "evidence": "description: \"Noisy player xray glow scaling (pop when noise is made).  Make >1 to add a 'spike' to noise-making players\" (default_value 1.2, min 1, max 3)",
+      "source": "derived from spectator xray theme (a)"
+    },
+    {
+      "id": "cs2-spectators-max",
+      "prose": "How many spectators are allowed in a CS2 match?",
+      "keywords": "max spectators allowed match",
+      "game": "cs2",
+      "expect_key": "mp_spectators_max",
+      "expect_kind": "convar",
+      "evidence": "description: \"How many spectators are allowed in a match.\" (default_value 2)",
+      "source": "spectator capacity (d)"
+    },
+    {
+      "id": "cs2-spec-player-command",
+      "prose": "What console command lets me spectate a specific player by their name or slot?",
+      "keywords": "spectate player by name slot command",
+      "game": "cs2",
+      "expect_key": "spec_player",
+      "expect_kind": "command",
+      "evidence": "description: \"Spectate a player by name or slot\" (kind command)",
+      "source": "user ask (d) joining a server as a spectator"
+    },
+    {
+      "id": "cs2-mp-forcecamera",
+      "prose": "What convar restricts which spectator camera modes a dead player can use?",
+      "keywords": "mp_forcecamera spectator modes dead players",
+      "game": "cs2",
+      "expect_key": "mp_forcecamera",
+      "expect_kind": "convar",
+      "evidence": "description: \"Restricts spectator modes for dead players\" (default_value 0)",
+      "source": "spectator camera modes (d)"
+    },
+    {
+      "id": "cs2-observer-services-mode-field",
+      "prose": "Which schema field on the server stores a spectator's current observer mode?",
+      "keywords": "CCSObserver_ObserverServices",
+      "game": "cs2",
+      "expect_key": "server:CCSObserver_ObserverServices",
+      "expect_kind": "schema_class",
+      "evidence": "field \"m_iObserverMode\" (type uint8, defined_in \"CPlayer_ObserverServices\"); sibling fields m_hObserverTarget, m_iObserverLastMode (ObserverMode_t), m_bForcedObserverMode",
+      "source": "spectator HUD/state (c)/(d)"
+    },
+    {
+      "id": "cs2-observer-pawn-entity",
+      "prose": "What entity does the CS2 server spawn for a player who is spectating?",
+      "keywords": "observer entity CCSObserverPawn",
+      "game": "cs2",
+      "expect_key": "server:observer",
+      "expect_kind": "entity",
+      "evidence": "cpp_class: \"CCSObserverPawn\", bases: [\"player_pawn_base\"] (classname \"observer\", class_type \"PointClass\")",
+      "source": "user ask (d) joining as a spectator"
+    },
+    {
+      "id": "cs2-prop-static-visoccluder",
+      "prose": "What property makes a static prop block precomputed visibility in Hammer?",
+      "keywords": "static prop vis occluder precomputed visibility",
+      "game": "cs2",
+      "expect_key": "server:prop_static",
+      "expect_kind": "entity",
+      "evidence": "field name \"visoccluder\", label \"Vis Occluder\", description: \"If true this geometry is used as an occluder for precomputed visibility. As a rule this geometry should be as simplistic as possible\"",
+      "source": "user ask (a)/(b) wall/occluder theme"
+    },
+    {
+      "id": "cs2-hammer-visibility-doc",
+      "prose": "How does VIS work in Source 2 and which geometry contributes to it?",
+      "keywords": "VIS visibility contributors static prop occluder",
+      "game": "cs2",
+      "expect_key": "s2wiki:/EngineTools/HammerEditor/visibility",
+      "expect_kind": "doc",
+      "evidence": "\"By default, all meshes are VIS contributors, which can be disabled by selecting \\\"Exclude from VIS\\\". Static props are the inverse, and you can set them as VIS contributors by marking the \\\"Vis Occluder\\\" property.\"",
+      "source": "user ask (a)/(b) wall/occluder theme"
+    },
+    {
+      "id": "cs2-cs-script-load-compiled",
+      "prose": "Why does editing my cs_script JavaScript file not change the map?",
+      "keywords": "cs_script compiled vjs_c loaded map load recompile",
+      "game": "cs2",
+      "expect_key": "s2wiki:/Scripting/Counter-Strike 2/cs_script/introduction",
+      "expect_kind": "doc",
+      "evidence": "\"The compiled version of your script (.vjs_c) will be loaded during map load.\" and under Tools Mode: \"In tools mode, saving changes to your script will recompile your file, clear all registered callbacks, and re-run the top level scope of your script.\"",
+      "source": "user ask (e) recompiling cs_script / baked vjs do nothing"
+    },
+    {
+      "id": "cs2-vpk-format",
+      "prose": "What is a VPK and where does the game load its content from?",
+      "keywords": "vpk valve pak archive format content",
+      "game": null,
+      "expect_key": "s2wiki:/FileFormats/vpk",
+      "expect_kind": "doc",
+      "evidence": "\"A VPK (Valve Pak) is the uncompressed archive format Source and Source 2 package content in. Almost everything a game loads at runtime comes out of one.\" (also: content lives in the game's content archives pak01_dir.vpk, every compiled map, and workshop items/addons)",
+      "source": "user ask (e) baked vpk source does nothing"
+    },
+    {
+      "id": "cs2-compiling-maps-remove-output",
+      "prose": "How do I get rid of compiled output that a map build produced?",
+      "keywords": "deleting the map's vpk game side",
+      "game": "cs2",
+      "expect_key": "s2wiki:/Basics/working-on-content/compiling-maps",
+      "expect_kind": "doc",
+      "evidence": "\"Turning a stage off does not undo it: deleting the map's `.vpk` from the [`game/`](./content-and-game.md) side is the only way to get rid of what it produced.\"",
+      "source": "user ask (e) stale/baked output does nothing"
+    },
+    {
+      "id": "cs2-content-vs-game-side",
+      "prose": "Why is my edit to a file under the game/ folder ignored?",
+      "keywords": "content side vs game side which to edit recompile",
+      "game": null,
+      "expect_key": "s2wiki:/Basics/working-on-content/content-and-game",
+      "expect_kind": "doc",
+      "evidence": "\"**`content/`** holds authored source files. Nothing here is ever loaded by the game.\" ... \"The source file is edited under `content/`, a compiler writes the compiled result to the matching path under `game/`, and the game loads that.\" and \"Almost always the `content` side is the right one to edit\"",
+      "source": "user ask (e) editing baked source does nothing"
+    },
+    {
+      "id": "cs2-hammer5tools-addon-manager",
+      "prose": "How do I create or export a Hammer addon using hammer5tools?",
+      "keywords": "hammer addon create export addon manager",
+      "game": "cs2",
+      "expect_key": "s2wiki:/ExternalTools/Hammer5Tools/utilities/addon-manager",
+      "expect_kind": "doc",
+      "evidence": "\"Choose Create new addon to create an addon from a preset. Enter the addon name, select a preset, then click Create Addon.\" and \"Choose Export addon from the addon menu. The exporter creates an archive from the selected addon's files.\"",
+      "source": "user ask (h) Hammer addon tooling"
+    },
+    {
+      "id": "cs2-addons-basics",
+      "prose": "What is a Source 2 addon and where does its content live?",
+      "keywords": "addon custom content folder csgo_addons",
+      "game": "cs2",
+      "expect_key": "s2wiki:/Basics/working-on-content/addons",
+      "expect_kind": "doc",
+      "evidence": "\"An addon is the unit of custom content in Source 2. It replaces the Source 1 habit of dropping loose compiled files into the game directory, custom content lives in a named folder and the game mounts that folder on request.\" ... \"Every addon is two directories with the same name: content/csgo_addons/my_addon/ => source files\"",
+      "source": "user ask (h) Hammer addon tooling"
+    },
+    {
+      "id": "dl-spectator-mode",
+      "prose": "How do I switch the spectator camera mode in Deadlock?",
+      "keywords": "citadel_spectator_mode",
+      "game": "deadlock",
+      "expect_key": "citadel_spectator_mode",
+      "expect_kind": "convar",
+      "evidence": "description: \"Toggles the spectator mode: 0=Directed - 1=Free Cam - 2=Hero Chase - 3=PlayerView\" (default_value 0)",
+      "source": "spectator modes, cross-game (d)"
+    },
+    {
+      "id": "dl-camera-spectator-fov",
+      "prose": "What sets the field of view of the Deadlock spectator camera?",
+      "keywords": "citadel_camera_spectator_fov",
+      "game": "deadlock",
+      "expect_key": "citadel_camera_spectator_fov",
+      "expect_kind": "convar",
+      "evidence": "description: \"The field of view angle of the camera when a spectator.\" (default_value 90, min 65, max 100)",
+      "source": "spectator camera settings, cross-game (d)"
+    },
+    {
+      "id": "dl-spectator-voice-mode",
+      "prose": "How do I restrict Deadlock spectator voice chat so only spectators hear it?",
+      "keywords": "citadel_spectator_voice_mode spectator voice transmit mode",
+      "game": "deadlock",
+      "expect_key": "citadel_spectator_voice_mode",
+      "expect_kind": "convar",
+      "evidence": "description: \"Spectator voice transmit mode: 0 spectators and players, 1 spectators only\"",
+      "source": "spectator voice, cross-game (d)"
+    },
+    {
+      "id": "dl-observer-pawn-schema",
+      "prose": "What schema class represents a Deadlock spectator pawn on the server?",
+      "keywords": "CCitadelObserverPawn",
+      "game": "deadlock",
+      "expect_key": "server:CCitadelObserverPawn",
+      "expect_kind": "schema_class",
+      "evidence": "class \"CCitadelObserverPawn\", module \"server\", bases [\"CCitadelPlayerPawnBase\"], with m_pObserverServices (CPlayer_ObserverServices*)",
+      "source": "spectator state, cross-game (d)"
+    }
+  ],
+  "known_gaps": [
+    {
+      "question": "How do I let spectators see through walls only in a specific area (a region/trigger volume where xray applies)?",
+      "why": "No document describes region-restricted or per-area spectator xray. Searches: 'xray area'(0), 'spectator xray area'(0), 'occluder area'(1, only the Hammer VIS doc), 'trigger_multiple visibility'(0). The only xray control is the global spec_show_xray convar.",
+      "game": "cs2"
+    },
+    {
+      "question": "How do I remove or fade only the wall that is currently blocking/occluding the player (DOTA-style depth fade of occluded geometry)?",
+      "why": "No doc covers runtime depth-based fading of occluding world geometry. Searches: 'player behind wall'(0), 'silhouette behind wall'(0), 'wall transparency'(0), 'fade occluded geometry'(0), 'dissolve wall'(0), 'render through wall'(1, unrelated styleguide), 'depth fade'(21, all env_* / fog entities), 'make wall invisible'(1, unrelated import-tool guide).",
+      "game": "cs2"
+    },
+    {
+      "question": "Where are CS2 runtime wall/visibility 'occluders' (the invisible-wall kind the user meant) documented?",
+      "why": "The corpus only knows two unrelated meanings. Searches: 'occluder'(total 3) top hit r_csgo_sky_occluder is a SKYBOX convar, plus server:prop_static and the Hammer visibility doc; 'vis occluder'(2), 'visblocker'(1 -> Hammer visibility doc), 'visibility occluder wall'(0), 'occluder' deadlock(1 -> Hammer visibility doc). All hits are map-compile-time precomputed VIS, not a runtime per-wall visibility/occlusion feature.",
+      "game": "cs2"
+    },
+    {
+      "question": "Why does editing the .vjs_c source baked into a map's vpk do nothing, and how do I re-bake cs_script into the map vpk?",
+      "why": "Partially answered: s2wiki:/Scripting/Counter-Strike 2/cs_script/introduction states the .vjs_c is loaded at map load and that tools mode recompiles on save, but NO document explains repacking/re-baking a .vjs into the map's .vpk. Searches: 'baked vpk'(6, none about vjs), 'cs_script recompile'(1 -> the intro doc only).",
+      "game": "cs2"
+    },
+    {
+      "question": "How do I make a mod or client DLL to change CS2 rendering?",
+      "why": "No document describes client-side DLL mods for rendering. Searches: 'gameinfo dll'(0), 'inject dll'(0), 'custom dll'(3, unrelated), 'client mod'(2393, all schema/Modifier noise), 'dll'(14, unrelated).",
+      "game": "cs2"
+    },
+    {
+      "question": "Can CS2 render like DOTA (silhouette/see-through) when a player is behind something?",
+      "why": "No doc describes DOTA-style occluded-player rendering in CS2. Searches: 'DOTA' cs2(33, all dota_* convars, none about rendering players), 'dota style render'(3, unrelated), 'render like dota'(3, unrelated), 'silhouette behind'(0). The nearest real feature is the global spec_show_xray convar (already a row).",
+      "game": "cs2"
+    },
+    {
+      "question": "What controls Deadlock player outline visibility behind geometry (citadel_player_outline_*)?",
+      "why": "The convars exist (citadel_player_outline_allies/enemies, citadel_player_outline_fade_range_min, citadel_player_outline_fade_at_min) but they carry NO description in the corpus (description: null), so there is no quotable passage that answers the question. Excluded as a retrieval row for lack of verifiable evidence.",
+      "game": "deadlock"
+    }
+  ]
+}
