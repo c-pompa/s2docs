@@ -151,7 +151,43 @@ def create_app(db_path: Path | None = None, *, mount_mcp: bool = True, workspace
         app.add_middleware(_AuthGate, token=_token)
     web_dir = resources.files("s2docs") / "web"
     app.mount("/", StaticFiles(directory=str(web_dir), html=True), name="web")
+    # The SPA shell and its two assets must revalidate on every load: a browser tab left open across a
+    # deploy would otherwise keep running the cached app.js / style.css and never show the new UI (the
+    # "I am not seeing the latest UI updates" symptom during a live test).
+    app.add_middleware(_NoCacheStatic)
     return app
+
+
+class _NoCacheStatic:
+    """Send ``Cache-Control: no-cache`` on the SPA shell and its two static assets.
+
+    ``StaticFiles`` emits no cache headers, so a browser keeps serving a cached ``app.js`` /
+    ``style.css`` after a deploy and the UI looks frozen on the old build. ``no-cache`` means revalidate
+    on every load — an ETag / Last-Modified round-trip can still answer 304, so nothing is re-downloaded
+    when the asset is unchanged — and does NOT mean "don't store". The shell's ``?v=`` cache-buster is
+    ignored here because the check keys on the raw request path, not the query string.
+
+    Pure ASGI (not BaseHTTPMiddleware) so the static file responses pass through untouched.
+    """
+
+    _CACHE_PATHS = frozenset({"/", "/index.html", "/app.js", "/style.css"})
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http" or scope["path"] not in self._CACHE_PATHS:
+            await self.app(scope, receive, send)
+            return
+
+        async def _send(message):
+            if message["type"] == "http.response.start":
+                headers = [(k, v) for k, v in message.get("headers", []) if k.lower() != b"cache-control"]
+                headers.append((b"cache-control", b"no-cache"))
+                message = {**message, "headers": headers}
+            await send(message)
+
+        await self.app(scope, receive, _send)
 
 
 class _AuthGate:

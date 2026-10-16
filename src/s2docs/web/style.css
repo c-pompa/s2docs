@@ -257,7 +257,24 @@ table.timeline { margin-top: 6px; }
 .vx-phase-cd { margin-left: auto; font-size: 18px; font-weight: 700; color: var(--accent); font-variant-numeric: tabular-nums; }
 .vx-phase-cleanup { border-color: var(--muted); background: color-mix(in srgb, var(--muted) 10%, var(--panel)); }
 .vx-phase-cleanup .vx-phase-kind, .vx-phase-cleanup .vx-phase-cd { color: var(--muted); }
+/* READY: the run is up but the first test has not started — a quiet, dashed banner. */
+.vx-phase-ready { border-style: dashed; }
+/* WATCH NOW: the verdict window is OPEN — the one banner that means 'answer me now'. */
+.vx-phase-watch { border-color: var(--ok); background: color-mix(in srgb, var(--ok) 14%, var(--panel)); }
+.vx-phase-watch .vx-phase-kind, .vx-phase-watch .vx-phase-cd { color: var(--ok); }
+/* GOT: the driver recorded the result — green for a pass, red for a fail, muted for a skip. */
+.vx-phase-got { border-color: var(--ok); background: color-mix(in srgb, var(--ok) 16%, var(--panel)); }
+.vx-phase-got .vx-phase-kind, .vx-phase-got .vx-phase-main { color: var(--ok); }
+.vx-phase-got.vx-got-bad { border-color: var(--bad); background: color-mix(in srgb, var(--bad) 16%, var(--panel)); }
+.vx-phase-got.vx-got-bad .vx-phase-kind, .vx-phase-got.vx-got-bad .vx-phase-main { color: var(--bad); }
+.vx-phase-got.vx-got-skip { border-color: var(--muted); background: color-mix(in srgb, var(--muted) 12%, var(--panel)); }
+.vx-phase-got.vx-got-skip .vx-phase-kind, .vx-phase-got.vx-got-skip .vx-phase-main { color: var(--muted); }
+/* 'Setting up…' / 'Cleaning up…' tag beside the card's TEST k of n head. */
+.vx-staging { font-size: 12px; font-weight: 700; letter-spacing: .05em; color: var(--accent); }
 .vx-gate { color: var(--muted); font-weight: 600; margin: 8px 0 2px; }
+.vx-window-open { color: var(--ok); }
+/* The live in-game sub-action ('now: camera sweeping to find the bot') — a prominent, updating row. */
+.vx-action { border-left: 3px solid var(--accent); padding: 6px 10px; background: var(--code); border-radius: var(--r); }
 .vx-camera { display: flex; align-items: center; gap: 8px; margin: 8px 0 2px; flex-wrap: wrap; }
 .vx-verdict-shot { display: flex; align-items: center; gap: 8px; margin: 2px 0 6px; }
 .vx-shotform { border-top: 1px solid var(--border); margin-top: 10px; padding-top: 8px; }
