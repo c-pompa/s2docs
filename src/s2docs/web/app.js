@@ -23,15 +23,17 @@ const parseTs = (iso) => {
   const s = String(iso);
   return Date.parse(/[Zz]|[+-]\d\d:?\d\d$/.test(s) ? s : s + "Z");
 };
-// A SHORT relative age for tight spaces (the wall tiles): '5m', '2h34m', '3d2h'. Empty when
-// unparseable — the tile then falls back to nothing rather than a long absolute string.
+// A SHORT relative age for tight spaces (the wall tiles): '5m', '2h 34m', '3d 2h'. Omits trailing
+// zero units ('1d' instead of '1d0h') and returns empty when unparseable.
 const shortAgo = (iso) => {
   const t = parseTs(iso);
   if (Number.isNaN(t)) return "";
   const s = Math.max(0, (Date.now() - t) / 1000);
   if (s < 60) return "now";
   const m = Math.floor(s / 60), h = Math.floor(m / 60), d = Math.floor(h / 24);
-  return d ? `${d}d${h % 24}h` : h ? `${h}h${m % 60}m` : `${m}m`;
+  if (d) return h % 24 ? `${d}d ${h % 24}h` : `${d}d`;
+  if (h) return m % 60 ? `${h}h ${m % 60}m` : `${h}h`;
+  return `${m}m`;
 };
 // The single humanizer every elapsed/duration value goes through.
 const human = (s) => {
@@ -276,13 +278,38 @@ function jobBoard(jobs, hosts) {
       const running = list.filter((j) => j.status === "running").sort(byOrder);
       const queued = list.filter((j) => j.status === "queued").sort(byOrder);
       const label = hid === "(unassigned)" ? `<strong>${esc(hid)}</strong>` : link(["hosts", hid], hid);
-      const body = [...running, ...queued].map(jobCard).join("") || `<p class="muted">No queued jobs.</p>`;
-      return `<div class="dag-col"><h3>${label} <span class="muted">${running.length} running · ${queued.length} queued</span></h3>${body}</div>`;
+      const body = [...running, ...queued].map(jobCard).join("") || `<p class="muted" style="margin:0">No queued jobs.</p>`;
+      return `<div class="dag-col ovw-panel"><div class="ovw-sec-head"><h3 style="margin:0;font-size:14px">${label}</h3>` +
+        `<span class="muted" style="font-size:12px">${running.length} running · ${queued.length} queued</span></div>${body}</div>`;
     })
     .join("");
-  return `${nowLine()}<h2>Queue <span class="muted">per host — running on top, then queued by position</span></h2>
+
+  const TILE = {
+    passed: "passed", running: "running", queued: "queued", failed: "failed", error: "failed",
+    cancelled: "cancelled", inconclusive: "inconclusive",
+  };
+  const STATUS_ORDER = ["passed", "failed", "error", "inconclusive", "cancelled"];
+  const counts = {};
+  done.forEach((j) => { counts[j.status] = (counts[j.status] || 0) + 1; });
+  const ordered = [
+    ...STATUS_ORDER.filter((s) => counts[s]),
+    ...Object.keys(counts).filter((s) => !STATUS_ORDER.includes(s)),
+  ];
+  const totalDone = done.length || 1;
+  const hbar = done.length
+    ? `<div class="ovw-hbar">${ordered.map((s) => `<span class="ovw-hbar-seg ${TILE[s] || "inconclusive"}" style="flex:${Math.max(2, Math.round((counts[s] / totalDone) * 100))}" title="${counts[s]} ${esc(s)}"></span>`).join("")}</div>`
+    : "";
+  const legend = ordered
+    .map((s) => `<span class="ovw-lg ${TILE[s] || "inconclusive"}"><strong>${counts[s]}</strong> ${esc(s)}</span>`)
+    .join("");
+
+  return `${nowLine()}<div class="ovw-sec-head" style="margin-top:8px"><h2 style="margin:0;border:0;padding:0">Queue <span class="muted">per host — running on top, then queued by position</span></h2>` +
+    `<span class="muted" style="font-size:12px">${active.length} open</span></div>
     <div class="dag">${cols}</div>
-    <h2>Finished</h2>${done.length ? jobTable(done) : `<p class="muted">No finished jobs yet.</p>`}`;
+    <div class="ovw-panel" style="margin-top:12px"><div class="ovw-sec-head"><h2 style="margin:0;border:0;padding:0">Finished</h2>` +
+    `<span class="muted" style="font-size:12px">${done.length} job${done.length === 1 ? "" : "s"}</span></div>` +
+    `${hbar}${legend ? `<div class="ovw-legend-row">${legend}</div>` : ""}` +
+    `${done.length ? `<div class="wf-table-scroll">${jobTable(done)}</div>` : `<p class="muted" style="margin:0">No finished jobs yet.</p>`}</div>`;
 }
 
 const jobTimeline = (events) =>
@@ -999,12 +1026,14 @@ const WORKFLOW_STAGES = [
 ];
 const sectionHref = (id) => (GLOBAL_SECTIONS.has(id) ? `#/${id}` : `#/${enc(state.game)}/${id}`);
 function pipelineStrip(active) {
+  const ovw = `<a class="pipe-a ${active === "overview" ? "active" : ""}" href="#/overview" ` +
+    `title="Mission control: live runs, machine leases, verdict wall and recent feed on one page">◎ Overview</a>`;
   const stages = WORKFLOW_STAGES.map(([id, step, label, tip], i) =>
     `<a class="pipe-a ${id === active ? "active" : ""}" href="${sectionHref(id)}" title="${esc(tip)}">` +
     `<span class="pipe-n">${i + 1}</span> ${esc(step)} · ${esc(label)}</a>`).join("");
   const check = `<a class="pipe-a ${active === "validate" ? "active" : ""}" href="${sectionHref("validate")}" ` +
     `title="check a cs_script / .cfg against this build offline — before it is planned or queued">✓ Validate</a>`;
-  return `<div class="pipe"><span class="pipe-t">Workflow</span>${stages}<span class="pipe-sep"></span>${check}</div>`;
+  return `<div class="pipe"><span class="pipe-t">Workflow</span>${ovw}<span class="pipe-sep"></span>${stages}<span class="pipe-sep"></span>${check}</div>`;
 }
 
 function parseHash() {
@@ -1959,11 +1988,12 @@ const ROUTES = {
       ${diffSectionsHtml(d, match)}`;
   },
 
-  // Game-independent: ONE mission-control wallboard, not a tabbed copy of the other pages. It is
-  // organized as: a HERO (the one thing happening right now, biggest text), a machine DOCK (one LED
-  // chip per host: pulsing gold = busy, red = STUCK, gray = idle), then three lanes — the QUEUE
-  // rail, the VERDICT WALL (one colored tile per job, like a CI status board) and a compact FEED.
-  // Every tile/line links to its detail page; polls like Activity (5 s live, 15 s idle).
+  // Game-independent: ONE mission-control wallboard. Layout is invariant between idle and running
+  // states so widgets never jump columns when work starts or queues up:
+  //   Row 1 (.ovw-top):  LEFT = Now Running + Up Next queue strip (always ONE grid cell)
+  //                      RIGHT = Machine Dock with live LED + lease phase + GPU
+  //   Row 2 (.ovw-main): LEFT = Verdict Wall (proportional health bar + titled job tiles)
+  //                      RIGHT = Recent Runs Feed stacked above Open Orchestration Plans
   async overview() {
     document.title = "Overview · Source 2 Docs";
     const body = async () => {
@@ -1975,162 +2005,330 @@ const ROUTES = {
         api("/hosts").catch(() => []),
         api("/projects", { limit: 50 }).catch(() => []),
       ]);
-      const isActiveBuild = (b) => b.status === "running" || b.status === "queued";
       const activeBuilds = builds.filter((b) => b.status === "running");
       const queuedBuilds = builds.filter((b) => b.status === "queued");
       const activeTests = tests.filter((t) => t.state === "running");
-      const openJobs = jobs.filter((j) => j.status === "running" || j.status === "queued");
-      // Drives the poll cadence (same contract as the Activity and Jobs pages).
-      state.activityActive = activeBuilds.length > 0 || activeTests.length > 0;
+      const runningJobs = jobs.filter((j) => j.status === "running");
+      const queuedJobs = jobs.filter((j) => j.status === "queued");
+      const openJobs = [...runningJobs, ...queuedJobs];
+      const busyHosts = hosts.filter((h) => h.lock && h.lock.fresh && h.lock.owner);
+      // Drives the poll cadence (same contract as the Activity and Jobs pages, plus fresh host leases).
+      state.activityActive = activeBuilds.length > 0 || activeTests.length > 0 || busyHosts.length > 0;
       state.jobsActive = openJobs.length > 0;
+      const isLiveNow = state.activityActive || runningJobs.length > 0;
 
-      const idle = [builds, tests, deploys, jobs].flat().map((r) => r.updated_at || r.created_at || "").filter(Boolean).sort().pop();
+      const hostById = new Map(hosts.map((h) => [h.id, h]));
+      // Map build:<id> and test_run:<id> back to their owning job so active runs can badge their job.
+      const jobByRef = new Map();
+      jobs.forEach((j) => {
+        (j.links || []).forEach((lnk) => {
+          if (lnk && lnk.kind && lnk.ref_id) jobByRef.set(`${lnk.kind}:${lnk.ref_id}`, j);
+        });
+      });
 
-      // ---- HERO: the one thing happening right now. A running test leads (it is what a human is
-      // being asked to watch); a running build is the next hero; queued jobs are a quieter hero.
-      const heroParts = [];
+      const shortGpu = (h) =>
+        gpuOf(h)
+          .replace(/NVIDIA GeForce /gi, "")
+          .replace(/AMD Radeon /gi, "");
+
+      // Joins a run's own RunLockSummary (owner/phase/phase_age_sec/stuck) with the host's full
+      // HostLock (which carries fresh/heartbeat_at/age_sec/ttl_sec). Passing t.lock directly to
+      // lockCell() falsely rendered STALE because RunLockSummary omits `fresh`.
+      const ovwLockStrip = (runLock, hostId) => {
+        const h = hostId ? hostById.get(hostId) : null;
+        const hLock = h && h.lock && h.lock.owner ? h.lock : null;
+        const lock = runLock || hLock;
+        if (!lock || !lock.owner) return "";
+        const stuck = Boolean((runLock && runLock.stuck) || (hLock && hLock.stuck));
+        const fresh = hLock ? Boolean(hLock.fresh) : true;
+        const phase = (runLock && runLock.phase) || (hLock && hLock.phase) || "";
+        const phaseAge = (runLock && runLock.phase_age_sec) ?? (hLock && hLock.phase_age_sec) ?? null;
+        const hbAge = hLock && hLock.age_sec != null ? `${human(hLock.age_sec)} ago` : "";
+        const hbTip = hLock && hLock.heartbeat_at ? ` title="Heartbeat: ${esc(ctAbs(new Date(parseTs(hLock.heartbeat_at))))}"` : "";
+        const stateCls = stuck ? "warn" : fresh ? "kind" : "warn";
+        const stateTxt = stuck ? "STUCK" : fresh ? "lease fresh" : "lease stale";
+        return `<div class="ovw-telemetry">` +
+          `${badge(stateTxt, stateCls)}` +
+          `<span class="mono muted">${esc(lock.owner)}</span>` +
+          `${phase ? `<span class="ovw-tel-sep">·</span><span>phase <strong class="mono">${esc(phase)}</strong>${phaseAge != null ? ` <span class="muted">(${human(phaseAge)})</span>` : ""}</span>` : ""}` +
+          `${hbAge ? `<span class="ovw-tel-sep">·</span><span class="muted"${hbTip}>hb ${esc(hbAge)}</span>` : ""}` +
+          `${stuck && (runLock?.stuck_reason || hLock?.stuck_reason) ? `<span class="ovw-tel-sep">·</span><span class="err">${esc(runLock?.stuck_reason || hLock?.stuck_reason)}</span>` : ""}` +
+          `</div>`;
+      };
+
+      // Render the host lease telemetry bar at most ONCE per host_id across stacked active cards, so
+      // when a test_run and a build run concurrently on the same host the lease bar is not repeated.
+      const shownLockHosts = new Set();
+      const onceLockStrip = (runLock, hostId) => {
+        if (hostId && shownLockHosts.has(hostId)) return "";
+        const html = ovwLockStrip(runLock, hostId);
+        if (html && hostId) shownLockHosts.add(hostId);
+        return html;
+      };
+      const idle = [builds, tests, deploys, jobs]
+        .flat()
+        .map((r) => r.updated_at || r.created_at || "")
+        .filter(Boolean)
+        .sort()
+        .pop();
+
+      // ---- TOP LEFT: NOW RUNNING + UP NEXT (always wrapped in a single .ovw-now-wrap cell so multiple
+      // concurrent runs never spill into the right column of .ovw-top).
+      const activeCards = [];
+      runningJobs
+        .slice()
+        .sort((a, b) => ((a.updated_at || "") < (b.updated_at || "") ? 1 : -1))
+        .forEach((j) => {
+          activeCards.push(
+            `<div class="ovw-active-card job">` +
+              `<div class="ovw-ac-head">${jobStatusBadge(j.status)}<span class="ovw-st">job</span>` +
+              `<span class="mono">${link(["jobs", j.id], j.id)}</span>` +
+              `<span class="muted">· ${esc(j.kind)} · ${runTime(j)} in</span>${jobFlags(j)}` +
+              `<span class="ovw-ac-right">${j.host_id ? `on ${link(["hosts", j.host_id], j.host_id)} · ` : ""}` +
+              `<a class="ovw-cta" href="#/jobs/${enc(j.id)}">Open job →</a></span></div>` +
+              `<div class="ovw-ac-title">${esc(j.title || "(untitled)")}` +
+              `${j.phase || j.target ? ` <span class="ovw-step-pill mono">${esc([j.phase, j.target].filter(Boolean).join(" · "))}</span>` : ""}</div>` +
+              `${onceLockStrip(null, j.host_id)}` +
+            `</div>`,
+          );
+        });
       activeTests
         .slice()
         .sort((a, b) => ((a.updated_at || "") < (b.updated_at || "") ? 1 : -1))
-        .forEach((t, i) => {
-          heroParts.push(
-            `<div class="ovw-hero"><div style="display:flex;align-items:center;gap:10px">${badge("running", "kind")}` +
-            `<span class="ovw-st" style="font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.09em;color:var(--muted)">test</span>` +
-            `${i === 0 ? `<span class="muted" style="font-size:12px">${human(t.elapsed_sec)} in</span>` : ""}` +
-            `${t.host_id ? `<span class="muted" style="font-size:12px;margin-left:auto">on ${link(["hosts", t.host_id], t.host_id)}</span>` : ""}</div>` +
-            `<h2 style="margin-top:6px">${esc(t.name)}</h2>` +
-            `<div class="mono" style="margin-top:4px">${esc(t.step || "(no step)")}</div>` +
-            `${t.lock ? `<div style="margin-top:6px">${lockCell(t.lock)}${lockStuckBadge(t.lock)}</div>` : ""}</div>`,
+        .forEach((t) => {
+          const j = jobByRef.get(`test_run:${t.id}`);
+          activeCards.push(
+            `<div class="ovw-active-card test">` +
+              `<div class="ovw-ac-head">${badge("running", "kind")}<span class="ovw-st">test run</span>` +
+              `<span class="mono muted">${esc(t.id)}</span>` +
+              `<span class="muted">· ${human(t.elapsed_sec)} in</span>` +
+              `<span class="ovw-ac-right">${j ? `job ${link(["jobs", j.id], j.id)} · ` : ""}${t.host_id ? `on ${link(["hosts", t.host_id], t.host_id)}` : ""}</span></div>` +
+              `<div class="ovw-ac-title">${esc(t.name)} <span class="ovw-step-pill mono">${esc(t.step || "(no step)")}</span></div>` +
+              `${onceLockStrip(t.lock, t.host_id)}` +
+            `</div>`,
           );
         });
       activeBuilds
         .slice()
         .sort((a, b) => ((a.updated_at || "") < (b.updated_at || "") ? 1 : -1))
         .forEach((b) => {
-          heroParts.push(
-            `<div class="ovw-hero"><div style="display:flex;align-items:center;gap:10px">${stateBadge(b.status)}` +
-            `<span class="ovw-st" style="font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.09em;color:var(--muted)">build</span>` +
-            `<span class="muted" style="font-size:12px">${runTime(b)} in</span>` +
-            `${b.host_id ? `<span class="muted" style="font-size:12px;margin-left:auto">on ${link(["hosts", b.host_id], b.host_id)}</span>` : ""}</div>` +
-            `<h2 style="margin-top:6px">${esc(b.kind === "compile" ? "Compiling" : b.kind || "Building")}</h2>` +
-            `<div class="mono" style="margin-top:4px">${esc(runPhase(b) || b.command || b.id)}</div>` +
-            `${materialWarning(b)}</div>`,
+          const j = jobByRef.get(`build:${b.id}`);
+          activeCards.push(
+            `<div class="ovw-active-card build">` +
+              `<div class="ovw-ac-head">${stateBadge(b.status)}<span class="ovw-st">build</span>` +
+              `<span class="mono">${esc(b.id)}</span>` +
+              `<span class="muted">· ${esc(b.kind)} · ${runTime(b)} in</span>${materialWarning(b)}` +
+              `<span class="ovw-ac-right">${j ? `job ${link(["jobs", j.id], j.id)} · ` : ""}${b.host_id ? `on ${link(["hosts", b.host_id], b.host_id)}` : ""}</span></div>` +
+              `<div class="ovw-ac-title">${esc(b.kind === "compile" ? "Compiling map" : b.kind || "Building")} ` +
+              `<span class="ovw-step-pill mono">${esc(runPhase(b) || b.command || b.id)}</span></div>` +
+              `${onceLockStrip(b.lock, b.host_id)}` +
+            `</div>`,
           );
         });
-      if (!heroParts.length) {
-        const openQueued = [...jobs.filter((j) => j.status === "queued")];
-        heroParts.push(
-          openQueued.length
-            ? `<div class="ovw-hero"><h2>Queued: ${link(["jobs", openQueued[0].id], openQueued[0].title || openQueued[0].id)}</h2>` +
-              `<div class="muted" style="margin-top:4px">${openQueued[0].kind} · waiting for a free host${idle ? ` · last activity ${fmtTime(idle)}` : ""}</div></div>`
-            : `<div class="ovw-hero"><h2>All quiet</h2><div class="muted" style="margin-top:4px">Nothing running, nothing queued.` +
-              `${idle ? ` Last activity ${fmtTime(idle)}.` : ""} Start something from ${link(["jobs"], "Jobs")} or MCP.</div></div>`,
-        );
-      }
-      const hero = heroParts.join("");
 
-      // ---- DOCK: one LED chip per host — liveness at a glance, click for detail.
-      const dockChips = hosts.length
-        ? hosts
-            .map((h) => {
-              const busy = h.lock && h.lock.fresh && h.lock.owner;
-              const stuck = h.lock && h.lock.stuck;
-              const stale = !busy && !stuck && h.lock && h.lock.owner;
-              return `<a href="${`#/hosts/${enc(h.id)}`}" title="${esc(gpuOf(h))}${h.lock && h.lock.owner ? ` · ${h.lock.owner}${h.lock.phase ? ` — ${h.lock.phase}` : ""}` : " · idle"}">` +
-                `<span class="ovw-led ${stuck ? "stuck" : stale ? "stale" : busy ? "busy" : ""}"></span><span><strong>${esc(h.id)}</strong>` +
-                `<div class="muted" style="font-size:11px">${esc(h.lock && h.lock.phase ? h.lock.phase : stuck ? "STUCK" : busy ? "busy" : stale ? "stale" : "idle")}</div></span></a>`;
-            })
-            .join("")
-        : `<p class="muted" style="margin:0">no hosts registered</p>`;
-      // The dock is a PANEL beside the hero, not a full-width strip below it — when a job is
-      // running, the running thing and the machines that run it read as ONE row, not two blocks.
-      const dockHtml = `<div class="ovw-panel ovw-dockpanel"><div style="display:flex;align-items:baseline;gap:10px;margin-bottom:8px">` +
-        `<span class="ovw-st" style="font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.09em;color:var(--muted)">Machines</span>` +
-        `<span class="muted" style="font-size:12px">${hosts.filter((h) => h.lock && h.lock.fresh && h.lock.owner).length}/${hosts.length} busy</span></div>` +
-        `<div class="ovw-dock">${dockChips}</div></div>`;
+      // Any host with a fresh lease NOT already covered by a running job/test/build above is still
+      // actively doing work (e.g. a worker holding the lease between compile/verify steps) — surface it
+      // in Now Running so "Now Running" and "Machines 1/2 busy" never contradict each other.
+      const coveredHosts = new Set([
+        ...runningJobs.map((j) => j.host_id),
+        ...activeTests.map((t) => t.host_id),
+        ...activeBuilds.map((b) => b.host_id),
+      ].filter(Boolean));
+      busyHosts
+        .filter((h) => !coveredHosts.has(h.id))
+        .forEach((h) => {
+          const lk = h.lock;
+          activeCards.push(
+            `<div class="ovw-active-card lease">` +
+              `<div class="ovw-ac-head">${badge("active lease", "kind")}<span class="ovw-st">host work</span>` +
+              `<span class="mono">${link(["hosts", h.id], h.id)}</span>` +
+              `${lk.age_sec != null ? `<span class="muted">· hb ${human(lk.age_sec)} ago</span>` : ""}` +
+              `<span class="ovw-ac-right">${esc(shortGpu(h))}</span></div>` +
+              `<div class="ovw-ac-title"><span class="mono">${esc(lk.owner)}</span>` +
+              `${lk.phase ? ` <span class="ovw-step-pill mono">${esc(lk.phase)}${lk.phase_age_sec != null ? ` · ${human(lk.phase_age_sec)}` : ""}</span>` : ""}</div>` +
+              `${ovwLockStrip(null, h.id)}` +
+            `</div>`,
+          );
+        });
 
-      // ---- LANES: queue rail | verdict wall | feed. The queue rail only renders when something
-      // IS queued — an empty "Nothing queued." panel is dead weight at the top of the page.
-      const queueLine = (badgeHtml, html) =>
-        `<div class="ovw-line">${badgeHtml}<span style="min-width:0">${html}</span></div>`;
       const queueItems = [
-        ...jobs.filter((j) => j.status === "queued").map((j) =>
-          queueLine(stateBadge(j.status), `<strong>JOB</strong> ${link(["jobs", j.id], j.id)} — ${esc(j.title || "")}` +
-            `${j.host_id ? ` <span class="muted">· ${esc(j.host_id)}</span>` : ""}`)),
-        ...queuedBuilds.map((b) =>
-          queueLine(stateBadge(b.status), `<span class="mono">${esc(b.id)}</span> <span class="muted">· ${esc(b.kind)} · ${b.host_id ? esc(b.host_id) : "unassigned"}</span>`)),
+        ...queuedJobs.map(
+          (j) =>
+            `<div class="ovw-q-chip">${stateBadge(j.status)} <strong>JOB</strong> ${link(["jobs", j.id], j.id)} ` +
+            `<span class="muted">${esc(j.title || j.kind)}${j.host_id ? ` · ${esc(j.host_id)}` : ""}</span></div>`,
+        ),
+        ...queuedBuilds.map(
+          (b) =>
+            `<div class="ovw-q-chip">${stateBadge(b.status)} <span class="mono">${esc(b.id)}</span> ` +
+            `<span class="muted">${esc(b.kind)}${b.host_id ? ` · ${esc(b.host_id)}` : ""}</span></div>`,
+        ),
       ];
-      const queueRail = queueItems.length
-        ? `<div class="ovw-panel"><div class="ovw-st" style="margin-bottom:6px">Queued <span style="text-transform:none;letter-spacing:0">(${queueItems.length})</span></div><div class="ovw-scroll">${queueItems.join("")}</div></div>`
+      const queueStripHtml = queueItems.length
+        ? `<div class="ovw-queue-strip"><span class="ovw-st">Queued (${queueItems.length})</span><div class="ovw-q-list">${queueItems.join("")}</div></div>`
         : "";
 
-      // The verdict wall: one tile per job, newest first, like a CI status board — a screenful of
-      // colour answers "is the suite healthy?" faster than any table. Tile colour is the job's
-      // status; the label is the id; the age is a SHORT relative string so it fits the tile.
+      const nowHeaderRight = activeCards.length
+        ? `<span class="ovw-live-pill live"><span class="ovw-led busy"></span>${activeCards.length} active</span>`
+        : `<span class="ovw-live-pill"><span class="ovw-led"></span>idle${idle ? ` · last ${shortAgo(idle)} ago` : ""}</span>`;
+
+      const nowBodyHtml = activeCards.length
+        ? `<div class="ovw-active-list">${activeCards.join("")}</div>`
+        : `<div class="ovw-idle-box"><strong>All quiet</strong> — no test, build, or job is running right now.` +
+          `${idle ? ` <span class="muted">Last activity ${fmtTime(idle)}.</span>` : ""}` +
+          ` <span class="muted">Start work via ${link(["jobs"], "Jobs")} or MCP.</span></div>`;
+
+      const nowPanelHtml =
+        `<div class="ovw-panel ovw-now-wrap ${activeCards.length ? "is-active" : ""}">` +
+        `<div class="ovw-sec-head"><span class="ovw-st">Now Running</span>${nowHeaderRight}</div>` +
+        `${nowBodyHtml}${queueStripHtml}</div>`;
+
+      // ---- TOP RIGHT: MACHINE DOCK (compact cards with live LED, GPU, and lease/phase).
+      const busyHostCount = hosts.filter((h) => h.lock && h.lock.fresh && h.lock.owner).length;
+      const dockCards = hosts.length
+        ? hosts
+            .map((h) => {
+              const busy = Boolean(h.lock && h.lock.fresh && h.lock.owner);
+              const stuck = Boolean(h.lock && h.lock.stuck);
+              const stale = Boolean(!busy && !stuck && h.lock && h.lock.owner);
+              const ledCls = stuck ? "stuck" : busy ? "busy" : stale ? "stale" : "idle";
+              const phaseStr = h.lock && h.lock.phase
+                ? `${h.lock.phase}${h.lock.phase_age_sec != null ? ` (${human(h.lock.phase_age_sec)})` : ""}`
+                : stuck ? "STUCK" : busy ? "busy" : stale ? "stale lease" : "idle · free";
+              const ownerStr = h.lock && h.lock.owner ? h.lock.owner : "";
+              return (
+                `<a class="ovw-host-card ${busy ? "is-busy" : stuck ? "is-stuck" : ""}" href="#/hosts/${enc(h.id)}" ` +
+                `title="${esc(gpuOf(h))}${ownerStr ? ` · lease: ${ownerStr}` : " · free"}${h.probed_at ? ` · probed ${ctAbs(new Date(parseTs(h.probed_at)))}` : ""}">` +
+                `<div class="ovw-hc-top"><span class="ovw-led ${ledCls}"></span><strong>${esc(h.id)}</strong>` +
+                `<span class="ovw-hc-gpu muted">${esc(shortGpu(h))}</span></div>` +
+                `<div class="ovw-hc-sub">${ownerStr ? `<span class="mono">${esc(ownerStr)}</span> · ` : ""}` +
+                `<span class="${busy ? "ovw-phase-active" : "muted"}">${esc(phaseStr)}</span></div></a>`
+              );
+            })
+            .join("")
+        : `<p class="muted" style="margin:0">No hosts registered</p>`;
+      const dockHtml =
+        `<div class="ovw-panel ovw-dockpanel"><div class="ovw-sec-head">` +
+        `<span class="ovw-st">Machines</span>` +
+        `<span class="muted" style="font-size:12px">${busyHostCount}/${hosts.length} busy · ${link(["hosts"], "Hosts →")}</span></div>` +
+        `<div class="ovw-dock">${dockCards}</div></div>`;
+
+      // ---- MAIN LEFT: VERDICT WALL (proportional health bar + titled status tiles).
       const TILE = {
         passed: "passed", running: "running", queued: "queued", failed: "failed", error: "failed",
         cancelled: "cancelled", inconclusive: "inconclusive",
       };
+      const STATUS_ORDER = ["running", "queued", "passed", "failed", "error", "inconclusive", "cancelled"];
       const recentJobs = jobs
         .slice()
         .sort((a, b) => ((a.created_at || "") < (b.created_at || "") ? 1 : -1))
         .slice(0, 40);
       const counts = {};
       jobs.forEach((j) => { counts[j.status] = (counts[j.status] || 0) + 1; });
-      const legend = Object.entries(counts)
-        .map(([s, n]) => `<span class="ovw-lg ${TILE[s] || "inconclusive"}">${n} ${esc(s)}</span>`)
-        .join(" ");
+      const orderedStatuses = [
+        ...STATUS_ORDER.filter((s) => counts[s]),
+        ...Object.keys(counts).filter((s) => !STATUS_ORDER.includes(s)),
+      ];
+      const legend = orderedStatuses
+        .map((s) => `<span class="ovw-lg ${TILE[s] || "inconclusive"}"><strong>${counts[s]}</strong> ${esc(s)}</span>`)
+        .join("");
+      const totalJobs = jobs.length || 1;
+      const healthSegs = orderedStatuses
+        .map((s) => {
+          const pct = Math.max(2, Math.round((counts[s] / totalJobs) * 100));
+          return `<span class="ovw-hbar-seg ${TILE[s] || "inconclusive"}" style="flex:${pct}" title="${counts[s]} ${esc(s)}"></span>`;
+        })
+        .join("");
+      const healthBar = jobs.length ? `<div class="ovw-hbar">${healthSegs}</div>` : "";
+
       const wall = recentJobs
         .map((j) => {
           const cls = TILE[j.status] || "inconclusive";
           const ago = shortAgo(j.created_at);
-          return `<a class="ovw-tile ${cls}" href="${`#/jobs/${enc(j.id)}`}" title="${esc(`${j.id} — ${j.title || ""} · ${j.status}${j.created_at ? ` · ${fmtTime(j.created_at)}` : ""}`)}">` +
-            `<span class="ovw-st">${esc(j.status)}</span><div class="ovw-id">${esc(j.id)}</div>` +
-            `<div class="ovw-age">${esc(j.kind)}${ago ? ` · ${ago}` : ""}</div></a>`;
+          const hostShort = j.host_id ? j.host_id.replace(/-pc$/, "") : "";
+          const titleTxt = j.title || j.target || j.id;
+          return (
+            `<a class="ovw-tile ${cls}" href="#/jobs/${enc(j.id)}" ` +
+            `title="${esc(`${j.id} — ${j.title || ""} · ${j.status}${j.host_id ? ` on ${j.host_id}` : ""}${j.created_at ? ` · ${ctAbs(new Date(parseTs(j.created_at)))}` : ""}`)}">` +
+            `<div class="ovw-tile-top"><span class="ovw-st">${esc(j.status)}</span><span class="ovw-age">${esc(ago)}</span></div>` +
+            `<div class="ovw-tile-title">${esc(titleTxt)}</div>` +
+            `<div class="ovw-tile-meta"><span class="ovw-id">${esc(j.id)}</span> · ${esc(j.kind)}${hostShort ? ` · ${esc(hostShort)}` : ""}</div></a>`
+          );
         })
         .join("");
-      const wallHtml = `<div class="ovw-panel"><div style="display:flex;align-items:baseline;gap:10px;margin-bottom:8px">` +
-        `<span class="ovw-st" style="font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.09em;color:var(--muted)">Verdict wall</span>` +
+      const wallHtml =
+        `<div class="ovw-panel ovw-wall-panel"><div class="ovw-sec-head">` +
+        `<span class="ovw-st">Verdict Wall</span>` +
         `<span class="muted" style="font-size:12px">${jobs.length} job${jobs.length === 1 ? "" : "s"} · ${link(["jobs"], "full ledger →")}</span></div>` +
-        (legend ? `<div style="margin:-2px 0 8px">${legend}</div>` : "") +
-        (wall ? `<div class="ovw-wall ovw-scroll">${wall}</div>` : `<p class="muted" style="margin:0">No jobs recorded yet.</p>`) + `</div>`;
+        `${healthBar}` +
+        `${legend ? `<div class="ovw-legend-row">${legend}</div>` : ""}` +
+        `${wall ? `<div class="ovw-wall ovw-scroll">${wall}</div>` : `<p class="muted" style="margin:0">No jobs recorded yet.</p>`}</div>`;
 
-      // The feed: the newest runs as one-liners (the Activity table stays the full record).
+      // ---- MAIN RIGHT: RECENT RUNS FEED stacked above OPEN ORCHESTRATION PLANS.
       const allRows = activityRows(builds, tests, deploys, jobs);
       const feed = allRows
         .slice(0, 14)
-        .map((r) =>
-          queueLine(badge(r.type, "tl-" + r.type), `${esc(r.name)} ${stateBadge(r.state)} ` +
-            `<span class="muted">· ${fmtTime(r.at)} · ${r.host ? esc(r.host) : "—"}${r.job ? ` · ${link(["jobs", r.job], r.job)}` : ""}</span>`),
-        )
+        .map((r) => {
+          const st = isReaped(r.run) ? reapedTag(r.run) : stateBadge(r.state);
+          const dur = r.type === "test" ? human(r.run.elapsed_sec) : runTime(r.run);
+          const ago = shortAgo(r.at);
+          const absTip = r.at && !Number.isNaN(parseTs(r.at)) ? ctAbs(new Date(parseTs(r.at))) : String(r.at || "");
+          return (
+            `<div class="ovw-feed-row" title="${esc(`${r.type} ${r.name} · ${r.state} · ${absTip}`)}">` +
+            `<span class="ovw-feed-badges">${badge(r.type, "tl-" + r.type)}${st}</span>` +
+            `<span class="ovw-feed-name">${esc(r.name)}${r.job ? ` <span class="muted">· ${link(["jobs", r.job], r.job)}</span>` : ""}</span>` +
+            `<span class="ovw-feed-meta mono muted">${dur !== "—" ? esc(dur) : ""}${r.host ? ` · ${esc(r.host.replace(/-pc$/, ""))}` : ""}${ago ? ` · ${esc(ago)}` : ""}</span>` +
+            `</div>`
+          );
+        })
         .join("");
-      const feedHtml = `<div class="ovw-panel"><div style="display:flex;align-items:baseline;gap:10px;margin-bottom:6px">` +
-        `<span class="ovw-st" style="font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.09em;color:var(--muted)">Feed</span>` +
+      const feedHtml =
+        `<div class="ovw-panel"><div class="ovw-sec-head">` +
+        `<span class="ovw-st">Recent Runs</span>` +
         `<span class="muted" style="font-size:12px">${allRows.length} run${allRows.length === 1 ? "" : "s"} · ${link(["activity"], "Activity →")}</span></div>` +
-        (feed ? `<div class="ovw-scroll">${feed}</div>` : `<p class="muted" style="margin:0">No runs recorded yet.</p>`) + `</div>`;
+        `${feed ? `<div class="ovw-scroll ovw-feed-scroll">${feed}</div>` : `<p class="muted" style="margin:0">No runs recorded yet.</p>`}</div>`;
 
       const plans = projects.filter((x) => (x.status || "active") === "active");
-      // The LEFT lane is always the "what's next" lane: queued items when there are any, the open
-      // orchestration plans when the queue is empty — never an empty panel.
-      const plansRail = plans.length
-        ? `<div class="ovw-panel"><div class="ovw-st" style="margin-bottom:6px">Open plans</div><p style="margin:0">` +
-          plans.slice(0, 6).map((x) => link([state.game, "projects", x.id], x.title || x.id)).join(" · ") +
-          ` · ${link([state.game, "projects"], "all →")}</p></div>`
-        : "";
+      const planRows = plans
+        .slice(0, 6)
+        .map((p) => {
+          const ago = shortAgo(p.updated_at || p.created_at);
+          return (
+            `<div class="ovw-plan-row">` +
+            `${badge(p.workflow || "plan")}` +
+            `<span class="ovw-plan-title">${link([state.game, "projects", p.id], p.title || p.id)}</span>` +
+            `<span class="muted mono" style="font-size:11px;flex:none">${ago ? `${esc(ago)} ago` : ""}</span>` +
+            `</div>`
+          );
+        })
+        .join("");
+      const plansHtml =
+        `<div class="ovw-panel"><div class="ovw-sec-head">` +
+        `<span class="ovw-st">Open Plans</span>` +
+        `<span class="muted" style="font-size:12px">${plans.length} active · ${link([state.game, "projects"], "Orchestration →")}</span></div>` +
+        `${planRows || `<p class="muted" style="margin:0">No active orchestration plans.</p>`}</div>`;
 
-      return `<div class="ovw-top">${hero}${dockHtml}</div>
-        <div class="ovw-lanes">${queueRail || plansRail}${wallHtml}${feedHtml}</div>`;
+      return `<div class="ovw-headbar"><div style="display:flex;align-items:center;gap:10px"><h1>Overview</h1>` +
+        `<span class="muted" style="font-size:12px">auto-refresh ${isLiveNow || state.jobsActive ? "5s" : "15s"}</span></div>` +
+        `<span class="muted" style="font-size:12px">Server now: <strong>${nowCT()}</strong> (America/Chicago)</span></div>` +
+        `${pipelineStrip("overview")}` +
+        `<div class="ovw-top">${nowPanelHtml}${dockHtml}</div>` +
+        `<div class="ovw-main">${wallHtml}<div class="ovw-side-col">${feedHtml}${plansHtml}</div></div>`;
     };
     liveBody("#live", body, () => (state.activityActive || state.jobsActive ? 5000 : 15000));
-    return `<h1>Overview</h1>${pipelineStrip("")}
-      <p class="muted" style="max-width:900px">Mission control. The live thing up top, machines below it, then queue / verdict wall / feed — every tile links to its record; refreshes every 5 s while anything is live.</p>
-      <div id="live">${await body()}</div>`;
+    return `<div id="live">${await body()}</div>`;
   },
 
   // "projects" are orchestration DAGs (multi-step plans the server tracks), distinct from the
   // build/test/deploy runs on the Activity page. Each project opens to a step-level view.
   async projects([pid]) {
     const statusBadge = (s) => badge(s, s === "done" ? "kind" : s === "blocked" ? "warn" : "");
+    const progCell = (prog) => {
+      const m = /^(\d+)\s*\/\s*(\d+)$/.exec(String(prog || ""));
+      if (!m) return esc(prog);
+      const done = Number(m[1]), total = Math.max(1, Number(m[2]));
+      const pct = Math.min(100, Math.round((done / total) * 100));
+      return `<div class="wf-prog-wrap"><span class="wf-prog-bar"><span class="wf-prog-fill" style="width:${pct}%"></span></span><span class="mono">${esc(prog)}</span></div>`;
+    };
     if (pid) {
       const [p, b, ev] = await Promise.all([
         api(`/projects/${enc(pid)}`),
@@ -2169,47 +2367,58 @@ const ROUTES = {
             `<td>${esc((s.notes || "").slice(0, 300))}${s.artifacts.length ? `<div class="muted mono">${s.artifacts.map(esc).join("<br>")}</div>` : ""}</td></tr>`,
         )
         .join("");
-      const ready = b.next_steps.map((s) => `<div class="card" style="margin-bottom:10px">
-          <strong>${esc(s.title)}</strong> ${badge(s.kind)} ${s.gate ? badge("gate: " + s.gate, "warn") : ""}
-          <pre>${esc(s.instructions)}</pre>
-          ${s.tools.length ? `<p class="muted">Tools: ${s.tools.map((t) => `<code>${esc(t)}</code>`).join(" ")}</p>` : ""}
+      const ready = b.next_steps.map((s) => `<div class="ovw-active-card" style="margin-bottom:8px">
+          <div class="ovw-ac-head"><strong>${esc(s.title)}</strong> ${badge(s.kind)} ${s.gate ? badge("gate: " + s.gate, "warn") : ""}</div>
+          <pre style="margin:6px 0">${esc(s.instructions)}</pre>
+          ${s.tools.length ? `<p class="muted" style="margin:4px 0">Tools: ${s.tools.map((t) => `<code>${esc(t)}</code>`).join(" ")}</p>` : ""}
           ${s.prompt_text ? `<details><summary>Prompt: ${esc(s.prompt_name)}</summary><pre>${esc(s.prompt_text)}</pre></details>` : ""}
           <form data-step="${esc(s.step_id)}" data-project="${esc(pid)}">
             <textarea name="notes" rows="2" placeholder="notes / evidence"></textarea>
-            <p>${["in_progress", "done", "blocked", "skipped"].map((st) => `<button name="status" value="${st}">${st}</button>`).join(" ")}</p>
+            <p style="margin:6px 0 0">${["in_progress", "done", "blocked", "skipped"].map((st) => `<button name="status" value="${st}">${st}</button>`).join(" ")}</p>
             <div class="result"></div></form></div>`).join("");
-      return `<p>${link([state.game, "projects"], "← Orchestration")}</p><h1>${esc(p.title)}</h1>${pipelineStrip("projects")}
-        <p>${statusBadge(p.status)}${badge(p.workflow)}${badge(p.game)}${p.addon ? badge("addon: " + p.addon) : ""} <span class="mono muted">${esc(p.id)}</span></p>
-        <p class="muted">This is an <strong>orchestration DAG</strong> — the server's multi-step plan — not a build/test run.
-          For the runs these steps drive on hosts, see ${link(["activity"], "Activity")}.</p>
-        <p>${esc(p.goal)}</p><p class="muted">${esc(b.guidance)}</p>
-        <p class="muted">Agent hand-off: <code>continue project ${esc(p.id)}</code> (MCP tool <code>next_step</code>)</p>
-        <h2>Step graph</h2>${stepDag(p.steps)}
-        <h2>Steps (${esc(b.progress)})</h2>
-        <table><tr><th>Step</th><th>State</th><th>Gate</th><th>Evidence</th><th>Updated</th><th>Duration</th><th>Depends on</th><th>Notes / artifacts</th></tr>${stepRowsHtml}</table>
-        ${ready ? `<h2>Ready now</h2>${ready}` : ""}
-        <h2>Timeline</h2>${timelineRows(p.recent_events)}`;
+      return `<p style="margin:0 0 4px">${link([state.game, "projects"], "← Orchestration")}</p>` +
+        `<div class="ovw-headbar"><h1>${esc(p.title)}</h1><span class="mono muted">${esc(p.id)}</span></div>${pipelineStrip("projects")}` +
+        `<div class="ovw-panel" style="margin-bottom:12px"><div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">${statusBadge(p.status)}${badge(p.workflow)}${badge(p.game)}${p.addon ? badge("addon: " + p.addon) : ""}` +
+        `<span class="muted" style="margin-left:auto;font-size:12px">Agent hand-off: <code>continue project ${esc(p.id)}</code> (MCP <code>next_step</code>)</span></div>` +
+        `<p style="margin:8px 0 4px"><strong>${esc(p.goal)}</strong></p>` +
+        `<p class="muted" style="margin:0;font-size:13px">${esc(b.guidance)} · For host runs see ${link(["activity"], "Activity")}.</p></div>` +
+        `${ready ? `<div class="ovw-panel is-active" style="margin-bottom:12px"><div class="ovw-sec-head"><h2 style="margin:0;border:0;padding:0">Ready now</h2><span class="badge kind">${b.next_steps.length} ready</span></div>${ready}</div>` : ""}` +
+        `<div class="ovw-panel" style="margin-bottom:12px"><div class="ovw-sec-head"><h2 style="margin:0;border:0;padding:0">Step graph</h2><span class="muted" style="font-size:12px">${esc(b.progress)} steps complete</span></div>${stepDag(p.steps)}</div>` +
+        `<div class="ovw-panel" style="margin-bottom:12px"><div class="ovw-sec-head"><h2 style="margin:0;border:0;padding:0">Steps (${esc(b.progress)})</h2></div>` +
+        `<div class="wf-table-scroll"><table><tr><th>Step</th><th>State</th><th>Gate</th><th>Evidence</th><th>Updated</th><th>Duration</th><th>Depends on</th><th>Notes / artifacts</th></tr>${stepRowsHtml}</table></div></div>` +
+        `<div class="ovw-panel"><div class="ovw-sec-head"><h2 style="margin:0;border:0;padding:0">Timeline</h2><span class="muted" style="font-size:12px">${(p.recent_events || []).length} events</span></div><div class="ovw-scroll">${timelineRows(p.recent_events)}</div></div>`;
     }
     const [projects, workflows] = await Promise.all([api("/projects"), api("/workflows")]);
     const wfOptions = workflows.filter((w) => w.games.includes(state.game)).map((w) => [w.id, w.title]);
-    return `<h1>Orchestration</h1>${pipelineStrip("projects")}<p class="muted">Multi-step <strong>orchestration DAGs</strong>: the server holds the plan and the
-      quality gates, your agent does the work. These are plans, not runs — for the build/test/deploy runs they drive, see
-      ${link(["activity"], "Activity")}. Start one here or from an MCP client (prompt <code>orchestrate</code>), then hand
-      the project id to your agent. Click a project to open its step-level view: step states, gates, evidence and notes.</p>
-      <form data-start-project class="card">
-        <p>${select("workflow", wfOptions[0]?.[0] || "", wfOptions)}</p>
-        <p><textarea name="goal" rows="2" placeholder="Goal, e.g. an isometric Diablo-style spectator view of the match"></textarea></p>
-        <p><input name="addon" placeholder="addon name (optional, lowercase_snake)"></p>
-        <p><textarea name="inputs" rows="2" placeholder="inputs, one key=value per line (optional)"></textarea></p>
-        <button type="submit">Start project</button><div class="result"></div></form>
-      <h2>Workflows</h2>${workflows.map((w) => `<details><summary><strong>${esc(w.title)}</strong> <span class="mono muted">${esc(w.id)}</span> ${w.games.map((g) => badge(g)).join("")}</summary>
-        <p>${esc(w.description)}</p><ol>${w.steps.map((s) => `<li class="mono">${esc(s)}</li>`).join("")}</ol></details>`).join("")}
-      <h2>All projects</h2>${projects.length ? `<table><tr><th>Project</th><th>Workflow</th><th>Status</th><th>Progress</th><th>Runtime</th><th>Updated</th></tr>
+    const openCount = projects.filter((p) => (p.status || "active") === "active").length;
+    const doneCount = projects.filter((p) => p.status === "done").length;
+    return `<div class="ovw-headbar"><div style="display:flex;align-items:center;gap:10px"><h1>Orchestration</h1>` +
+      `<span class="muted" style="font-size:12px">${openCount} active · ${doneCount} done</span></div>` +
+      `<span class="muted" style="font-size:12px">Multi-step <strong>orchestration DAGs</strong> · runs live on ${link(["activity"], "Activity")}</span></div>` +
+      `${pipelineStrip("projects")}` +
+      `<div class="wf-split-top">` +
+      `<details class="ovw-panel wf-drawer" ${projects.length ? "" : "open"}><summary class="ovw-sec-head" style="margin:0;cursor:pointer">` +
+      `<span class="ovw-st">+ Start New Project</span><span class="muted" style="font-size:12px">MCP prompt <code>orchestrate</code></span></summary>` +
+      `<form data-start-project class="wf-form" style="margin-top:10px">` +
+      `<div class="wf-form-row"><div>${select("workflow", wfOptions[0]?.[0] || "", wfOptions)}</div>` +
+      `<div><input name="addon" placeholder="addon name (optional, lowercase_snake)"></div></div>` +
+      `<div class="wf-form-row"><div><textarea name="goal" rows="2" placeholder="Goal, e.g. an isometric Diablo-style spectator view of the match"></textarea></div>` +
+      `<div><textarea name="inputs" rows="2" placeholder="inputs, one key=value per line (optional)"></textarea></div></div>` +
+      `<div style="display:flex;align-items:center;gap:10px"><button type="submit">Start project</button><div class="result"></div></div></form></details>` +
+      `<details class="ovw-panel wf-drawer"><summary class="ovw-sec-head" style="margin:0;cursor:pointer">` +
+      `<h2 style="margin:0;border:0;padding:0;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:var(--muted)">Workflows</h2>` +
+      `<span class="muted" style="font-size:12px">${workflows.length} templates</span></summary>` +
+      `<div style="margin-top:10px">${workflows.map((w) => `<details style="margin:6px 0"><summary><strong>${esc(w.title)}</strong> <span class="mono muted">${esc(w.id)}</span> ${w.games.map((g) => badge(g)).join("")}</summary>` +
+      `<p class="muted" style="margin:4px 0">${esc(w.description)}</p><ol style="margin:4px 0">${w.steps.map((s) => `<li class="mono">${esc(s)}</li>`).join("")}</ol></details>`).join("")}</div></details>` +
+      `</div>` +
+      `<div class="ovw-panel"><div class="ovw-sec-head"><h2 style="margin:0;border:0;padding:0">All projects</h2>` +
+      `<span class="muted" style="font-size:12px">${projects.length} project${projects.length === 1 ? "" : "s"}</span></div>` +
+      `${projects.length ? `<div class="wf-table-scroll"><table><tr><th>Project</th><th>Workflow</th><th>Status</th><th>Progress</th><th>Runtime</th><th>Updated</th></tr>
       ${projects.map((p) => `<tr><td>${link([state.game, "projects", p.id], p.title)}<div class="muted">${esc(p.goal.slice(0, 90))}</div></td>
-        <td class="mono">${esc(p.workflow)}</td><td>${statusBadge(p.status)}</td><td>${esc(p.progress)}</td>
+        <td class="mono">${esc(p.workflow)}</td><td>${statusBadge(p.status)}</td><td>${progCell(p.progress)}</td>
         <td class="muted">${runTime(p)}${isLive(p) ? `<div class="muted">running</div>` : ""}</td>
-        <td class="muted">${fmtTime(p.updated_at)}</td></tr>`).join("")}</table>`
-        : `<p class="muted">No projects yet.</p>`}`;
+        <td class="muted">${fmtTime(p.updated_at)}</td></tr>`).join("")}</table></div>`
+        : `<p class="muted" style="margin:0">No projects yet.</p>`}</div>`;
   },
 
   // Game-independent: the host registry + live lock state. Read-only (visibility while tests run).
@@ -2223,55 +2432,82 @@ const ROUTES = {
           api("/deploys", { host_id: hostId }),
           api("/test-runs", { host_id: hostId }),
         ]);
-        const facts = h.facts && Object.keys(h.facts).length ? `<details><summary>Facts (${Object.keys(h.facts).length} top-level keys)</summary><pre>${esc(JSON.stringify(h.facts, null, 2))}</pre></details>` : "";
-        return `${nowLine()}<p>${h.shell ? badge(h.shell) : ""}${h.os ? badge(h.os) : ""}${h.hostname ? badge(h.hostname) : ""}<span class="mono muted"> ${esc(h.ssh_target)}</span></p>
-          <p>${lockCell(h.lock)}<span class="muted"> · probed ${h.probed_at ? fmtTime(h.probed_at) : "never"}</span></p>
-          ${h.notes ? `<p class="muted">${esc(h.notes)}</p>` : ""}
-          ${facts}
-          <h2>Lock history</h2>${lockRows(locks)}
-          <h2>Recent builds (${builds.length})</h2>${buildRows(builds.slice(0, 15))}
-          <h2>Recent deployments (${deploys.length})</h2>${deployRows(deploys.slice(0, 15))}
-          <h2>Recent test runs (${tests.length})</h2>${testRows(tests.slice(0, 15))}`;
+        const facts = h.facts && Object.keys(h.facts).length ? `<details style="margin-top:8px"><summary class="muted" style="cursor:pointer">Facts (${Object.keys(h.facts).length} top-level keys)</summary><pre>${esc(JSON.stringify(h.facts, null, 2))}</pre></details>` : "";
+        return `${nowLine()}<div class="ovw-panel" style="margin-bottom:12px">` +
+          `<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">${h.shell ? badge(h.shell) : ""}${h.os ? badge(h.os) : ""}${h.hostname ? badge(h.hostname) : ""}<span class="mono muted">${esc(h.ssh_target)}</span>` +
+          `<span class="muted" style="margin-left:auto;font-size:12px">GPU: <strong>${esc(gpuOf(h))}</strong> · probed ${h.probed_at ? fmtTime(h.probed_at) : "never"}</span></div>` +
+          `<div style="margin-top:8px">${lockCell(h.lock)}</div>` +
+          `${h.notes ? `<p class="muted" style="margin:6px 0 0">${esc(h.notes)}</p>` : ""}${facts}</div>` +
+          `<div class="wf-host-detail-grid">` +
+          `<div class="ovw-panel"><div class="ovw-sec-head"><h2 style="margin:0;border:0;padding:0">Lock history</h2><span class="muted" style="font-size:12px">${locks.length} events</span></div><div class="wf-table-scroll">${lockRows(locks)}</div></div>` +
+          `<div class="ovw-panel"><div class="ovw-sec-head"><h2 style="margin:0;border:0;padding:0">Recent test runs (${tests.length})</h2></div><div class="wf-table-scroll">${testRows(tests.slice(0, 15))}</div></div>` +
+          `<div class="ovw-panel"><div class="ovw-sec-head"><h2 style="margin:0;border:0;padding:0">Recent builds (${builds.length})</h2></div><div class="wf-table-scroll">${buildRows(builds.slice(0, 15))}</div></div>` +
+          `<div class="ovw-panel"><div class="ovw-sec-head"><h2 style="margin:0;border:0;padding:0">Recent deployments (${deploys.length})</h2></div><div class="wf-table-scroll">${deployRows(deploys.slice(0, 15))}</div></div>` +
+          `</div>`;
       };
       liveBody("#live", body);
-      return `<p>${link(["hosts"], "← Hosts")}</p><h1 class="mono">${esc(hostId)}</h1>${pipelineStrip("hosts")}<div id="live">${await body()}</div>`;
+      return `<p style="margin:0 0 4px">${link(["hosts"], "← Hosts")}</p><div class="ovw-headbar"><h1 class="mono">${esc(hostId)}</h1><span class="muted" style="font-size:12px">auto-refresh 5s</span></div>${pipelineStrip("hosts")}<div id="live">${await body()}</div>`;
     }
     const body = async () => {
       const hosts = await api("/hosts");
       if (!hosts.length)
         return `${nowLine()}<p class="muted">No hosts registered. Register one over MCP (<code>register_host</code>) or the CLI (<code>s2docs host register …</code>).</p>`;
-      return `${nowLine()}<table><tr><th>Host</th><th>Shell</th><th>GPU</th><th>Probed</th><th>Lock</th></tr>${hosts
-        .map(
-          (h) =>
-            `<tr><td>${link(["hosts", h.id], h.id)}<div class="muted mono">${esc(h.hostname || h.ssh_target || "")}</div></td>` +
-            `<td>${h.shell ? badge(h.shell) : "—"}${h.os ? badge(h.os) : ""}</td><td>${esc(gpuOf(h))}</td>` +
-            `<td class="muted">${h.probed_at ? fmtTime(h.probed_at) : "never"}</td>` +
-            `<td>${lockCell(h.lock)}</td></tr>`,
-        )
-        .join("")}</table>`;
+      const cards = hosts
+        .map((h) => {
+          const busy = Boolean(h.lock && h.lock.fresh && h.lock.owner);
+          const stuck = Boolean(h.lock && h.lock.stuck);
+          const stale = Boolean(!busy && !stuck && h.lock && h.lock.owner);
+          const ledCls = stuck ? "stuck" : busy ? "busy" : stale ? "stale" : "idle";
+          const phaseStr = h.lock && h.lock.phase
+            ? `${h.lock.phase}${h.lock.phase_age_sec != null ? ` (${human(h.lock.phase_age_sec)})` : ""}`
+            : stuck ? "STUCK" : busy ? "busy" : stale ? "stale lease" : "idle · free lease";
+          return `<a class="ovw-host-card ${busy ? "is-busy" : stuck ? "is-stuck" : ""}" href="#/hosts/${enc(h.id)}">` +
+            `<div class="ovw-hc-top"><span class="ovw-led ${ledCls}"></span><strong style="font-size:15px">${esc(h.id)}</strong>` +
+            `${h.shell ? badge(h.shell) : ""}${h.os ? badge(h.os) : ""}` +
+            `<span class="ovw-hc-gpu muted" style="max-width:none">${esc(gpuOf(h))}</span></div>` +
+            `<div class="ovw-hc-sub" style="margin-top:5px">${h.lock && h.lock.owner ? `<span class="mono">${esc(h.lock.owner)}</span> · ` : ""}` +
+            `<span class="${busy ? "ovw-phase-active" : "muted"}">${esc(phaseStr)}</span>` +
+            `<span class="muted"> · ${esc(h.hostname || h.ssh_target || "")}</span></div></a>`;
+        })
+        .join("");
+      return `${nowLine()}<div class="wf-machines-grid">${cards}</div>` +
+        `<div class="ovw-panel"><div class="ovw-sec-head"><span class="ovw-st">Registry &amp; Lease Details</span>` +
+        `<span class="muted" style="font-size:12px">${hosts.filter((h) => h.lock && h.lock.fresh && h.lock.owner).length}/${hosts.length} busy</span></div>` +
+        `<table><tr><th>Host</th><th>Shell</th><th>GPU</th><th>Probed</th><th>Lock</th></tr>${hosts
+          .map(
+            (h) =>
+              `<tr><td>${link(["hosts", h.id], h.id)}<div class="muted mono">${esc(h.hostname || h.ssh_target || "")}</div></td>` +
+              `<td>${h.shell ? badge(h.shell) : "—"}${h.os ? badge(h.os) : ""}</td><td>${esc(gpuOf(h))}</td>` +
+              `<td class="muted">${h.probed_at ? fmtTime(h.probed_at) : "never"}</td>` +
+              `<td>${lockCell(h.lock)}</td></tr>`,
+          )
+          .join("")}</table></div>`;
     };
     liveBody("#live", body);
-    return `<h1>Hosts</h1>${pipelineStrip("hosts")}<p class="muted">Test/build hosts and who is driving each right now (owner, fresh vs stale, heartbeat age). Auto-refreshes every 5 s. Click a host for its facts, lock history and recent activity.</p><div id="live">${await body()}</div>`;
+    return `<div class="ovw-headbar"><div style="display:flex;align-items:center;gap:10px"><h1>Hosts</h1><span class="muted" style="font-size:12px">auto-refresh 5s</span></div>` +
+      `<span class="muted" style="font-size:12px">Click a host for facts, lock history &amp; recent runs</span></div>${pipelineStrip("hosts")}<div id="live">${await body()}</div>`;
   },
 
   // Game-independent: the live view a person watches to answer "what is running right now".
   async activity() {
     const body = async () => {
-      const [builds, tests, deploys, jobs] = await Promise.all([
+      const [builds, tests, deploys, jobs, hosts] = await Promise.all([
         api("/builds"),
         api("/test-runs"),
         api("/deploys"),
         // The job ledger: a run's job linkage lives here (job_links), not on the run row — see the
         // activity-timeline helpers. A failed fetch degrades to 'no job links', never a blank page.
         api("/jobs", { limit: 200 }).catch(() => []),
+        api("/hosts").catch(() => []),
       ]);
       const isActiveBuild = (b) => b.status === "running" || b.status === "queued";
       const activeBuilds = builds.filter(isActiveBuild);
       // EVERY running session, not just the single /test-runs/current probe: more than one host can
       // run a test at once, and the page must show all of them.
       const activeTests = tests.filter((t) => t.state === "running");
+      const busyHosts = hosts.filter((h) => h.lock && h.lock.fresh && h.lock.owner);
       // Drives the poll cadence: fast while anything is live, slow when the system is idle.
-      state.activityActive = activeBuilds.length > 0 || activeTests.length > 0;
+      state.activityActive = activeBuilds.length > 0 || activeTests.length > 0 || busyHosts.length > 0;
 
       if (!builds.length && !tests.length && !deploys.length) return nowLine() + activityEmptyState();
 
@@ -2283,7 +2519,7 @@ const ROUTES = {
         .sort((a, b) => (ts(a) < ts(b) ? 1 : -1))
         .forEach((t) =>
           nowCards.push(
-            `<div class="card" style="margin-bottom:8px">${stateBadge(t.state)} <strong>TEST</strong> ${esc(t.name)} —
+            `<div class="ovw-active-card test">${stateBadge(t.state)} <strong>TEST</strong> ${esc(t.name)} —
              <span class="mono">${esc(t.step || "(no step)")}</span>
              <span class="muted">· ${human(t.elapsed_sec)} · host ${
                t.host_id ? link(["hosts", t.host_id], t.host_id) : "—"
@@ -2295,12 +2531,26 @@ const ROUTES = {
         .sort((a, b) => (ts(a) < ts(b) ? 1 : -1))
         .forEach((b) =>
           nowCards.push(
-            `<div class="card" style="margin-bottom:8px">${stateBadge(b.status)} <span class="mono">${esc(b.id)}</span> on ${link(
+            `<div class="ovw-active-card build">${stateBadge(b.status)} <span class="mono">${esc(b.id)}</span> on ${link(
               ["hosts", b.host_id],
               b.host_id,
             )} <span class="muted">· ${esc(b.kind)} · up ${runTime(b)}</span>${materialWarning(b)}${
               runPhase(b) ? `<div class="muted mono">${esc(runPhase(b))}</div>` : `<div class="muted mono">${esc(b.command)}</div>`
             }</div>`,
+          ),
+        );
+      const coveredHosts = new Set([
+        ...activeTests.map((t) => t.host_id),
+        ...activeBuilds.map((b) => b.host_id),
+      ].filter(Boolean));
+      busyHosts
+        .filter((h) => !coveredHosts.has(h.id))
+        .forEach((h) =>
+          nowCards.push(
+            `<div class="ovw-active-card lease">${badge("active lease", "kind")} <strong>HOST</strong> ${link(["hosts", h.id], h.id)} — ` +
+            `<span class="mono">${esc(h.lock.owner)}</span>` +
+            `${h.lock.phase ? ` <span class="muted">· phase <span class="mono">${esc(h.lock.phase)}</span>${h.lock.phase_age_sec != null ? ` (${human(h.lock.phase_age_sec)})` : ""}</span>` : ""}` +
+            `${lockStuckBadge(h.lock)}</div>`,
           ),
         );
       const newest = [builds, tests, deploys]
@@ -2310,7 +2560,7 @@ const ROUTES = {
         .sort()
         .pop();
       const idleNote = newest ? ` Last activity ${fmtTime(newest)}.` : "";
-      const now = nowCards.length ? nowCards.join("") : `<p class="muted">Nothing is running right now.${idleNote}</p>`;
+      const now = nowCards.length ? `<div class="ovw-active-list">${nowCards.join("")}</div>` : `<p class="muted" style="margin:0">Nothing is running right now.${idleNote}</p>`;
 
       // ---- BY HOST: everything recent, grouped under the host it ran on (unassigned last).
       const groups = new Map();
@@ -2322,38 +2572,36 @@ const ROUTES = {
         .map(([hid, g]) => {
           const active = g.builds.filter(isActiveBuild).length + g.tests.filter((t) => t.state === "running").length;
           const label = hid === "(unassigned)" ? `<strong>${esc(hid)}</strong>` : link(["hosts", hid], hid);
-          return `<h3>${label} <span class="muted">${active ? `${active} active · ` : ""}${g.builds.length} build${g.builds.length === 1 ? "" : "s"} · ${
-            g.tests.length
-          } test${g.tests.length === 1 ? "" : "s"} · ${g.deploys.length} deploy${g.deploys.length === 1 ? "" : "s"}</span></h3>
-            ${g.builds.length ? buildRows(g.builds.slice(0, 8)) : ""}
-            ${g.tests.length ? `<div class="muted" style="margin:6px 0 2px">test runs</div>${testRows(g.tests.slice(0, 6))}` : ""}
-            ${g.deploys.length ? `<div class="muted" style="margin:6px 0 2px">deployments</div>${deployRows(g.deploys.slice(0, 6))}` : ""}`;
+          return `<div class="ovw-panel"><div class="ovw-sec-head"><h3 style="margin:0;font-size:15px">${label}</h3>` +
+            `<span class="muted" style="font-size:12px">${active ? `${active} active · ` : ""}${g.builds.length} build${g.builds.length === 1 ? "" : "s"} · ${
+              g.tests.length
+            } test${g.tests.length === 1 ? "" : "s"} · ${g.deploys.length} deploy${g.deploys.length === 1 ? "" : "s"}</span></div>` +
+            `${g.builds.length ? `<div class="ovw-st" style="margin:4px 0">builds</div><div class="wf-sub-scroll">${buildRows(g.builds.slice(0, 8))}</div>` : ""}` +
+            `${g.tests.length ? `<div class="ovw-st" style="margin:8px 0 4px">test runs</div><div class="wf-sub-scroll">${testRows(g.tests.slice(0, 6))}</div>` : ""}` +
+            `${g.deploys.length ? `<div class="ovw-st" style="margin:8px 0 4px">deployments</div><div class="wf-sub-scroll">${deployRows(g.deploys.slice(0, 6))}</div>` : ""}</div>`;
         })
         .join("");
 
       // ---- TIMELINE: one chronological sequence, all three types, sorted by each run's OWN start.
       const rows = activityRows(builds, tests, deploys, jobs);
       const linked = rows.filter((r) => r.job).length;
-      const timeline = `<h2>Timeline <span class="muted">${rows.length} run${rows.length === 1 ? "" : "s"} · newest first · all types in one sequence</span></h2>
-        <p class="muted">One row per run, ordered by when it <strong>started</strong> — never its last heartbeat, so a run the reaper
-        finalized after an hour cannot jump back to the top. Consecutive runs that belong to the same job nest under a job heading
-        (build → test → deploy). ${linked ? `${linked} row${linked === 1 ? "" : "s"} linked to a job.` : "No run is linked to a job yet."}
-        Job links come from the job ledger (a run row itself carries no job field); a run no job has linked reads "—".</p>
-        ${activityTimelineHtml(rows)}`;
+      const timeline = `<div class="ovw-panel" style="margin-bottom:12px"><div class="ovw-sec-head">` +
+        `<h2 style="margin:0;border:0;padding:0">Timeline <span class="muted">${rows.length} run${rows.length === 1 ? "" : "s"} · newest first · all types in one sequence</span></h2>` +
+        `<span class="muted" style="font-size:12px">${linked ? `${linked} row${linked === 1 ? "" : "s"} linked to a job` : "No run is linked to a job yet"}</span></div>` +
+        `<p class="muted" style="margin:0 0 8px;font-size:12.5px">Ordered by when each run <strong>started</strong> (never its last heartbeat), with consecutive same-job runs nested together (build → test → deploy).</p>` +
+        `<div class="wf-table-scroll">${activityTimelineHtml(rows)}</div></div>`;
 
-      return `${nowLine()}<h2>Now${state.activityActive ? ` ${badge("live", "kind")}` : ""}</h2>${now}
-        ${timeline}
-        <h2>By host</h2>${hostBlocks}`;
+      return `${nowLine()}<div class="ovw-panel ${state.activityActive ? "is-active" : ""}" style="margin-bottom:12px">` +
+        `<div class="ovw-sec-head"><h2 style="margin:0;border:0;padding:0">Now${state.activityActive ? ` ${badge("live", "kind")}` : ""}</h2></div>${now}</div>` +
+        `${timeline}` +
+        `<h2 style="margin:14px 0 8px">By host</h2><div class="wf-host-grid">${hostBlocks}</div>`;
     };
     // Fast (5 s) while a run is active; slow (15 s) when idle so an idle install isn't hammered.
     liveBody("#live", body, () => (state.activityActive ? 5000 : 15000));
-    return `<h1>Activity</h1>${pipelineStrip("activity")}<p class="muted">What is running right now across all hosts — build runs, test runs and deployments, without SSHing anywhere.
-      This view is <strong>service-fed</strong>: rows appear when work goes through the s2docs build/test/deploy services
-      (MCP <code>build_start</code>/<code>test_start</code>/<code>deploy_push</code>, or the CLI), <em>not</em> from any CS2 running anywhere.
-      The <strong>Timeline</strong> below is ONE chronological sequence across all three types, ordered by when each run
-      <strong>started</strong> (a run's late heartbeat never reorders it), with consecutive runs for the same job nested together.
-      Test-run rows mirror the in-game HUD strip. Every row also carries its <strong>run time</strong>: live while a run is going, the
-      final duration once it finishes. Auto-refreshes every 5 s while a run is active, 15 s when idle.</p><div id="live">${await body()}</div>`;
+    return `<div class="ovw-headbar"><div style="display:flex;align-items:center;gap:10px"><h1>Activity</h1>` +
+      `<span class="muted" style="font-size:12px">auto-refresh 5s live / 15s idle</span></div>` +
+      `<span class="muted" style="font-size:12px"><strong>service-fed</strong> via MCP <code>build_start</code> / <code>test_start</code> / <code>deploy_push</code> · every row carries its <strong>run time</strong></span></div>` +
+      `${pipelineStrip("activity")}<div id="live">${await body()}</div>`;
   },
 
   // Game-independent: the job ledger + queue — one record per requested test/demo/final run.
@@ -2361,7 +2609,7 @@ const ROUTES = {
     if (jobId) {
       const body = async () => loadJobDetail(jobId);
       liveBody("#live", body, () => 5000);
-      return `<p>${link(["jobs"], "← Jobs")}</p>${pipelineStrip("jobs")}<div id="live">${await body()}</div>`;
+      return `<p style="margin:0 0 4px">${link(["jobs"], "← Jobs")}</p>${pipelineStrip("jobs")}<div id="live">${await body()}</div>`;
     }
     const body = async () => {
       const [allJobs, hosts] = await Promise.all([api("/jobs"), api("/hosts")]);
@@ -2370,11 +2618,10 @@ const ROUTES = {
     };
     // Fast (5 s) while any job is running; slow (15 s) when the queue is idle.
     liveBody("#live", body, () => (state.jobsActive ? 5000 : 15000));
-    return `<h1>Jobs</h1>${pipelineStrip("jobs")}<p class="muted">One record per requested run: the intake is the gate, the timeline is the
-      record, screenshots/logs are artifacts, and a job closes out with a mandatory summary (what / why / learned /
-      next). Jobs <strong>never</strong> claim the host lease — the build/test/deploy tools still do; a job links to
-      those records. The queue is per host: running on top, then queued by position. Auto-refreshes every 5 s while a
-      job is running, 15 s when idle.</p><div id="live">${await body()}</div>`;
+    return `<div class="ovw-headbar"><div style="display:flex;align-items:center;gap:10px"><h1>Jobs</h1>` +
+      `<span class="muted" style="font-size:12px">auto-refresh 5s live / 15s idle</span></div>` +
+      `<span class="muted" style="font-size:12px">Intake gate · live timeline · evidence gallery · close-out summary</span></div>` +
+      `${pipelineStrip("jobs")}<div id="live">${await body()}</div>`;
   },
 
   async validate() {

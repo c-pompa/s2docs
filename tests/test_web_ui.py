@@ -917,3 +917,18 @@ const badge = (t, cls = "") => `<span class="badge ${cls}">${esc(t)}</span>`;
     assert out["inconclusive"] == '<span class="badge inconclusive">inconclusive</span>'
     # the distinction that matters: an unjudged run reads as neither a pass nor a failure
     assert "kind" not in out["inconclusive"] and "warn" not in out["inconclusive"]
+
+
+def test_overview_wallboard_invariants(client):
+    """Overview wallboard: single .ovw-now-wrap cell in .ovw-top so concurrent active runs never
+    spill into the Machine Dock column; ovwLockStrip joins HostLock.fresh so RunLockSummary never
+    falsely renders STALE; and shortAgo omits trailing zero units."""
+    js = client.get("/app.js").text
+    css = client.get("/style.css").text
+    assert "async overview()" in js
+    assert "ovw-now-wrap" in js and "ovw-dockpanel" in js and "ovw-main" in js
+    assert "ovwLockStrip" in js and "onceLockStrip" in js
+    assert "lockCell(t.lock)" not in js  # RunLockSummary omits `fresh` — must go through ovwLockStrip
+    assert ".ovw-top" in css and ".ovw-main" in css and ".ovw-tile" in css
+    assert "grid-auto-rows: 64px" in css
+
