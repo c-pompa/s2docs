@@ -569,6 +569,7 @@ def _cmd_learning(args: argparse.Namespace) -> int:
     from s2docs.learning import harvest as H
     from s2docs.learning import report as L
     from s2docs.learning.gate import GateError
+    from s2docs.learning.rewrite_eval import RewriteEvalError
     from s2docs.learning.sft import SftGateError
 
     db = Database(get_settings().db_path)
@@ -681,6 +682,20 @@ def _cmd_learning(args: argparse.Namespace) -> int:
             ] + [f"  note: {n}" for n in r.notes]
             return _emit(args, {"rewrite": {"query": r.query, "game": r.game,
                                             "dropped": list(r.dropped), "notes": list(r.notes)}}, human)
+        if args.learning_cmd == "rewrite-eval":
+            from s2docs.learning import rewrite_eval as RE
+
+            out = RE.evaluate()                             # RE.main's own 0/1/2 contract, mapped below
+            mapped = _map_gate_exit(out["code"])            # could-not-evaluate (2) -> EXIT_PARTIAL (6)
+            if getattr(args, "json", False):
+                print(json.dumps({"schema": "s2docs/v1", "rewrite_eval": out}))
+            else:
+                for line in RE.report_lines(out):
+                    print(line)
+            if out["reason"]:
+                print(("COULD NOT EVALUATE" if out["code"] == 2 else "REWRITE EVAL FAILED")
+                      + f": {out['reason']}", file=sys.stderr)
+            return mapped
     except LearningSourceMissing as exc:
         return _fail(str(exc), EXIT_PARTIAL)  # 6: a source was unreadable — a skip is not a pass
     except KeyError as exc:                    # review.promote on a job with no correction row
@@ -688,6 +703,8 @@ def _cmd_learning(args: argparse.Namespace) -> int:
     except SftGateError as exc:
         return _fail(str(exc), EXIT_VALIDATION)  # 9: no eval baseline — refuse to prep a fine-tune
     except GateError as exc:                    # export.cases(): the golden set is a declared source
+        return _fail(f"COULD NOT EVALUATE: {exc}", EXIT_PARTIAL)
+    except RewriteEvalError as exc:             # rewrite-eval: the live index was unreadable
         return _fail(f"COULD NOT EVALUATE: {exc}", EXIT_PARTIAL)
     return _fail(f"unknown learning command {args.learning_cmd!r}", EXIT_ERROR)
 
@@ -1111,6 +1128,9 @@ def main(argv: list[str] | None = None) -> int:
     q.add_argument("--json", action="store_true", help="Machine-readable output")
     q = lc.add_parser("rewrite", help="Deterministically rewrite prose into search keywords (+ game)")
     q.add_argument("text", help="A user's question, e.g. 'how do I make a breakable prop'")
+    q.add_argument("--json", action="store_true", help="Machine-readable output")
+    q = lc.add_parser("rewrite-eval",
+                      help="Measure the rewriter over the frozen eval set (exit 6 when it cannot evaluate)")
     q.add_argument("--json", action="store_true", help="Machine-readable output")
     p.set_defaults(fn=_cmd_learning)
 
