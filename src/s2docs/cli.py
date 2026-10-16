@@ -39,6 +39,9 @@ _TEST_STATES = ("idle", "running", "pass", "fail")
 # (the service validates too, so a drift here is a 9, never a bad row).
 _JOB_FINISH_STATUSES = ("passed", "failed", "error", "cancelled", "inconclusive")
 _JOB_TERMINAL_STATUSES = ("passed", "failed", "error", "cancelled", "inconclusive")
+# Who asked for the run (mirrors models.JOB_ORIGINS; migration 0014). The learning loop reads the job
+# ledger by origin, so a synthetic caller must tag itself here or it inflates a training artifact.
+_JOB_ORIGINS = ("human", "agent", "driver", "eval", "probe", "warmup")
 
 
 def _parse_duration(value: str) -> int:
@@ -628,6 +631,7 @@ def _cmd_job(args: argparse.Namespace) -> int:
                 branch=args.branch,
                 commit=args.commit,
                 requested_by=args.requested_by,
+                origin=args.origin,
             )
             return _emit(args, {"job": job.model_dump()}, _human_job(job))
         if args.job_cmd == "list":
@@ -937,6 +941,15 @@ def main(argv: list[str] | None = None) -> int:
     q.add_argument("--confirm", action="store_true", help="The human iso_confirm gate decides pass/fail")
     q.add_argument("--screenshots", default="each_step", choices=["each_step", "on_request", "none"])
     q.add_argument("--watching", action="store_true", help="The user is watching this run live")
+    q.add_argument(
+        "--origin",
+        choices=_JOB_ORIGINS,
+        default=None,
+        help=(
+            "Who asked for this run (default: agent). The learning loop reads the ledger by origin: "
+            "tag tooling/driver/eval/probe runs so they cannot be mistaken for a person's."
+        ),
+    )
     q.add_argument("--branch")
     q.add_argument("--commit")
     q.add_argument("--requested-by", help="Coordinator session id")

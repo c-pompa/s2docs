@@ -202,6 +202,7 @@ def _job(row: sqlite3.Row) -> m.Job:
         target=row["target"],
         host_id=row["host_id"],
         status=row["status"],
+        origin=row["origin"],
         position=row["position"],
         params=json.loads(row["params"]),
         requested_by=row["requested_by"],
@@ -346,6 +347,7 @@ def enqueue(
     cleanup: list[str] | None = None,
     requested_by: str | None = None,
     project_id: str | None = None,
+    origin: str | None = None,
 ) -> m.Job:
     """Validate the intake and store a queued job. The intake is the gate: every missing required field
     is reported in one 422 with a field list, so an agent fixes them in one pass."""
@@ -364,6 +366,12 @@ def enqueue(
         fields.append("host_id")  # needs host_id or host_choice='ask'
     if screenshots not in SCREENSHOT_MODES:
         fields.append("screenshots")
+    # Provenance is validated here, not by a CHECK constraint (SQLite cannot add one via ALTER): an
+    # unknown value is a 422 naming the field, so it can never silently become a real origin. This is
+    # the learning loop's only guarantee that a synthetic run cannot be mistaken for a person's.
+    resolved_origin = origin or m.DEFAULT_JOB_ORIGIN
+    if resolved_origin not in m.JOB_ORIGINS:
+        fields.append("origin")
     if max_minutes is None:
         max_minutes = DEFAULT_MAX_MINUTES
     if kind in ("test", "demo") and max_minutes > DEFAULT_MAX_MINUTES and not _s(reason):
@@ -397,9 +405,9 @@ def enqueue(
     jid = "j-" + secrets.token_hex(4)
     with db.writer() as conn, conn:
         conn.execute(
-            "INSERT INTO jobs (id, kind, title, target, host_id, status, params, requested_by, project_id) "
-            "VALUES (?, ?, ?, ?, ?, 'queued', ?, ?, ?)",
-            (jid, kind, title, target, host_id, json.dumps(params), requested_by, project_id),
+            "INSERT INTO jobs (id, kind, title, target, host_id, status, params, requested_by, project_id, origin) "
+            "VALUES (?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?)",
+            (jid, kind, title, target, host_id, json.dumps(params), requested_by, project_id, resolved_origin),
         )
     return get(db, jid)
 

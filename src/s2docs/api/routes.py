@@ -632,6 +632,14 @@ class JobEnqueueIn(BaseModel):
     cleanup: list[str] | None = Field(default=None, description="Things that must be gone at the end")
     requested_by: str | None = Field(default=None, description="Coordinator session id")
     project_id: str | None = None
+    origin: str | None = Field(
+        default=None,
+        description=(
+            "Who asked for this run: human | agent | driver | eval | probe | warmup. Defaults to "
+            "'agent'. The learning loop reads the ledger by origin, so tag synthetic callers "
+            "(driver/eval/probe/warmup) at intake — an untagged repeat run inflates a training set."
+        ),
+    )
 
 
 class JobAssignIn(BaseModel):

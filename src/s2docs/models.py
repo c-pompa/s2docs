@@ -658,6 +658,15 @@ JOB_STATUSES: tuple[str, ...] = JobStatus.__args__  # type: ignore[attr-defined]
 ACTIVE_JOB_STATUSES: tuple[str, ...] = ("queued", "running")
 TERMINAL_JOB_STATUSES: tuple[str, ...] = ("passed", "failed", "error", "cancelled", "inconclusive")
 
+# Who asked for the run (migration 0014). The learning loop scopes to this: 'human' is a person
+# running or watching a demo, 'driver' the verify-demo driver, 'eval' a golden-question suite,
+# 'probe' ad-hoc diagnostics and 'warmup' a post-deploy smoke check — those three are synthetic
+# traffic and must never inflate a learning artifact. 'agent' is Hermes' own work and is treated as
+# real usage. Recorded at intake, validated there, never inferred later.
+JobOrigin = Literal["human", "agent", "driver", "eval", "probe", "warmup"]
+JOB_ORIGINS: tuple[str, ...] = JobOrigin.__args__  # type: ignore[attr-defined]
+DEFAULT_JOB_ORIGIN = "agent"
+
 JobEventLevel = Literal["info", "warn", "error", "crash", "screenshot", "milestone", "learning"]
 JOB_EVENT_LEVELS: tuple[str, ...] = JobEventLevel.__args__  # type: ignore[attr-defined]
 
@@ -734,6 +743,10 @@ class Job(BaseModel):
     target: str
     host_id: str | None = Field(default=None, description="NULL = not yet assigned (host_choice='ask')")
     status: JobStatus
+    origin: JobOrigin = Field(
+        default="agent",
+        description="Who asked for this run (human | agent | driver | eval | probe | warmup) — scopes the learning loop",
+    )
     position: int = 100
     params: dict = Field(default_factory=dict, description="Intake: purpose, expected, caps, flags, pending_shot, ...")
     requested_by: str | None = None
