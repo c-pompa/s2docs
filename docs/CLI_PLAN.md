@@ -198,12 +198,40 @@ Exit codes are a stable contract:
 | 6 | partial (a batch had some failures; per-item detail in `--json`) |
 | 7 | timeout or cancelled |
 
-The learning loop reuses the same contract (`docs/LEARNING_LOOP.md`):
+### The learning loop (`s2docs learning <verb>`)
+
+The loop reuses the global contract above (`docs/LEARNING_LOOP.md`). Verbs:
 
 ```
-learning gate    0 pass · 1 regression (recall below floor or a trap failed) · 2 could not evaluate
-learning harvest 0 ok            · 6 a declared source could not be read (never an empty artifact)
+learning report     [--since-days N] [--json]                     readiness: counts by origin
+learning harvest    [--since-days N] [--origin human|...|all]     the four artifacts from the ledger
+learning digest     [--since-days N] [--json]                     signals.jsonl + lessons + report
+learning gate       [--self-test] [-v] [--json]                   score the golden-question eval
+learning sft        [--require-baseline] [--since-days N] [--json]  dataset + train config (no training)
+learning export     [--since-days N] [--json]                     lab4 corpus / lab5 problems / cases
+learning exemplars  [--since-days N] [--json]                     approved confirmations -> corpus docs
+learning review     [--since-days N] [--json]                     the human correction queue
+learning promote    --job <id> --expect <key> [--query T] [--checker C] [--json]
 ```
+
+`promote --query` defaults to the derived subject of the run's goal (not the whole brief — the gate's
+`Repository.search` ANDs up to 12 tokens, so a brief filed verbatim is a query nothing can match); it is
+what `learning gate` will search with. A duplicate promotion is `0` with `appended: false` — a double
+click is not an error.
+
+The one mapping that is a footgun: the gate module (`s2docs/learning/gate.py`) uses its **own**
+`0 pass · 1 regression · 2 could-not-evaluate`, but in this repo `2` is `EXIT_LOCKED`. A
+"could not evaluate" must never surface as "locked" — an agent branches on the code and would retry a
+host lease that does not exist — so the CLI remaps gate `2` to **6** (`EXIT_PARTIAL`). See
+`_map_gate_exit` in `cli.py` for the same note at the mapping site.
+
+| code | learning meaning |
+|---|---|
+| 0 | success (incl. a duplicate `promote`, and a digest with no unreadable source) |
+| 1 | gate regression (recall below the floor / last run, or a trap failed) |
+| 3 | not found (`promote` on a job with no correction row) |
+| 6 | a declared source could not be read, **or the gate could not evaluate** (the remapped gate `2`) |
+| 9 | validation — `sft --require-baseline` with no recorded eval baseline |
 
 ## 3. Efficiency
 
