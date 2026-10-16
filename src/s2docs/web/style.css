@@ -308,10 +308,155 @@ table.timeline { margin-top: 6px; }
 .rel-jobs { margin: 6px 0 0; padding-left: 18px; }
 .rel-jobs li { margin: 3px 0; }
 
-/* Responsive down to ~1000px: the meta grid and the four summary blocks stack sensibly. */
+/* OVERVIEW: mission-control wallboard — invariant 2-row layout (Row 1 = Now Running + Machine Dock;
+   Row 2 = Verdict Wall + stacked Recent Runs & Open Plans). All colour mixes use theme tokens so
+   light mode works too, and the radius stays the single --r token (square design). */
+.ovw-headbar { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-bottom: 2px; }
+.ovw-headbar h1 { margin: 0; }
+.ovw-panel { border: 1px solid var(--border); border-radius: var(--r); background: var(--panel);
+             padding: 12px 14px; min-width: 0; }
+.ovw-sec-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 10px; }
+.ovw-st { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); }
+.ovw-live-pill { display: inline-flex; align-items: center; gap: 6px; font-size: 11px; font-weight: 600;
+                 padding: 2px 8px; border-radius: var(--r); border: 1px solid var(--border); background: var(--bg); color: var(--muted); }
+.ovw-live-pill.live { border-color: color-mix(in srgb, var(--accent) 55%, var(--border)); color: var(--accent);
+                      background: color-mix(in srgb, var(--accent) 10%, var(--bg)); }
+
+/* Row 1 & Row 2 share the exact same 2-column grid split so the center vertical axis aligns pixel-for-pixel. */
+.ovw-top { display: grid; grid-template-columns: minmax(0, 1.32fr) minmax(360px, 1fr); gap: 12px; align-items: stretch; margin-bottom: 12px; }
+.ovw-now-wrap { display: flex; flex-direction: column; justify-content: space-between; }
+.ovw-now-wrap.is-active { border-color: color-mix(in srgb, var(--accent) 50%, var(--border)); }
+.ovw-active-list { display: flex; flex-direction: column; gap: 6px; max-height: 220px; overflow-y: auto; padding-right: 4px; }
+.ovw-active-card { border: 1px solid var(--border); border-left: 3px solid var(--accent); border-radius: var(--r);
+                   background: var(--bg); padding: 8px 11px; }
+.ovw-active-card.job { border-left-color: var(--link); }
+.ovw-active-card.lease { border-left-color: var(--ok); }
+.ovw-ac-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 12px; }
+.ovw-ac-head .badge { margin: 0; }
+.ovw-ac-right { margin-left: auto; display: inline-flex; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); }
+.ovw-cta { display: inline-block; padding: 2px 8px; border-radius: var(--r); border: 1px solid var(--accent);
+           background: color-mix(in srgb, var(--accent) 14%, var(--panel)); color: var(--accent); font-weight: 600; font-size: 11.5px; }
+.ovw-cta:hover { text-decoration: none; background: color-mix(in srgb, var(--accent) 24%, var(--panel)); }
+.ovw-ac-title { font-size: 16px; font-weight: 700; margin-top: 5px; display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.ovw-step-pill { font-size: 12.5px; font-weight: 500; color: var(--fg); background: var(--code);
+                 padding: 1px 7px; border-radius: var(--r); border: 1px solid var(--border); }
+.ovw-telemetry { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-top: 7px;
+                 padding-top: 6px; border-top: 1px dashed var(--border); font-size: 12px; }
+.ovw-telemetry .badge { margin: 0; }
+.ovw-tel-sep { color: var(--muted); opacity: .6; }
+.ovw-idle-box { padding: 14px 12px; border: 1px dashed var(--border); border-radius: var(--r);
+                background: var(--bg); font-size: 13.5px; }
+.ovw-queue-strip { margin-top: 10px; padding-top: 8px; border-top: 1px solid var(--border);
+                   display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.ovw-q-list { display: flex; gap: 6px; flex-wrap: wrap; flex: 1; }
+.ovw-q-chip { display: inline-flex; align-items: center; gap: 6px; padding: 3px 8px;
+              border: 1px solid var(--border); border-radius: var(--r); background: var(--bg); font-size: 12px; }
+.ovw-q-chip .badge { margin: 0; }
+
+/* Machine dock cards */
+.ovw-dockpanel { display: flex; flex-direction: column; }
+.ovw-dock { display: flex; flex-direction: column; gap: 8px; flex: 1; justify-content: center; }
+.ovw-host-card { display: block; padding: 8px 11px; border: 1px solid var(--border); border-left: 3px solid var(--muted);
+                 border-radius: var(--r); background: var(--bg); color: var(--fg); }
+.ovw-host-card.is-busy { border-left-color: var(--accent); background: color-mix(in srgb, var(--accent) 6%, var(--bg)); }
+.ovw-host-card.is-stuck { border-left-color: var(--bad); background: color-mix(in srgb, var(--bad) 8%, var(--bg)); }
+.ovw-host-card:hover { text-decoration: none; border-color: var(--muted); }
+.ovw-hc-top { display: flex; align-items: center; gap: 8px; font-size: 13.5px; }
+.ovw-hc-gpu { margin-left: auto; font-size: 11.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 165px; }
+.ovw-hc-sub { margin-top: 3px; padding-left: 17px; font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ovw-phase-active { color: var(--accent); font-weight: 600; }
+.ovw-led { width: 9px; height: 9px; border-radius: 50%; flex: none; background: var(--muted); }
+.ovw-led.busy { background: var(--accent); animation: ovw-pulse 1.6s ease-in-out infinite; }
+.ovw-led.stuck { background: var(--bad); animation: ovw-pulse .8s ease-in-out infinite; }
+.ovw-led.stale { background: color-mix(in srgb, var(--muted) 45%, transparent); }
+@keyframes ovw-pulse { 50% { opacity: .3; } }
+
+/* Row 2: Verdict Wall (left, wider) + Side Column (right: Recent Runs Feed + Open Plans stacked). */
+.ovw-main { display: grid; grid-template-columns: minmax(0, 1.32fr) minmax(360px, 1fr); gap: 12px; align-items: start; }
+.ovw-side-col { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+.ovw-scroll { max-height: 440px; overflow-y: auto; padding-right: 6px; }
+.ovw-feed-scroll { max-height: 290px; }
+
+/* Verdict wall health bar, legend, and titled tiles */
+.ovw-hbar { display: flex; height: 6px; border-radius: var(--r); overflow: hidden; gap: 2px; margin-bottom: 8px; background: var(--bg); }
+.ovw-hbar-seg.passed { background: var(--ok); }
+.ovw-hbar-seg.failed { background: var(--bad); }
+.ovw-hbar-seg.running { background: var(--link); }
+.ovw-hbar-seg.queued { background: var(--accent); }
+.ovw-hbar-seg.inconclusive { background: var(--muted); opacity: .65; }
+.ovw-hbar-seg.cancelled { background: var(--border); }
+.ovw-legend-row { display: flex; flex-wrap: wrap; gap: 4px 12px; margin-bottom: 10px; }
+.ovw-lg { font-size: 11.5px; color: var(--muted); display: inline-flex; align-items: center; gap: 5px; }
+.ovw-lg strong { color: var(--fg); font-variant-numeric: tabular-nums; }
+.ovw-lg::before { content: ""; display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+.ovw-lg.passed { color: var(--ok); }
+.ovw-lg.failed { color: var(--bad); }
+.ovw-lg.running { color: var(--link); }
+.ovw-lg.queued { color: var(--accent); }
+.ovw-lg.cancelled, .ovw-lg.inconclusive { color: var(--muted); }
+
+.ovw-wall { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); grid-auto-rows: 64px; gap: 8px; }
+.ovw-tile { display: flex; flex-direction: column; justify-content: space-between; height: 64px; border: 1px solid var(--border);
+            border-left: 3px solid var(--muted); border-radius: var(--r); padding: 6px 9px;
+            background: var(--bg); color: var(--fg); min-width: 0; overflow: hidden; }
+.ovw-tile:hover { text-decoration: none; border-color: var(--muted); }
+.ovw-tile-top { display: flex; align-items: baseline; justify-content: space-between; gap: 6px; }
+.ovw-tile .ovw-st { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; }
+.ovw-tile .ovw-age { font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.ovw-tile-title { font-size: 12.5px; font-weight: 600; color: var(--fg); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ovw-tile-meta { font-size: 11px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ovw-tile .ovw-id { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 11px; color: var(--fg); opacity: .85; }
+.ovw-tile.passed { border-left-color: var(--ok); background: color-mix(in srgb, var(--ok) 11%, var(--bg)); }
+.ovw-tile.passed .ovw-st { color: var(--ok); }
+.ovw-tile.failed { border-left-color: var(--bad); background: color-mix(in srgb, var(--bad) 12%, var(--bg)); }
+.ovw-tile.failed .ovw-st { color: var(--bad); }
+.ovw-tile.running { border-left-color: var(--link); background: color-mix(in srgb, var(--link) 14%, var(--bg)); }
+.ovw-tile.running .ovw-st { color: var(--link); }
+.ovw-tile.queued { border-left-color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, var(--bg)); }
+.ovw-tile.queued .ovw-st { color: var(--accent); }
+.ovw-tile.cancelled { border-left-color: var(--border); background: var(--code); opacity: .85; }
+.ovw-tile.cancelled .ovw-st { color: var(--muted); }
+.ovw-tile.inconclusive { border-left-color: var(--muted); border-style: dashed; border-left-style: solid; background: var(--code); }
+.ovw-tile.inconclusive .ovw-st { color: var(--muted); }
+
+/* Feed & Open Plans rows */
+.ovw-feed-row { display: flex; align-items: center; gap: 8px; padding: 6px 0; border-bottom: 1px solid var(--border); font-size: 12.5px; min-width: 0; }
+.ovw-feed-row:last-child { border-bottom: none; }
+.ovw-feed-badges { display: inline-flex; align-items: center; gap: 4px; flex: none; }
+.ovw-feed-badges .badge { margin: 0; }
+.ovw-feed-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
+.ovw-feed-meta { flex: none; font-size: 11.5px; white-space: nowrap; }
+.ovw-plan-row { display: flex; align-items: center; gap: 8px; padding: 5px 0; border-bottom: 1px solid var(--border); font-size: 12.5px; min-width: 0; }
+.ovw-plan-row:last-child { border-bottom: none; }
+.ovw-plan-row > .badge { flex: none; margin: 0; }
+.ovw-plan-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* WORKFLOW STAGES 1–4 (Orchestration / Jobs / Activity / Hosts): shared panel grids, scroll-capped
+   tables with sticky headers, collapsible drawers, and inline progress bars. */
+.wf-split-top { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(280px, 1fr); gap: 12px; align-items: start; margin-bottom: 12px; }
+.wf-drawer > summary { list-style: none; }
+.wf-drawer > summary::-webkit-details-marker { display: none; }
+.wf-form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 8px; }
+.wf-prog-wrap { display: inline-flex; align-items: center; gap: 8px; }
+.wf-prog-bar { display: inline-block; width: 54px; height: 6px; border-radius: var(--r); background: var(--code); border: 1px solid var(--border); overflow: hidden; }
+.wf-prog-fill { display: block; height: 100%; background: var(--accent); }
+.wf-table-scroll { max-height: 460px; overflow-y: auto; padding-right: 4px; }
+.wf-sub-scroll { max-height: 220px; overflow-y: auto; padding-right: 4px; }
+.wf-table-scroll th, .wf-sub-scroll th { position: sticky; top: 0; background: var(--panel); z-index: 1; }
+table.timeline td:nth-child(4) { max-width: 260px; overflow: hidden; text-overflow: ellipsis; }
+table.timeline td:nth-child(4) > div { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 260px; }
+table.timeline td:nth-child(1), table.timeline td:nth-child(5), table.timeline td:nth-child(6), table.timeline td:nth-child(7) { white-space: nowrap; }
+.wf-machines-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 10px; margin-bottom: 12px; }
+.wf-host-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(420px, 1fr)); gap: 12px; align-items: start; }
+.wf-host-detail-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; align-items: start; }
+
+/* Responsive down to ~1100px for job-page grids; wallboard 2-column grids stack below 920px. */
 @media (max-width: 1100px) {
   main { padding: 16px 16px; }
   .sm-grid { grid-template-columns: 1fr; }
   .shot-grid { grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); }
   .jh-meta { grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); }
+}
+@media (max-width: 920px) {
+  .ovw-top, .ovw-main, .wf-split-top, .wf-form-row, .wf-host-grid, .wf-host-detail-grid { grid-template-columns: 1fr; }
 }

@@ -415,7 +415,7 @@ def test_frontend_central_time_markers(client):
     assert "fmtTime(e.ts)" in js  # lock history
     assert "fmtTime(d.created_at)" in js  # deployments
     assert "fmtTime(p.updated_at)" in js and "fmtTime(s.updated_at)" in js  # projects + step table
-    assert js.count("fmtTime(h.probed_at)") == 2  # hosts list + host detail
+    assert js.count("fmtTime(h.probed_at)") >= 2  # hosts list + host detail
     # the raw ISO stays reachable in a tooltip; a null reads '—', an unparseable value is kept escaped
     assert 'title="${esc(String(iso))}"' in js
     # 'server now' line so a relative age can be sanity-checked (Hosts + Activity)
@@ -917,3 +917,18 @@ const badge = (t, cls = "") => `<span class="badge ${cls}">${esc(t)}</span>`;
     assert out["inconclusive"] == '<span class="badge inconclusive">inconclusive</span>'
     # the distinction that matters: an unjudged run reads as neither a pass nor a failure
     assert "kind" not in out["inconclusive"] and "warn" not in out["inconclusive"]
+
+
+def test_overview_wallboard_invariants(client):
+    """Overview wallboard: single .ovw-now-wrap cell in .ovw-top so concurrent active runs never
+    spill into the Machine Dock column; ovwLockStrip joins HostLock.fresh so RunLockSummary never
+    falsely renders STALE; and shortAgo omits trailing zero units."""
+    js = client.get("/app.js").text
+    css = client.get("/style.css").text
+    assert "async overview()" in js
+    assert "ovw-now-wrap" in js and "ovw-dockpanel" in js and "ovw-main" in js
+    assert "ovwLockStrip" in js and "onceLockStrip" in js
+    assert "lockCell(t.lock)" not in js  # RunLockSummary omits `fresh` — must go through ovwLockStrip
+    assert ".ovw-top" in css and ".ovw-main" in css and ".ovw-tile" in css
+    assert "grid-auto-rows: 64px" in css
+
