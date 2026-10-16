@@ -932,3 +932,313 @@ def test_overview_wallboard_invariants(client):
     assert ".ovw-top" in css and ".ovw-main" in css and ".ovw-tile" in css
     assert "grid-auto-rows: 64px" in css
 
+
+# ------------------------------------------------- Sidebar: fold + filter + live badges
+# The user ask: grouping the 18 links was not enough on its own. Three affordances thin the sidebar
+# out — a per-group fold (persisted), one filter across every label, and a live count on the three
+# groups that carry pending work. The taxonomy itself (NAV_GROUPS) is deliberately unchanged, so a
+# reader who learned the four groups keeps them.
+def test_frontend_sidebar_fold_filter_badges_markers(client):
+    """The sidebar's fold/filter/badge wiring exists in app.js, the filter input sits OUTSIDE #nav
+    (so a badge repaint can't eat the query) in index.html, and style.css carries the rail + notch."""
+    js = client.get("/app.js").text
+    css = client.get("/style.css").text
+    html = client.get("/index.html").text
+    # the pure helper block the node test below lifts, with its fold/filter/badge constants
+    assert "nav-helpers:start" in js and "nav-helpers:end" in js
+    assert "function navHtml(" in js and "const navCollapsed" in js and "const navMatch" in js
+    assert 'NAV_COLLAPSE_KEY = "s2docs.nav.collapsed"' in js
+    # badges are keyed by SECTION id — the link that wears them — with a folded group rolling up its
+    # children's counts, since mapping them to GROUP titles would never match anything ("Jobs" is a link)
+    assert "const navBadge = (n, title)" in js and "badges[id]" in js
+    assert "const rolled = open ? 0 : items.reduce(" in js and "navBadge(rolled, badgeTitles.group)" in js
+    # the four groups are UNCHANGED by this work (the regroup is a separate decision)
+    assert '["Reference", [' in js and '["Workflow", [' in js and '["Authoring", [' in js and '["Index", [' in js
+    # the fold toggle is persisted and delegated, so the periodic #nav repaint can never unbind it
+    assert "localStorage.setItem(NAV_COLLAPSE_KEY" in js
+    assert 'closest("[data-nav-group]")' in js and "data-nav-group=" in js and "aria-expanded=" in js
+    # the filter is a way to REACH a page: Enter opens the first surviving section, Escape clears
+    assert 'getElementById("nav-filter")' not in js and 'const f = $("#nav-filter")' in js
+    assert 'a.nav-link:not(.disabled)' in js and 'e.key === "Escape"' in js
+    # the filter is a sibling of #nav, not a child: a repaint of the list must not drop the query
+    assert '<input id="nav-filter"' in html and html.index('<input id="nav-filter"') < html.index('<nav id="nav"')
+    # badges ride on the four existing reads — no new API surface
+    assert 'api("/jobs", { status: "active" })' in js and 'api("/builds", { active: true })' in js
+    assert 'api("/test-runs", { state: "running" })' in js and 'api("/hosts")' in js
+    assert "refreshNavBadges" in js and "startNavBadges" in js and "state.navBadgeDetail" in js
+    # the slow path owns the timer and the hidden-tab guard; route() owns the per-navigation refresh,
+    # so an action shows up on the next move instead of up to 20 s later, and a hidden tab polls nothing
+    assert "if (!document.hidden) refreshNavBadges();" in js and "document.hidden" in js
+    assert js.count("refreshNavBadges();") >= 1
+    # an idle poll must not repaint: the render is gated on a number actually moving
+    assert "const moved = Object.keys(next).some((k) => next[k] !== state.navBadges[k])" in js
+    # the active page is a notch on the group's rail, and the CSS for it ships
+    assert ".nav-links" in css and "nav .nav-link.active::before" in css and ".nav-badge" in css
+    assert "#nav-filter" in css and ".nav-group.folded .nav-caret" in css
+    # mobile keeps the grouping instead of flattening the headers into a horizontal scroller
+    assert "nav { display: flex; overflow-x: auto; border: 0; }" not in css
+    assert "#side { border-right: 0; border-bottom: 1px solid var(--border)" in css
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_sidebar_fold_filter_badges_execute_in_node(client):
+    """Lift the shipped navHtml + navCollapsed out of app.js, along with the real NAV_GROUPS, and run
+    them: the fold hides only its own group, a filter force-opens a folded group (a fold must never
+    hide a match) and drops groups with no match, the badge counts ride on the right headers, the
+    current page carries aria-current, and a corrupt persisted fold list costs nothing."""
+    assert NODE is not None  # skipif above
+    js = client.get("/app.js").text
+    block = js.split("// nav-helpers:start", 1)[1].split("// nav-helpers:end", 1)[0]
+    # the SHIPPED taxonomy, so this checks the real 18 links rather than a copy that can drift
+    nav_groups = "const NAV_GROUPS = " + js.split("const NAV_GROUPS = ", 1)[1].split("\n];", 1)[0] + "\n];"
+    prologue = """const ESC_MAP = {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"};
+const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (c) => ESC_MAP[c]);
+const hrefFor = (id) => "#/cs2/" + id;
+"""
+    script = (
+        prologue
+        + nav_groups
+        + "\n"
+        + block
+        + "\nconst render = (o) => navHtml(Object.assign({ groups: NAV_GROUPS, active: 'schema', hrefFor }, o));\n"
+        + "const count = (s, re) => (s.match(re) || []).length;\n"
+        + "const badges = { jobs: 3, activity: 2, hosts: 1 };\n"
+        + "const base = render({ badges });\n"
+        + "const foldedRef = render({ badges, collapsed: new Set(['Reference']) });\n"
+        + "const foldedWork = render({ badges, collapsed: new Set(['Workflow']) });\n"
+        + "const filtered = render({ badges, collapsed: new Set(['Reference']), query: 'ev' });\n"
+        + "const none = render({ badges, query: 'zzzz' });\n"
+        + "const off = render({ badges, disabledFor: (id) => id === 'script' });\n"
+        + "console.log(JSON.stringify({\n"
+        + "  headers: count(base, /class=\"nav-group/g), links: count(base, /class=\"nav-link[ \"]/g),\n"
+        + "  badgeSpans: count(base, /class=\"nav-badge\"/g),\n"
+        + "  badgeText: [...base.matchAll(/class=\"nav-badge\"[^>]*>(\\d+)</g)].map((m) => m[1]),\n"
+        + "  badgeTitles: (base.match(/class=\"nav-badge\" title=\"([^\"]*)\"/g) || []).length,\n"
+        + "  activeExact: base.includes('<a href=\"#/cs2/schema\" class=\"nav-link active\""
+        + " aria-current=\"page\">Schema</a>'),\n"
+        + "  activeOnce: count(base, /aria-current=\"page\"/g),\n"
+        + "  activeRows: count(base, /nav-link active/g),\n"
+        + "  hasActive: count(base, /has-active/g),\n"
+        + "  foldedRefHeaders: count(foldedRef, /class=\"nav-group folded/g),\n"
+        + "  foldedRefLinks: count(foldedRef, /class=\"nav-link[ \"]/g),\n"
+        + "  foldedRefHasSearch: foldedRef.includes('Search'),\n"
+        + "  filterHeaders: count(filtered, /class=\"nav-group/g),"
+        + " filterLinks: count(filtered, /class=\"nav-link[ \"]/g),\n"
+        + "  filterHit: filtered.includes('Game Events'), filterForceOpen: !filtered.includes('nav-group folded'),\n"
+        + "  filterDrops: filtered.includes('Authoring') || filtered.includes('Stats'),\n"
+        + "  noneMsg: none.includes('no section matches') && none.includes('zzzz'),\n"
+        + "  offDisabled: off.includes('nav-link disabled') || off.includes('disabled\">'),\n"
+        + "  foldedWorkBadges: [...foldedWork.matchAll(/class=\"nav-badge\"[^>]*>([0-9]+)</g)].map((m) => m[1]),\n"
+        + "  foldedWorkFolded: foldedWork.includes('class=\"nav-group folded\"'),\n"
+        + "  foldedWorkLinks: count(foldedWork, /class=\"nav-link[ \"]/g),\n"
+        + "  corrupt: [...navCollapsed('[[not json')].length,\n"
+        + "  nonString: [...navCollapsed('[\"Workflow\",7,{}]')].length,\n"
+        + "  empty: navCollapsed('') instanceof Set,\n"
+        + "}));\n"
+
+    )
+    proc = subprocess.run([NODE, "-e", script], capture_output=True, text=True, encoding="utf-8", timeout=60)
+    assert proc.returncode == 0, proc.stderr
+    out = json.loads(proc.stdout)
+    # 4 groups, 18 links, and a badge on each of the three LINKS that carry pending work
+    assert out["headers"] == 4 and out["links"] == 18
+    assert out["badgeSpans"] == 3 and out["badgeTitles"] == 3
+    assert out["badgeText"] == ["3", "2", "1"]
+    # folding a group moves its links' counts onto the group header, so a fold cannot HIDE the number
+    # the badge exists to surface (3 jobs + 2 runs + 1 lease), and only those five links go away
+    assert out["foldedWorkBadges"] == ["6"] and out["foldedWorkFolded"] is True
+    assert out["foldedWorkLinks"] == 13
+    # the current page is marked for both the eye and the screen reader, in exactly one place
+    assert out["activeExact"] is True and out["activeOnce"] == 1 and out["activeRows"] == 1
+    assert out["hasActive"] == 1  # only the group holding the current page lights up
+    # a fold hides ONLY its own group, and only while no query is active
+    assert out["foldedRefHeaders"] == 1 and out["foldedRefLinks"] == 8 and out["foldedRefHasSearch"] is False
+    # a filter force-opens the folded group (a fold must never swallow a match) and drops the rest
+    assert out["filterForceOpen"] is True and out["filterHit"] is True
+    assert out["filterHeaders"] == 1 and out["filterLinks"] == 1 and out["filterDrops"] is False
+    # no match at all: an honest message naming the query, never a blank sidebar
+    assert out["noneMsg"] is True
+    assert out["offDisabled"] is True
+    # a corrupt or hostile persisted fold list degrades to no folds instead of throwing
+    assert out["corrupt"] == 0 and out["nonString"] == 1 and out["empty"] is True
+
+
+
+# --------------------------- Job page: live phase banners + static caching (j-336087bd)
+# The user ask on a live demo: "i am not seeing latest ui updates on this test". Two causes, both fixed:
+#   (1) a browser kept serving a CACHED app.js/style.css after the deploy — StaticFiles sends no cache
+#       headers. Fix: Cache-Control: no-cache on the shell + its two assets, and a ?v= cache-buster in
+#       index.html.
+#   (2) the job page knew only the SETTING UP / CLEANING UP phases, so the driver's READY, WATCH NOW
+#       (the OPEN verdict window), GOT and live per-step `action` events never reached the screen. Fix:
+#       jobActivePhase() covers every live phase, vxPhaseBanner() renders each, the setup card resolves
+#       the step being staged from the plan (so it switches the moment staging starts), and the card
+#       shows the live 'Now in game' action line. The Pass/Fail/Skip buttons stay ENABLED during WATCH.
+def test_static_shell_and_assets_revalidate(client):
+    """The SPA shell and its two assets carry ``Cache-Control: no-cache`` and the shell cache-busts them
+    with a ``?v=`` query param, so an open tab picks up a deploy on its next load; an API response is
+    left alone."""
+    for path in ("/", "/index.html"):
+        r = client.get(path)
+        assert r.status_code == 200, path
+        assert r.headers.get("cache-control") == "no-cache", path
+        assert 'href="/style.css?v=' in r.text and 'src="/app.js?v=' in r.text, path
+    for path in ("/app.js", "/style.css"):
+        r = client.get(path)
+        assert r.status_code == 200, path
+        assert r.headers.get("cache-control") == "no-cache", path
+    assert client.get("/api/health").headers.get("cache-control") is None  # not dragged into the set
+
+
+def test_live_phase_markers_in_app_js(client):
+    """The live-phase vocabulary exists in the shipped app.js / style.css."""
+    js = client.get("/app.js").text
+    css = client.get("/style.css").text
+    assert 'const LIVE_PHASES = new Set(["ready", "setup", "watch", "got", "cleanup"])' in js
+    assert "WATCH NOW" in js and 'data-vx-phase="watch"' in js
+    assert 'data-vx-phase="got"' in js and "d.banner" in js and "vx-got-" in js
+    assert 'data-vx-phase="ready"' in js
+    assert "function vxStepInfo(" in js and "function vxPhaseUntil(" in js
+    assert "Now in game" in js and "vx-action" in js
+    assert "Setting up…" in js and "vx-staging" in js
+    assert "reply any time" in js and "Verdict window open" in js
+    for sel in (".vx-phase-watch", ".vx-phase-got", ".vx-phase-ready", ".vx-staging", ".vx-action", ".vx-window-open"):
+        assert sel in css, sel
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_live_phase_banners_and_action_execute_in_node(client):
+    """Lift the shipped renderers and run the real j-336087bd event shapes through them: READY, SETTING
+    UP (title resolved from the plan), WATCH NOW (window OPEN, buttons enabled), a live `action` line,
+    GOT: PASS, CLEANING UP, then the NEXT step's setup switching the card before its prompt fires."""
+    assert NODE is not None
+    js = client.get("/app.js").text
+    block = "const VERDICT_SET" + js.split("const VERDICT_SET", 1)[1].split("function jobDetail", 1)[0]
+    prologue = (
+        'const esc = (v) => String(v ?? "");\n'
+        'const badge = (t, cls = "") => `<span class="badge ${cls}">${esc(t)}</span>`;\n'
+        'const fmtTime = (iso) => String(iso ?? "—");\n'
+        "const parseTs = (iso) => Date.parse(String(iso));\n"
+        'const CT_ZONE = "America/Chicago";\n'
+    )
+    plan = [
+        {"id": "s3", "index": 1, "title": "Ring sweep", "strip_name": "RING SWEEP",
+         "strip_purpose": "sweep the ring to find the bot", "strip_expect": "the bot in frame"},
+        {"id": "s4", "index": 2, "title": "Area presets", "strip_name": "AREA PRESETS",
+         "strip_purpose": "cycle the area cameras", "strip_expect": "the presets apply"},
+    ]
+    ev0 = {"id": 1, "level": "info", "phase": "plan", "message": "plan posted", "data": {"plan": plan}}
+    ready = {"id": 2, "level": "info", "phase": "ready",
+             "message": "READY -- first test in 8 s -- keep the game up",
+             "created_at": "2026-10-16T02:33:40Z",
+             "data": {"countdown_s": 8.0, "job_url": "http://10.88.15.208:8812/#/jobs/j-live"}}
+    setup1 = {"id": 3, "level": "info", "phase": "setup",
+              "message": "SETTING UP TEST 1 of 2 ring sweep (10 s)",
+              "data": {"countdown_s": 10.0, "until": "2026-10-16T02:33:48Z", "step": "s3", "next": ""}}
+    p1 = {"id": 4, "level": "info", "phase": "s3", "message": "STEP 1/2",
+          "data": {"prompt": "ring sweep", "look_for": "bot", "step_index": 1, "step_total": 2,
+                   "strip_name": "RING SWEEP", "strip_purpose": "sweep the ring to find the bot",
+                   "strip_expect": "the bot in frame", "deadline_utc": "2026-10-16T02:37:03Z",
+                   "respond_hint": "!pass / !fail / !skip"}}
+    watch = {"id": 5, "level": "info", "phase": "watch", "message": "WATCH NOW -- reply any time (3 min)",
+             "data": {"countdown_s": 180.0, "until": "2026-10-16T02:37:03Z", "step": "s3"}}
+    action = {"id": 6, "level": "info", "phase": "s3",
+              "message": "s3 action: now: camera sweeping to find the bot",
+              "data": {"action": "now: camera sweeping to find the bot", "step": "s3"}}
+    got = {"id": 7, "level": "info", "phase": "got", "message": "GOT: PASS", "data": {"banner": "GOT: PASS"}}
+    cleanup = {"id": 8, "level": "info", "phase": "cleanup",
+               "message": "CLEANING UP TEST 1/2 ring sweep (10 s)",
+               "data": {"countdown_s": 10.0, "until": "2026-10-16T02:37:20Z", "step": "s3",
+                        "next": "next: TEST 2 of 2: AREA PRESETS"}}
+    setup2 = {"id": 9, "level": "info", "phase": "setup",
+              "message": "SETTING UP TEST 2 of 2 AREA PRESETS (10 s)",
+              "data": {"countdown_s": 10.0, "until": "2026-10-16T02:37:30Z", "step": "s4"}}
+    cs = {"phase": "s3", "step_index": 1, "step_total": 2, "prompt": "ring sweep", "look_for": "bot",
+          "deadline_utc": "2026-10-16T02:37:03Z", "asked_at": "2026-10-16T02:33:50Z",
+          "respond_hint": "!pass / !fail / !skip"}
+
+    def job(events):
+        return {"id": "j-live", "status": "running", "current_step": cs, "events": events}
+
+    stages = {
+        "JREADY": job([ev0, ready]),
+        "JSETUP1": job([ev0, ready, setup1]),
+        "JWATCH": job([ev0, ready, setup1, p1, watch]),
+        "JACTION": job([ev0, ready, setup1, p1, watch, action]),
+        "JGOT": job([ev0, ready, setup1, p1, watch, action, got]),
+        "JCLEAN": job([ev0, ready, setup1, p1, watch, action, got, cleanup]),
+        "JSETUP2": job([ev0, ready, setup1, p1, watch, action, got, cleanup, setup2]),
+    }
+    script = (
+        prologue
+        + block
+        + "".join(f"\nconst {k} = " + json.dumps(v) + ";" for k, v in stages.items())
+        + "\nconst ph = (j) => (jobActivePhase(j) || {}).phase;\n"
+        + "console.log(JSON.stringify({\n"
+        + "  phase: Object.fromEntries(Object.entries({JREADY,JSETUP1,JWATCH,JACTION,JGOT,JCLEAN,JSETUP2})"
+        + ".map(([k,j]) => [k, ph(j)])),\n"
+        + "  readyBanner: vxPhaseBanner(JREADY),\n"
+        + "  setup1Banner: vxPhaseBanner(JSETUP1),\n"
+        + "  watchBanner: vxPhaseBanner(JWATCH),\n"
+        + "  actionWatchBanner: vxPhaseBanner(JACTION),\n"
+        + "  gotBanner: vxPhaseBanner(JGOT),\n"
+        + "  cleanBanner: vxPhaseBanner(JCLEAN),\n"
+        + "  setup2Banner: vxPhaseBanner(JSETUP2),\n"
+        + "  setup1Card: nowTestingCard(JSETUP1),\n"
+        + "  watchCard: nowTestingCard(JWATCH),\n"
+        + "  actionCard: nowTestingCard(JACTION),\n"
+        + "  gotCard: nowTestingCard(JGOT),\n"
+        + "  cleanCard: nowTestingCard(JCLEAN),\n"
+        + "  setup2Card: nowTestingCard(JSETUP2),\n"
+        + "}));\n"
+    )
+    proc = subprocess.run([NODE, "-e", script], capture_output=True, text=True, encoding="utf-8", timeout=60)
+    assert proc.returncode == 0, proc.stderr
+    out = json.loads(proc.stdout)
+    # every live phase is recognised as the run's ACTIVE phase; the `action` event does NOT close WATCH
+    assert out["phase"] == {
+        "JREADY": "ready", "JSETUP1": "setup", "JWATCH": "watch", "JACTION": "watch",
+        "JGOT": "got", "JCLEAN": "cleanup", "JSETUP2": "setup",
+    }
+    # READY: a banner with a countdown derived from the event's own timestamp (no `until` in the payload)
+    assert "READY" in out["readyBanner"] and "first test in 8 s" in out["readyBanner"]
+    assert "02:33:48" in out["readyBanner"], out["readyBanner"]
+    # SETTING UP: the title is RESOLVED FROM THE PLAN by `data.step` (the event carries no name/index)
+    assert "SETTING UP" in out["setup1Banner"]
+    assert "TEST 1/2" in out["setup1Banner"] and "RING SWEEP" in out["setup1Banner"]
+    assert 'data-cd-sec="2026-10-16T02:33:48Z"' in out["setup1Banner"]
+    # WATCH NOW: the open verdict window, its test name and the 3-minute countdown
+    assert "WATCH NOW" in out["watchBanner"] and "reply any time" in out["watchBanner"]
+    assert "TEST 1/2" in out["watchBanner"] and "RING SWEEP" in out["watchBanner"]
+    assert 'data-cd-sec="2026-10-16T02:37:03Z"' in out["watchBanner"]
+    # GOT: the driver's own banner text, coloured by outcome
+    assert "GOT" in out["gotBanner"] and "PASS" in out["gotBanner"]
+    assert 'data-vx-banner="GOT: PASS"' in out["gotBanner"] and "vx-got-ok" in out["gotBanner"]
+    # CLEANING UP: the next-test line and the (plan-resolved) test name
+    assert "CLEANING UP" in out["cleanBanner"] and "TEST 1/2" in out["cleanBanner"]
+    assert "→ next: next: TEST 2 of 2: AREA PRESETS" in out["cleanBanner"]
+    # the SECOND test's setup banner resolves from the plan too
+    assert "SETTING UP" in out["setup2Banner"] and "TEST 2/2" in out["setup2Banner"]
+    assert "AREA PRESETS" in out["setup2Banner"]
+    # the card switches to the step being STAGED before its prompt fires (s4 while current_step is s3)
+    assert 'data-vx-step="s4"' in out["setup2Card"]
+    assert "TEST 2 of 2" in out["setup2Card"] and "AREA PRESETS" in out["setup2Card"]
+    assert "Setting up…" in out["setup2Card"] and "vx-staging" in out["setup2Card"]
+    assert "Recorded:" not in out["setup2Card"]  # the PREVIOUS test's verdict must not follow it
+    assert "disabled" in out["setup2Card"] and "opens in" in out["setup2Card"]
+    # ...and the step being staged for the FIRST test resolves too
+    assert 'data-vx-step="s3"' in out["setup1Card"] and "TEST 1 of 2" in out["setup1Card"]
+    assert "RING SWEEP" in out["setup1Card"] and "opens in" in out["setup1Card"]
+    # WATCH: the window is OPEN -> the buttons are ENABLED (no disabled attribute anywhere in the card)
+    assert "disabled" not in out["watchCard"], out["watchCard"]
+    assert "reply any time" in out["watchCard"] and "vx-window-open" in out["watchCard"]
+    # ...and the live in-game action line is shown on the card
+    assert "Now in game" in out["actionCard"]
+    assert "now: camera sweeping to find the bot" in out["actionCard"]
+    assert "disabled" not in out["actionCard"]
+    # the `action` event did not close the WATCH banner
+    assert "WATCH NOW" in out["actionWatchBanner"]
+    # GOT leaves the buttons enabled too; CLEANING UP closes them with 'window closed'
+    assert "disabled" not in out["gotCard"]
+    assert "disabled" in out["cleanCard"] and "window closed" in out["cleanCard"]
+

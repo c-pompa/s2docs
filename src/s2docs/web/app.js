@@ -3,7 +3,8 @@
 
 const $ = (sel) => document.querySelector(sel);
 const view = $("#view");
-const state = { games: [], game: localStorage.getItem("s2docs.game") || "cs2", activityActive: false, jobsActive: false };
+const state = { games: [], game: localStorage.getItem("s2docs.game") || "cs2", activityActive: false, jobsActive: false,
+                navBadges: { jobs: 0, activity: 0, hosts: 0 } };
 
 const esc = (v) =>
   String(v ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
@@ -545,44 +546,92 @@ function vxCountdown(it) {
   )}" data-vx-fill${start}></span></div><span class="vx-cd mono" data-deadline="${esc(it.deadline_utc)}">…</span></div>`;
 }
 
-// ---- SETTING UP / CLEANING UP countdown phases --------------------------------
-// The demo driver posts one `info` event per setup/cleanup window while it stages the next test:
-//   { level:'info', phase:'setup'|'cleanup', message:'SETTING UP TEST k/n NAME (10 s)',
-//     data:{ countdown_s, until:'<UTC ISO>', step, step_index, step_total, name, next } }
-// jobActivePhase() returns that event only while it is the newest activity — a later step prompt or
-// a verdict supersedes it. The banner ticks down CLIENT-side from `until` (the 1 s updateCountdowns
-// ticker), so it stays live between the 5 s region re-renders.
+// ---- LIVE PHASES: READY / SETTING UP / WATCH / GOT / CLEANING UP ---------------
+// The demo driver posts one `info` event per stage of each test while the run is live:
+//   { phase:'ready',   message:'READY -- first test in 8 s -- …',      data:{ countdown_s } }
+//   { phase:'setup',   message:'SETTING UP TEST k/n NAME (10 s)',      data:{ countdown_s, until, step } }
+//   { phase:'watch',   message:'WATCH NOW -- reply any time (3 min)',  data:{ countdown_s, until, step } }
+//   { phase:'got',     message:'GOT: PASS',                            data:{ banner:'GOT: PASS' } }
+//   { phase:'cleanup', message:'CLEANING UP TEST k/n NAME (10 s)',     data:{ countdown_s, until, step, next } }
+// plus per-step `action` events while a test runs: { phase:'sN', data:{ action:'now: …' } }.
+// A step PROMPT (data.prompt) and a VERDICT milestone are also activity and supersede an earlier
+// phase event, so the banner always reflects the newest thing the driver reported. An `action` event
+// is NOT activity — it belongs to the step it runs in and must never close the open WATCH window.
+const LIVE_PHASES = new Set(["ready", "setup", "watch", "got", "cleanup"]);
+
 function jobActivePhase(j) {
   const evs = j.events || [];
   let last = null;
   for (const e of evs) {
     const prompt = e.level === "info" && e.data && "prompt" in e.data;
     const verdict = e.level === "milestone" && e.data && VERDICT_SET.has(e.data.verdict);
-    const phase = e.level === "info" && e.data && e.data.until && (e.phase === "setup" || e.phase === "cleanup");
+    const phase = e.level === "info" && e.phase && LIVE_PHASES.has(e.phase);
     if (prompt || verdict || phase) last = { e, phase };
   }
   return last && last.phase ? last.e : null;
 }
 
-// The state banner: 'SETTING UP: TEST k/n NAME  8s' / 'CLEANING UP: TEST k/n -> next: …  6s'.
+// The countdown target for a phase event: the driver's explicit `until`, else derived from its
+// `countdown_s` and the event's own timestamp, so a banner that carries only a countdown still ticks
+// CLIENT-side (the 1 s updateCountdowns ticker) between the 5 s region re-renders.
+function vxPhaseUntil(e) {
+  const d = (e && e.data) || {};
+  if (d.until) return d.until;
+  const s = Number(d.countdown_s);
+  if (!Number.isFinite(s) || s <= 0 || !e.created_at) return null;
+  const t = Date.parse(e.created_at);
+  return Number.isNaN(t) ? null : new Date(t + s * 1000).toISOString();
+}
+
+// Resolve a step id to its plan entry, so a phase event carrying only `data.step` (no
+// step_index / step_total / name) still renders 'TEST k/n NAME' — and the card can switch to the step
+// being set up before its prompt has fired. The plan event is the source of truth.
+function vxStepInfo(j, id) {
+  if (!id) return null;
+  return jobVerifications(j).find((x) => x.id === id) || null;
+}
+
+// The state banner: READY / SETTING UP / WATCH NOW / GOT / CLEANING UP, each with its own countdown.
 function vxPhaseBanner(j) {
   const e = jobActivePhase(j);
   if (!e) return "";
   const d = e.data || {};
-  const k = d.step_index != null ? d.step_index : d.step != null ? d.step : "";
-  const n = d.step_total;
-  const name = d.name || "";
+  const it = vxStepInfo(j, d.step);
+  const k = d.step_index != null ? d.step_index : it && it.index != null ? it.index : d.step != null ? d.step : "";
+  const n = d.step_total != null ? d.step_total : it && it.total != null ? it.total : "";
+  const name = d.name || (it && it.name) || "";
   const of = `${esc(k)}${n ? `/${esc(n)}` : ""}`;
-  const cd = `<span class="vx-phase-cd mono" data-cd-sec="${esc(d.until)}">…</span>`;
+  const until = vxPhaseUntil(e);
+  const cd = until ? `<span class="vx-phase-cd mono" data-cd-sec="${esc(until)}">…</span>` : "";
+  const testTag = k !== "" ? `TEST ${of}${name ? ` <strong>${esc(name)}</strong>` : ""}` : "";
+  if (e.phase === "ready") {
+    const msg = String(e.message || "").replace(/^\s*READY\s*[-–—]*\s*/i, "").trim();
+    return `<div class="vx-phase vx-phase-ready" data-vx-phase="ready"${until ? ` data-until="${esc(until)}"` : ""}>
+      <span class="vx-phase-kind">READY</span>
+      <span class="vx-phase-main">${esc(msg || "waiting for the first test to start")}</span>${cd}</div>`;
+  }
   if (e.phase === "setup") {
-    return `<div class="vx-phase vx-phase-setup" data-vx-phase="setup" data-until="${esc(d.until)}">
+    return `<div class="vx-phase vx-phase-setup" data-vx-phase="setup"${until ? ` data-until="${esc(until)}"` : ""}>
       <span class="vx-phase-kind">SETTING UP</span>
-      <span class="vx-phase-main">TEST ${of}${name ? ` <strong>${esc(name)}</strong>` : ""}</span>${cd}</div>`;
+      <span class="vx-phase-main">${testTag}</span>${cd}</div>`;
+  }
+  if (e.phase === "watch") {
+    return `<div class="vx-phase vx-phase-watch" data-vx-phase="watch"${until ? ` data-until="${esc(until)}"` : ""}>
+      <span class="vx-phase-kind">WATCH NOW</span>
+      <span class="vx-phase-main">reply any time${testTag ? ` — ${testTag}` : ""}</span>${cd}</div>`;
+  }
+  if (e.phase === "got") {
+    const banner = String(d.banner || "").trim();
+    const word = banner.replace(/^GOT\s*:\s*/i, "").trim();
+    const cls = /FAIL/i.test(word) ? "bad" : /SKIP/i.test(word) ? "skip" : "ok";
+    return `<div class="vx-phase vx-phase-got vx-got-${cls}" data-vx-phase="got" data-vx-banner="${esc(banner)}">
+      <span class="vx-phase-kind">GOT</span>
+      <span class="vx-phase-main">${esc(word || banner || "result recorded")}</span></div>`;
   }
   const tail = d.next ? `→ next: ${esc(d.next)}` : "→ finishing";
-  return `<div class="vx-phase vx-phase-cleanup" data-vx-phase="cleanup" data-until="${esc(d.until)}">
+  return `<div class="vx-phase vx-phase-cleanup" data-vx-phase="cleanup"${until ? ` data-until="${esc(until)}"` : ""}>
     <span class="vx-phase-kind">CLEANING UP</span>
-    <span class="vx-phase-main">TEST ${of}</span>
+    <span class="vx-phase-main">${testTag}</span>
     <span class="vx-phase-next">${tail}</span>${cd}</div>`;
 }
 
@@ -590,16 +639,28 @@ function vxPhaseBanner(j) {
 function nowTestingCard(j) {
   const cs = j.current_step;
   if (j.status !== "running" || !cs) return "";
-  const cur = jobVerifications(j).find((x) => x.isCurrent) || {};
-  const k = cs.step_index != null ? cs.step_index : cur.index != null ? cur.index : "?";
-  const n = cs.step_total != null ? cs.step_total : cur.total != null ? cur.total : "?";
-  const name = cur.name || cs.phase || "";
-  const tested = cur.tested || cs.prompt || "";
-  const expect = cur.expect || cs.look_for || "";
+  const phase = jobActivePhase(j);
+  const items = jobVerifications(j);
+  // While a step is being SET UP its prompt has NOT fired yet, so j.current_step still points at the
+  // previous test. Resolve the step being staged from the plan (by the event's `data.step`) so the card
+  // switches to 'TEST k of n NAME' the moment staging begins instead of lagging a whole test behind.
+  const setupStep = phase && phase.phase === "setup" ? vxStepInfo(j, (phase.data || {}).step) : null;
+  const cur = setupStep || items.find((x) => x.isCurrent) || {};
+  const stepId = setupStep ? setupStep.id : cs.phase;
+  const k = setupStep ? setupStep.index : cs.step_index != null ? cs.step_index : cur.index != null ? cur.index : "?";
+  const n = setupStep ? setupStep.total : cs.step_total != null ? cs.step_total : cur.total != null ? cur.total : "?";
+  const name = (setupStep ? setupStep.name : cur.name) || cs.phase || "";
+  const tested = setupStep ? setupStep.tested : cur.tested || cs.prompt || "";
+  const expect = setupStep ? setupStep.expect : cur.expect || cs.look_for || "";
   const hint = cs.respond_hint || "in game: type !pass / !fail / !skip plus a note in chat";
-  const verdict = cur.verdict || cs.verdict || null;
+  // A verdict belongs to the CURRENT test; while a DIFFERENT test stages, cs.verdict is the previous
+  // test's — it must never be shown against the step being set up.
+  const verdict = setupStep ? null : cur.verdict || cs.verdict || null;
+  // The live sub-action the driver reported for THIS step (phase = the step id): 'now: camera sweeping
+  // to find the bot'. It updates as the driver works, so a watcher sees the in-game progress live.
+  const action = (j.events || []).reduce((acc, e) => (e.phase === stepId && e.data && e.data.action ? e.data.action : acc), null);
   // Screenshots for THIS test: a shot belongs to the step named by cs.phase.
-  const shots = jobScreenshots(j).filter((s) => (s.step || null) === (cs.phase || null));
+  const shots = jobScreenshots(j).filter((s) => (s.step || null) === (stepId || null));
   const lastShot = shots.length ? shots[shots.length - 1] : null;
   const camera = lastShot
     ? `<div class="vx-camera">📷 <strong>${shots.length}</strong> shot${shots.length === 1 ? "" : "s"} this test — last ${hms(lastShot.at)} (${shotReason(lastShot)}) ${shotThumb(lastShot, true)}</div>`
@@ -625,15 +686,18 @@ function nowTestingCard(j) {
   const waiting = verdict
     ? `<div class="vx-waiting"><span class="vx-spin"></span> Waiting for the demo to move to the next test…</div>`
     : "";
-  // While the driver is staging (setup) or tearing down (cleanup) the next test the verdict window is
-  // NOT open — the buttons are disabled and read 'opens in Ns' / 'recorded · window closed'.
-  const phase = jobActivePhase(j);
-  const blocked = !!phase;
+  // The verdict window is closed ONLY while the driver stages (setup) or tears down (cleanup) a test.
+  // 'ready', 'watch' (the window is OPEN) and 'got' must leave Pass/Fail/Skip ENABLED — the whole point
+  // is that a watcher can answer the moment the WATCH NOW window opens.
+  const blocked = !!(phase && (phase.phase === "setup" || phase.phase === "cleanup"));
+  const until = phase ? vxPhaseUntil(phase) : null;
   let gate = "";
   if (phase && phase.phase === "setup") {
-    gate = `<p class="vx-gate">Verdict window opens in <span class="mono" data-cd-sec="${esc((phase.data || {}).until)}">…</span> — setting up.</p>`;
+    gate = `<p class="vx-gate">Verdict window opens in <span class="mono" data-cd-sec="${esc(until || "")}">…</span> — setting up.</p>`;
   } else if (phase && phase.phase === "cleanup") {
     gate = `<p class="vx-gate">${verdict ? "Verdict recorded · " : ""}window closed — cleaning up this test.</p>`;
+  } else if (phase && phase.phase === "watch") {
+    gate = `<p class="vx-gate vx-window-open">🟢 Verdict window open — reply any time.</p>`;
   }
   const dis = blocked ? " disabled" : "";
   const form = `<form data-job-verdict="${esc(j.id)}" method="post" action="javascript:void 0" class="vx-form">
@@ -652,11 +716,15 @@ function nowTestingCard(j) {
       ${pending ? `<p class="vx-pending">📷 screenshot requested — waiting for the driver</p>` : ""}
       <p><input name="note" placeholder="request a screenshot (optional note)"></p>
       <button type="submit">Request screenshot</button><div class="result"></div></form>`;
-  return `<div class="card vx-card" data-vx-card data-vx-step="${esc(cs.phase || "")}" data-vx-name="${esc(
+  const staging = phase && phase.phase === "setup" ? `<span class="vx-staging">Setting up…</span>`
+    : phase && phase.phase === "cleanup" ? `<span class="vx-staging">Cleaning up…</span>` : "";
+  const actionRow = action ? `<p class="vx-field vx-action"><span class="vx-lbl">Now in game</span> ${esc(action)}</p>` : "";
+  return `<div class="card vx-card" data-vx-card data-vx-step="${esc(stepId || "")}" data-vx-name="${esc(
     name,
   )}" data-vx-index="${esc(k)}" data-vx-total="${esc(n)}">
-    <div class="vx-card-head"><span class="vx-live">● LIVE</span> <span class="vx-testof">TEST ${esc(k)} of ${esc(n)}</span></div>
-    <h2 class="vx-title">${esc(name)} <span class="mono muted">${esc(cs.phase || "")}</span></h2>
+    <div class="vx-card-head"><span class="vx-live">● LIVE</span> <span class="vx-testof">TEST ${esc(k)} of ${esc(n)}</span>${staging}</div>
+    <h2 class="vx-title">${esc(name)} <span class="mono muted">${esc(stepId || "")}</span></h2>
+    ${actionRow}
     ${tested ? `<p class="vx-field"><span class="vx-lbl">What is tested</span> ${esc(tested)}</p>` : ""}
     ${expect ? `<p class="vx-field"><span class="vx-lbl">What you should see</span> ${esc(expect)}</p>` : ""}
     ${vxCountdown(cur)}
@@ -982,7 +1050,7 @@ async function api(path, params = {}) {
 }
 
 // ------------------------------------------------------------------ routing
-// The sidebar, clustered by intent instead of one flat list of 17 links:
+// The sidebar, clustered by intent instead of one flat list of 18 links:
 //   Reference — the indexed game data you look things up in (the app's primary purpose)
 //   Workflow  — the run pipeline, read top-down as its lifecycle (plan → queue → run → machines)
 //   Authoring — offline helpers used while writing scripts/configs
@@ -1014,6 +1082,62 @@ const NAV_GROUPS = [
 const SECTIONS = NAV_GROUPS.flatMap(([, items]) => items);
 // Pages that are about the whole install (hosts/runs/jobs), not one game — routed as #/<section>, no game prefix.
 const GLOBAL_SECTIONS = new Set(["overview", "hosts", "jobs", "activity"]);
+
+// ---- Sidebar: collapsible groups, a filter, and live badges --------------------------------
+// Grouping alone left 18 equal-weight links on screen. Three mechanisms fix the remaining weight,
+// and none of them changes the taxonomy above:
+//   (1) FOLD — a group header folds its links away. The folded titles persist in localStorage, so
+//       the sidebar the user shaped is the sidebar they get back on the next visit.
+//   (2) FILTER — one input above the list narrows by label across every group at once, so a section
+//       the user half-remembers is two keystrokes away instead of a hunt down a 10-item list. A
+//       folded group is force-opened while a query is active, or it would hide its own match.
+//   (3) BADGES — Jobs / Activity / Hosts are the pages that carry queued work and held leases, and
+//       the sidebar said nothing about them. Each of those three LINKS wears its own live count, so
+//       the sidebar answers "is anything waiting on me?" without opening a page. A FOLDED group sums
+//       its children's counts into the header, because a fold must never hide the number the badge
+//       exists to surface. Keys are section ids (jobs/activity/hosts), not group titles.
+// navHtml() is pure (it takes the groups/active/collapsed/badges and returns a string) so the
+// tests lift it out of the shipped file and execute the fold + filter + badge logic in node,
+// rather than asserting on strings.
+// nav-helpers:start
+const NAV_COLLAPSE_KEY = "s2docs.nav.collapsed";
+const navCollapsed = (raw) => {
+  try {
+    const a = JSON.parse(raw || "[]");
+    return new Set(Array.isArray(a) ? a.filter((x) => typeof x === "string") : []);
+  } catch { return new Set(); } // a corrupt value must cost the user nothing but their folds
+};
+const navMatch = (label, q) => !q || label.toLowerCase().includes(q);
+const navBadge = (n, title) => (n ? `<span class="nav-badge" title="${esc(title || "")}">${esc(n)}</span>` : "");
+function navHtml(opts) {
+  const { groups, active, collapsed, badges = {}, badgeTitles = {}, query = "", hrefFor, disabledFor = () => false } = opts;
+  const folded = collapsed || new Set();
+  const q = String(query || "").trim().toLowerCase();
+  const out = [];
+  for (const [title, items, hint] of groups) {
+    const hits = items.filter(([id, label]) => navMatch(label, q));
+    if (!hits.length) continue; // a group with no match is hidden, so the matches ARE the list
+    const open = !folded.has(title) || !!q; // a query opens every group: a fold must not hide a hit
+    const here = hits.some(([id]) => id === active);
+    // Folded, the group's pending work has to be readable from the header: the counts of the links
+    // that are currently away are summed onto it, so folding can never swallow the badge.
+    const rolled = open ? 0 : items.reduce((n, [id]) => n + (badges[id] || 0), 0);
+    out.push(`<button type="button" class="nav-group${open ? "" : " folded"}${here ? " has-active" : ""}"` +
+      ` data-nav-group="${esc(title)}" aria-expanded="${open}"><span class="nav-caret">▾</span>` +
+      `${esc(title)}${navBadge(rolled, badgeTitles.group)}</button>`);
+    if (!open) continue;
+    if (hint && !q) out.push(`<div class="nav-hint">${esc(hint)}</div>`);
+    out.push(`<div class="nav-links">`);
+    for (const [id, label] of hits) {
+      const off = disabledFor(id);
+      out.push(`<a href="${hrefFor(id)}" class="nav-link${id === active ? " active" : ""}${off ? " disabled" : ""}"` +
+        `${id === active ? ' aria-current="page"' : ""}>${esc(label)}${navBadge(badges[id], badgeTitles[id])}</a>`);
+    }
+    out.push(`</div>`);
+  }
+  return out.join("") || `<div class="nav-hint">no section matches “${esc(query)}”</div>`;
+}
+// nav-helpers:end
 
 // The workflow pages are stages of ONE loop, so each of them carries this strip: the whole pipeline in
 // order with the current stage lit, plus the offline Validate check on the side. It answers "how do
@@ -1050,20 +1174,103 @@ const link = (parts, label, params = {}) => {
   return `<a href="#/${parts.map(enc).join("/")}${qs ? "?" + qs : ""}">${esc(label)}</a>`;
 };
 
-function renderNav(active) {
-  const g = state.games.find((x) => x.id === state.game);
-  const item = ([id, label]) => {
-    const disabled = (id === "script" || id === "examples") && !g?.script_api;
-    const href = sectionHref(id);
-    return `<a href="${href}" class="${id === active ? "active" : ""} ${disabled ? "disabled" : ""}">${esc(label)}</a>`;
+// The sidebar's own state: which page is lit, the filter's current query, and the folded groups.
+// `navActive` is remembered so a fold toggle or a filter keystroke can re-render the list in place
+// without a route() (which would re-render the whole page and jump the scroll).
+let navActive = "search";
+let navQuery = "";
+const navStoredFolds = () => {
+  try { return localStorage.getItem(NAV_COLLAPSE_KEY); } catch { return null; } // private mode: no folds, no error
+};
+const navFold = navCollapsed(navStoredFolds());
+// The badge tooltips spell out what the number counts, since a link shows only its total. Counts are
+// keyed by SECTION id (the link that wears them), with `group` for a folded group's roll-up.
+const navBadgeTitles = () => {
+  const d = state.navBadgeDetail || {};
+  const pl = (n, s) => `${n} ${s}${n === 1 ? "" : "s"}`;
+  return {
+    jobs: `${d.queued || 0} queued · ${d.running || 0} running`,
+    activity: `${pl(d.builds || 0, "build")} + ${pl(d.tests || 0, "test")} running`,
+    hosts: `${d.leased || 0} of ${pl(d.hosts || 0, "host")} leased`,
+    group: "pending work in the folded links above",
   };
-  $("#nav").innerHTML = NAV_GROUPS.map(
-    ([title, items, hint]) =>
-      `<div class="nav-group">${esc(title)}</div>${hint ? `<div class="nav-hint">${esc(hint)}</div>` : ""}${items
-        .map(item)
-        .join("")}`,
-  ).join("");
+};
+function renderNav(active) {
+  if (active != null) navActive = active;
+  const g = state.games.find((x) => x.id === state.game);
+  $("#nav").innerHTML = navHtml({
+    groups: NAV_GROUPS,
+    active: navActive,
+    collapsed: navFold,
+    badges: state.navBadges,
+    badgeTitles: navBadgeTitles(),
+    query: navQuery,
+    hrefFor: sectionHref,
+    disabledFor: (id) => (id === "script" || id === "examples") && !g?.script_api,
+  });
   $("#build").textContent = g?.current_build ? `build ${g.current_build} · ${g.patch_version || ""}` : "not indexed";
+}
+
+// Fold + filter wiring, bound ONCE on the container (delegated), so the periodic re-render of #nav
+// can never unbind it. The filter input lives OUTSIDE #nav, so re-rendering the list never disturbs
+// the text the user is typing into it.
+function bindNav() {
+  $("#nav").addEventListener("click", (e) => {
+    const head = e.target.closest("[data-nav-group]");
+    if (!head) return;
+    const title = head.dataset.navGroup;
+    if (navFold.has(title)) navFold.delete(title); else navFold.add(title);
+    try { localStorage.setItem(NAV_COLLAPSE_KEY, JSON.stringify([...navFold])); } catch { /* not persisted is fine */ }
+    renderNav();
+  });
+  const f = $("#nav-filter");
+  if (!f) return;
+  f.addEventListener("input", () => { navQuery = f.value; renderNav(); });
+  // Enter jumps to the first surviving section, so the filter is a way to REACH a page, not just find it.
+  f.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") { f.value = ""; navQuery = ""; renderNav(); return; }
+    if (e.key !== "Enter") return;
+    const first = $("#nav").querySelector("a.nav-link:not(.disabled)");
+    if (!first) return;
+    e.preventDefault();
+    location.hash = first.getAttribute("href").slice(1);
+  });
+}
+
+// ---- Live badge counts ---------------------------------------------------------------------
+// Four cheap reads in parallel (the same endpoints the Activity/Overview pages already use — no new
+// API surface) give the three numbers a person actually wants from outside the page: is anything
+// queued or running, are runs in flight, is a machine held. A change re-renders only #nav, and only
+// when a number actually MOVED, so an idle install costs no render churn.
+let navBadgeTimer = null;
+async function refreshNavBadges() {
+  try {
+    const [jobs, hosts, builds, tests] = await Promise.all([
+      api("/jobs", { status: "active" }).catch(() => []),
+      api("/hosts").catch(() => []),
+      api("/builds", { active: true }).catch(() => []),
+      api("/test-runs", { state: "running" }).catch(() => []),
+    ]);
+    const queued = jobs.filter((j) => j.status === "queued").length;
+    state.navBadgeDetail = {
+      queued, running: jobs.length - queued, builds: builds.length, tests: tests.length,
+      leased: hosts.filter((h) => h.lock).length, hosts: hosts.length,
+    };
+    const next = { jobs: jobs.length, activity: builds.length + tests.length, hosts: state.navBadgeDetail.leased };
+    const moved = Object.keys(next).some((k) => next[k] !== state.navBadges[k]);
+    state.navBadges = next;
+    // Numbers moved: repaint the LIST only (the filter input lives outside #nav, so it keeps its focus
+    // and its text). An unmoved poll repaints nothing, so an idle install costs no render churn.
+    if (moved) renderNav();
+  } catch { /* badges are decoration: a failed poll must never break the page */ }
+}
+function startNavBadges() {
+  // The first fetch is route()'s (boot() ends by calling it); this only owns the SLOW path — a timer
+  // for a tab left open, plus a catch-up the moment a backgrounded tab is looked at again. A hidden
+  // tab polls nothing, so an install nobody is watching costs no requests.
+  clearInterval(navBadgeTimer);
+  navBadgeTimer = setInterval(() => { if (!document.hidden) refreshNavBadges(); }, 20000);
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) refreshNavBadges(); });
 }
 
 // A stale tab loaded with `?verdict=…` in location.search is the signature of the old native-GET
@@ -1099,6 +1306,9 @@ async function route() {
   }
   const [section = "search", ...rest] = parts;
   renderNav(section);
+  // Refresh the counts on every navigation, not just on the timer: an action the user just took (queue
+  // a job, claim a host) then shows up the moment they move, instead of up to 20 s later.
+  refreshNavBadges();
   document.title = "Source 2 Docs"; // a fresh page resets the tab title (job pages re-set it below)
   clearTimeout(liveTimer); // any auto-refresh from the previous page stops now
   liveTimer = null;
@@ -2771,6 +2981,8 @@ async function boot() {
     e.preventDefault();
     go([state.game, "search"], { q: $("#q").value.trim() });
   });
+  bindNav();           // fold toggles + the section filter (delegated, bound once)
+  startNavBadges();    // live counts on the Jobs / Activity / Hosts group headers
   document.addEventListener("keydown", (e) => {
     if (e.key === "/" && document.activeElement.tagName !== "INPUT" && document.activeElement.tagName !== "TEXTAREA") {
       e.preventDefault();

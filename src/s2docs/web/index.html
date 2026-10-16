@@ -4,7 +4,9 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Source 2 Docs</title>
-  <link rel="stylesheet" href="/style.css">
+  <!-- ?v= is a cache-buster for the two static assets; the server's no-cache header on the shell is the
+       real guard, this just defeats a proxy that ignores Cache-Control. Bump with the app version. -->
+  <link rel="stylesheet" href="/style.css?v=0.1.0">
 </head>
 <body>
   <header class="topbar">
@@ -16,9 +18,14 @@
     <span id="build" class="muted"></span>
   </header>
   <div class="layout">
-    <nav id="nav" aria-label="Sections"></nav>
+    <aside id="side">
+      <!-- The filter sits OUTSIDE #nav on purpose: #nav is re-rendered on every route change and on
+           every badge poll, and this input must keep its focus and its text across all of that. -->
+      <input id="nav-filter" type="search" placeholder="Filter sections…" autocomplete="off" aria-label="Filter sections">
+      <nav id="nav" aria-label="Sections"></nav>
+    </aside>
     <main id="view" tabindex="-1"><p class="muted">Loading…</p></main>
   </div>
-  <script src="/app.js" type="module"></script>
+  <script src="/app.js?v=0.1.0" type="module"></script>
 </body>
 </html>
