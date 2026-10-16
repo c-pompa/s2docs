@@ -4,7 +4,9 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Source 2 Docs</title>
-  <link rel="stylesheet" href="/style.css">
+  <!-- ?v= is a cache-buster for the two static assets; the server's no-cache header on the shell is the
+       real guard, this just defeats a proxy that ignores Cache-Control. Bump with the app version. -->
+  <link rel="stylesheet" href="/style.css?v=0.1.0">
 </head>
 <body>
   <header class="topbar">
@@ -24,6 +26,6 @@
     </aside>
     <main id="view" tabindex="-1"><p class="muted">Loading…</p></main>
   </div>
-  <script src="/app.js" type="module"></script>
+  <script src="/app.js?v=0.1.0" type="module"></script>
 </body>
 </html>
