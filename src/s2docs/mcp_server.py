@@ -698,8 +698,17 @@ def create_mcp_server(db: Database, workspace: Path | None = None) -> MCPServer:
     @server.tool(annotations=NON_IDEMPOTENT)
     def add_evidence(
         project_id: ProjectId,
-        step_id: Annotated[str, Field(description="Project step the evidence proves (e.g. 'research')")],
         kind: m.EvidenceKind,
+        step_id: Annotated[
+            str | None,
+            Field(
+                description=(
+                    "Project step the evidence proves (e.g. 'research'). Omit for project-level evidence "
+                    "that is not tied to a step — the column is nullable and the REST route has always "
+                    "accepted null, so MCP must not be stricter than HTTP."
+                )
+            ),
+        ] = None,
         ref: Annotated[str | None, Field(description="Path / url / command the evidence points at")] = None,
         data: Annotated[
             dict | None,
@@ -708,7 +717,11 @@ def create_mcp_server(db: Database, workspace: Path | None = None) -> MCPServer:
     ) -> m.Evidence:
         """Record structured evidence for a step. This is what the `evidence` gate checks — a step with an
         evidence gate CANNOT be marked done until at least one non-note row exists for it. Use kind='note'
-        only for a supplementary remark (it does not satisfy the gate)."""
+        only for a supplementary remark (it does not satisfy the gate).
+
+        Pass `step_id` to attach the row to a project step, or omit it to record evidence at project
+        level (a measurement, a console transcript, a negative result). A step-less row satisfies no
+        step gate, by design."""
         return _ev(lambda: evidence.add(db, kind=kind, project_id=project_id, step_id=step_id, ref=ref, data=data))
 
     @server.tool(annotations=READ_ONLY)
