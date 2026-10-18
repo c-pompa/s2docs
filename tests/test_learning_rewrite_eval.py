@@ -2,7 +2,7 @@
 
 The rewriter exists because prose retrieves nothing (``db.fts`` ANDs every token). That claim was
 *measured*, but the measurement lived in a scratch script and could not gate anything. This module is
-that measurement promoted to a first-class gate: a frozen, in-repo eval set (20 rows + 7 known gaps),
+that measurement promoted to a first-class gate: a frozen, in-repo eval set (45 rows + 7 known gaps),
 three retrieval conditions, and an exit contract.
 
   baseline  = the user's raw prose, unscoped           (what happens today)
@@ -35,9 +35,15 @@ from s2docs.learning.rewrite_eval import (
 
 
 def test_eval_set_is_frozen_and_complete():
-    """The set ships as package data: 20 verified rows + 7 recorded known gaps, nothing invented."""
+    """The set ships as package data: 45 verified rows + 7 recorded known gaps, nothing invented.
+
+    The count is pinned deliberately: it is the guard against a silent truncation of the gate.
+    It grew from 20 to 45 because one row is 5 points at n=20, which made the gate unable to tell
+    a real improvement from noise — the 25 additions carry ``expect_kind`` so recall can be read
+    per document class instead of being diluted by classes a prose rewriter cannot reach.
+    """
     data = eval_set()
-    assert len(data["rows"]) == 20
+    assert len(data["rows"]) == 45
     assert len(data["known_gaps"]) == 7
     ids = [r["id"] for r in data["rows"]]
     assert len(ids) == len(set(ids)), "duplicate row ids would double-count a condition"
@@ -159,19 +165,22 @@ def test_fixable_misses_are_rewriter_misses_where_the_oracle_hits():
 
 def test_decide_passes_at_the_recorded_floors():
     """At or above every floor, the gate is a pass (code 0, no reason)."""
-    scores = {"conditions": {"baseline": {"recall@5": 0.20},
-                             "rewrite": {"recall@5": 0.40},
-                             "oracle": {"recall@5": 1.00}}}
+    scores = {"conditions": {name: {"recall@5": floor} for name, floor in FLOORS.items()}}
     code, reason = decide(scores)
     assert code == 0 and reason is None
 
 
 def test_decide_flags_a_rewriter_regression_as_exit_one():
     """The rewriter dropping below its floor — while the oracle still hits — is a regression: exit 1,
-    and the reason names the rewriter, not the corpus."""
-    scores = {"conditions": {"baseline": {"recall@5": 0.20},
-                             "rewrite": {"recall@5": 0.30},
-                             "oracle": {"recall@5": 1.00}}}
+    and the reason names the rewriter, not the corpus.
+
+    Expressed relative to ``FLOORS`` on purpose: with hardcoded numbers this test silently inverted
+    when the floor was re-measured (a hardcoded 0.30 was a regression under the old 0.40 floor and a
+    pass under the 0.27 one). The rule is what is under test here; the numbers are pinned separately.
+    """
+    scores = {"conditions": {"baseline": {"recall@5": FLOORS["baseline"]},
+                             "rewrite": {"recall@5": FLOORS["rewrite"] - 0.05},
+                             "oracle": {"recall@5": FLOORS["oracle"]}}}
     code, reason = decide(scores)
     assert code == 1
     assert reason is not None and "rewrite" in reason
@@ -180,17 +189,26 @@ def test_decide_flags_a_rewriter_regression_as_exit_one():
 def test_decide_flags_an_oracle_drop_as_could_not_evaluate():
     """An oracle drop means the corpus or the index changed underneath, not that the rewriter got
     worse — so it is could-not-evaluate (2), never a rewrite regression (1)."""
-    scores = {"conditions": {"baseline": {"recall@5": 0.15},
-                             "rewrite": {"recall@5": 0.40},
-                             "oracle": {"recall@5": 0.80}}}
+    scores = {"conditions": {"baseline": {"recall@5": FLOORS["baseline"]},
+                             "rewrite": {"recall@5": FLOORS["rewrite"]},
+                             "oracle": {"recall@5": FLOORS["oracle"] - 0.02}}}
     code, reason = decide(scores)
     assert code == 2
     assert reason is not None and "oracle" in reason
 
 
 def test_floors_are_the_recorded_baselines():
-    """The floors are the measured 2026-10-16 numbers, recorded here so a change is a deliberate diff."""
-    assert FLOORS == {"baseline": 0.20, "rewrite": 0.40, "oracle": 1.00}
+    """The floors are the measured numbers, recorded here so a change is a deliberate diff.
+
+    Re-measured when the eval set grew from 20 to 45 rows: every condition fell, because the
+    additions are deliberately harder (more Deadlock, more class/identifier rows). Carrying the old
+    numbers forward would have failed the gate on a set it was never measured on.
+
+    The oracle floor is 0.82, not 1.00, because ~18% of the expanded rows are not retrievable even
+    with hand-picked keywords — opaque class names and thin documents. That is a property of those
+    rows, not of the rewriter.
+    """
+    assert FLOORS == {"baseline": 0.11, "rewrite": 0.27, "oracle": 0.82}
 
 
 # --------------------------------------------------------------------- main() end to end
@@ -393,21 +411,24 @@ def test_a_perfect_rewriter_passes_and_a_junk_rewriter_exits_one(capsys):
 
 
 def test_decide_requires_the_model_to_strictly_beat_the_deterministic_floor():
-    """Equal-to is NOT beating: a model exactly at the deterministic floor is rejected (exit 1)."""
-    scores = {"conditions": {"baseline": {"recall@5": 0.20},
-                             "rewrite": {"recall@5": 0.40},
-                             "oracle": {"recall@5": 1.00},
-                             "model": {"recall@5": 0.40}}}
+    """Equal-to is NOT beating: a model exactly at the deterministic floor is rejected (exit 1).
+
+    Relative to ``FLOORS`` so the rule survives a re-measurement of the floor itself.
+    """
+    scores = {"conditions": {"baseline": {"recall@5": FLOORS["baseline"]},
+                             "rewrite": {"recall@5": FLOORS["rewrite"]},
+                             "oracle": {"recall@5": FLOORS["oracle"]},
+                             "model": {"recall@5": FLOORS["rewrite"]}}}
     code, reason = decide(scores)
     assert code == 1
     assert reason is not None and "model" in reason
 
 
 def test_decide_passes_when_the_model_beats_the_deterministic_floor():
-    scores = {"conditions": {"baseline": {"recall@5": 0.20},
-                             "rewrite": {"recall@5": 0.40},
-                             "oracle": {"recall@5": 1.00},
-                             "model": {"recall@5": 0.60}}}
+    scores = {"conditions": {"baseline": {"recall@5": FLOORS["baseline"]},
+                             "rewrite": {"recall@5": FLOORS["rewrite"]},
+                             "oracle": {"recall@5": FLOORS["oracle"]},
+                             "model": {"recall@5": FLOORS["rewrite"] + 0.10}}}
     assert decide(scores) == (0, None)
 
 
@@ -422,11 +443,12 @@ def test_a_raising_rewriter_is_could_not_evaluate_not_a_pass(capsys):
 
 
 def test_evaluate_reports_a_model_floor_equal_to_the_deterministic_floor():
-    """The result exposes the model's floor (the deterministic rewrite floor, 0.40) so the report can
+    """The result exposes the model's floor (the deterministic rewrite floor) so the report can
     show it without mutating the frozen FLOORS constant."""
     out = evaluate(search=_fake({}), rewriter=_perfect)
-    assert out["floors"]["model"] == FLOORS["rewrite"] == 0.40
-    assert FLOORS == {"baseline": 0.20, "rewrite": 0.40, "oracle": 1.00}   # unchanged
+    # The model's floor IS the deterministic floor; the numbers themselves are pinned by
+    # test_floors_are_the_recorded_baselines, so this only asserts the relationship.
+    assert out["floors"]["model"] == FLOORS["rewrite"]
 
 
 def test_the_four_condition_table_renders():

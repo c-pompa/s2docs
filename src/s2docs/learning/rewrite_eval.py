@@ -63,11 +63,19 @@ __all__ = ["FLOORS", "K", "RewriteEvalError", "eval_set", "load_rewriter", "scor
 # trained model). Named here so the pluggable parameters read the same everywhere.
 Rewriter = Callable[[str], Rewrite]
 
-# The measured baselines, recorded as floors. Measured on 2026-10-16 against the live index
-# (http://10.88.15.208:8812/api/search), recall@5: baseline (prose, unscoped) 0.20, deterministic
-# rewrite (query+game) 0.40, oracle (curated keywords, game-scoped) 1.00. These are *floors*: at or
+# The measured baselines, recorded as floors. Re-measured on the 45-row set against the live index
+# (http://10.88.15.208:8812/api/search), recall@5: baseline (prose, unscoped) 0.11, deterministic
+# rewrite (query+game) 0.27, oracle (curated keywords, game-scoped) 0.82. These are *floors*: at or
 # above is a pass. Changing one is a deliberate diff, never a way to make a failing run green.
-FLOORS: dict[str, float] = {"baseline": 0.20, "rewrite": 0.40, "oracle": 1.00}
+#
+# They were re-measured because the set grew from 20 to 45 rows and EVERY condition moved down:
+# the additions are deliberately harder (more Deadlock, more class/identifier rows), so carrying the
+# old numbers forward would have failed the gate on a set it was never measured on. Note the oracle
+# is 0.82, not 1.00 — ~18% of the expanded set is not retrievable even with hand-picked keywords,
+# which is a property of the rows (opaque class names, thin documents), not of the rewriter. That
+# ceiling is why "the ORACLE dropped" must stay a could-not-evaluate outcome rather than a
+# regression: with a hard set, an oracle floor is a corpus-integrity canary, not a target.
+FLOORS: dict[str, float] = {"baseline": 0.11, "rewrite": 0.27, "oracle": 0.82}
 
 K = 5  # the rank window every floor is measured over (recall@1, recall@5, MRR)
 _TIMEOUT = 15
