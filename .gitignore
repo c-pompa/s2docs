@@ -1,4 +1,6 @@
-data/
+# The runtime data dir lives at the repo root; anchored so it does not also hide tracked package
+# data such as src/s2docs/learning/data/ (the frozen eval set).
+/data/
 .venv/
 __pycache__/
 *.pyc

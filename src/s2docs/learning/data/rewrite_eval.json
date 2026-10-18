@@ -1,0 +1,655 @@
+{
+  "version": 2,
+  "status": "expectations verified by reading the target document; none derived from search ranking. v2 = the s2docs 20-row set (v1, sha f072cdfa...) plus 25 lab-verified rows. Every row records expect_kind; report recall per kind: schema_class/schema_enum rows are only reachable by emitting an opaque class name, so pooling them with convar/doc rows misstates the score. Rows added in v2 are written for breadth over themes the user asked about, not recorded user asks (see each row's source). Rejected candidates are listed under 'rejections' with reasons.",
+  "rows": [
+    {
+      "id": "cs2-spectator-xray-walls",
+      "prose": "How do I make spectators see enemy player outlines through walls when watching a CS2 match?",
+      "keywords": "spec_show_xray player outlines through walls",
+      "game": "cs2",
+      "expect_key": "spec_show_xray",
+      "expect_kind": "convar",
+      "evidence": "description: \"If set to 1, you can see player outlines and name IDs through walls - who you can see depends on your team and mode\" (default_value 1; flags archive, clientdll, release)",
+      "source": "user ask (a) spectators see through walls / (g) outlines when behind things"
+    },
+    {
+      "id": "cs2-spec-glow-silent-factor",
+      "prose": "What convar scales how much the xray glow shows on a lurking, silent player?",
+      "keywords": "spec_glow_silent_factor xray glow scaling lurking",
+      "game": "cs2",
+      "expect_key": "spec_glow_silent_factor",
+      "expect_kind": "convar",
+      "evidence": "description: \"Lurking player xray glow scaling.\" (default_value 0.4, min 0, max 1)",
+      "source": "derived from spectator xray theme (a)"
+    },
+    {
+      "id": "cs2-spec-glow-spike-factor",
+      "prose": "What setting adds a spike to the xray glow of players who make noise?",
+      "keywords": "xray glow spike noisy player factor",
+      "game": "cs2",
+      "expect_key": "spec_glow_spike_factor",
+      "expect_kind": "convar",
+      "evidence": "description: \"Noisy player xray glow scaling (pop when noise is made).  Make >1 to add a 'spike' to noise-making players\" (default_value 1.2, min 1, max 3)",
+      "source": "derived from spectator xray theme (a)"
+    },
+    {
+      "id": "cs2-spectators-max",
+      "prose": "How many spectators are allowed in a CS2 match?",
+      "keywords": "max spectators allowed match",
+      "game": "cs2",
+      "expect_key": "mp_spectators_max",
+      "expect_kind": "convar",
+      "evidence": "description: \"How many spectators are allowed in a match.\" (default_value 2)",
+      "source": "spectator capacity (d)"
+    },
+    {
+      "id": "cs2-spec-player-command",
+      "prose": "What console command lets me spectate a specific player by their name or slot?",
+      "keywords": "spectate player by name slot command",
+      "game": "cs2",
+      "expect_key": "spec_player",
+      "expect_kind": "command",
+      "evidence": "description: \"Spectate a player by name or slot\" (kind command)",
+      "source": "user ask (d) joining a server as a spectator"
+    },
+    {
+      "id": "cs2-mp-forcecamera",
+      "prose": "What convar restricts which spectator camera modes a dead player can use?",
+      "keywords": "mp_forcecamera spectator modes dead players",
+      "game": "cs2",
+      "expect_key": "mp_forcecamera",
+      "expect_kind": "convar",
+      "evidence": "description: \"Restricts spectator modes for dead players\" (default_value 0)",
+      "source": "spectator camera modes (d)"
+    },
+    {
+      "id": "cs2-observer-services-mode-field",
+      "prose": "Which schema field on the server stores a spectator's current observer mode?",
+      "keywords": "CCSObserver_ObserverServices",
+      "game": "cs2",
+      "expect_key": "server:CCSObserver_ObserverServices",
+      "expect_kind": "schema_class",
+      "evidence": "field \"m_iObserverMode\" (type uint8, defined_in \"CPlayer_ObserverServices\"); sibling fields m_hObserverTarget, m_iObserverLastMode (ObserverMode_t), m_bForcedObserverMode",
+      "source": "spectator HUD/state (c)/(d)"
+    },
+    {
+      "id": "cs2-observer-pawn-entity",
+      "prose": "What entity does the CS2 server spawn for a player who is spectating?",
+      "keywords": "observer entity CCSObserverPawn",
+      "game": "cs2",
+      "expect_key": "server:observer",
+      "expect_kind": "entity",
+      "evidence": "cpp_class: \"CCSObserverPawn\", bases: [\"player_pawn_base\"] (classname \"observer\", class_type \"PointClass\")",
+      "source": "user ask (d) joining as a spectator"
+    },
+    {
+      "id": "cs2-prop-static-visoccluder",
+      "prose": "What property makes a static prop block precomputed visibility in Hammer?",
+      "keywords": "static prop vis occluder precomputed visibility",
+      "game": "cs2",
+      "expect_key": "server:prop_static",
+      "expect_kind": "entity",
+      "evidence": "field name \"visoccluder\", label \"Vis Occluder\", description: \"If true this geometry is used as an occluder for precomputed visibility. As a rule this geometry should be as simplistic as possible\"",
+      "source": "user ask (a)/(b) wall/occluder theme"
+    },
+    {
+      "id": "cs2-hammer-visibility-doc",
+      "prose": "How does VIS work in Source 2 and which geometry contributes to it?",
+      "keywords": "VIS visibility contributors static prop occluder",
+      "game": "cs2",
+      "expect_key": "s2wiki:/EngineTools/HammerEditor/visibility",
+      "expect_kind": "doc",
+      "evidence": "\"By default, all meshes are VIS contributors, which can be disabled by selecting \\\"Exclude from VIS\\\". Static props are the inverse, and you can set them as VIS contributors by marking the \\\"Vis Occluder\\\" property.\"",
+      "source": "user ask (a)/(b) wall/occluder theme"
+    },
+    {
+      "id": "cs2-cs-script-load-compiled",
+      "prose": "Why does editing my cs_script JavaScript file not change the map?",
+      "keywords": "cs_script compiled vjs_c loaded map load recompile",
+      "game": "cs2",
+      "expect_key": "s2wiki:/Scripting/Counter-Strike 2/cs_script/introduction",
+      "expect_kind": "doc",
+      "evidence": "\"The compiled version of your script (.vjs_c) will be loaded during map load.\" and under Tools Mode: \"In tools mode, saving changes to your script will recompile your file, clear all registered callbacks, and re-run the top level scope of your script.\"",
+      "source": "user ask (e) recompiling cs_script / baked vjs do nothing"
+    },
+    {
+      "id": "cs2-vpk-format",
+      "prose": "What is a VPK and where does the game load its content from?",
+      "keywords": "vpk valve pak archive format content",
+      "game": null,
+      "expect_key": "s2wiki:/FileFormats/vpk",
+      "expect_kind": "doc",
+      "evidence": "\"A VPK (Valve Pak) is the uncompressed archive format Source and Source 2 package content in. Almost everything a game loads at runtime comes out of one.\" (also: content lives in the game's content archives pak01_dir.vpk, every compiled map, and workshop items/addons)",
+      "source": "user ask (e) baked vpk source does nothing"
+    },
+    {
+      "id": "cs2-compiling-maps-remove-output",
+      "prose": "How do I get rid of compiled output that a map build produced?",
+      "keywords": "deleting the map's vpk game side",
+      "game": "cs2",
+      "expect_key": "s2wiki:/Basics/working-on-content/compiling-maps",
+      "expect_kind": "doc",
+      "evidence": "\"Turning a stage off does not undo it: deleting the map's `.vpk` from the [`game/`](./content-and-game.md) side is the only way to get rid of what it produced.\"",
+      "source": "user ask (e) stale/baked output does nothing"
+    },
+    {
+      "id": "cs2-content-vs-game-side",
+      "prose": "Why is my edit to a file under the game/ folder ignored?",
+      "keywords": "content side vs game side which to edit recompile",
+      "game": null,
+      "expect_key": "s2wiki:/Basics/working-on-content/content-and-game",
+      "expect_kind": "doc",
+      "evidence": "\"**`content/`** holds authored source files. Nothing here is ever loaded by the game.\" ... \"The source file is edited under `content/`, a compiler writes the compiled result to the matching path under `game/`, and the game loads that.\" and \"Almost always the `content` side is the right one to edit\"",
+      "source": "user ask (e) editing baked source does nothing"
+    },
+    {
+      "id": "cs2-hammer5tools-addon-manager",
+      "prose": "How do I create or export a Hammer addon using hammer5tools?",
+      "keywords": "hammer addon create export addon manager",
+      "game": "cs2",
+      "expect_key": "s2wiki:/ExternalTools/Hammer5Tools/utilities/addon-manager",
+      "expect_kind": "doc",
+      "evidence": "\"Choose Create new addon to create an addon from a preset. Enter the addon name, select a preset, then click Create Addon.\" and \"Choose Export addon from the addon menu. The exporter creates an archive from the selected addon's files.\"",
+      "source": "user ask (h) Hammer addon tooling"
+    },
+    {
+      "id": "cs2-addons-basics",
+      "prose": "What is a Source 2 addon and where does its content live?",
+      "keywords": "addon custom content folder csgo_addons",
+      "game": "cs2",
+      "expect_key": "s2wiki:/Basics/working-on-content/addons",
+      "expect_kind": "doc",
+      "evidence": "\"An addon is the unit of custom content in Source 2. It replaces the Source 1 habit of dropping loose compiled files into the game directory, custom content lives in a named folder and the game mounts that folder on request.\" ... \"Every addon is two directories with the same name: content/csgo_addons/my_addon/ => source files\"",
+      "source": "user ask (h) Hammer addon tooling"
+    },
+    {
+      "id": "dl-spectator-mode",
+      "prose": "How do I switch the spectator camera mode in Deadlock?",
+      "keywords": "citadel_spectator_mode",
+      "game": "deadlock",
+      "expect_key": "citadel_spectator_mode",
+      "expect_kind": "convar",
+      "evidence": "description: \"Toggles the spectator mode: 0=Directed - 1=Free Cam - 2=Hero Chase - 3=PlayerView\" (default_value 0)",
+      "source": "spectator modes, cross-game (d)"
+    },
+    {
+      "id": "dl-camera-spectator-fov",
+      "prose": "What sets the field of view of the Deadlock spectator camera?",
+      "keywords": "citadel_camera_spectator_fov",
+      "game": "deadlock",
+      "expect_key": "citadel_camera_spectator_fov",
+      "expect_kind": "convar",
+      "evidence": "description: \"The field of view angle of the camera when a spectator.\" (default_value 90, min 65, max 100)",
+      "source": "spectator camera settings, cross-game (d)"
+    },
+    {
+      "id": "dl-spectator-voice-mode",
+      "prose": "How do I restrict Deadlock spectator voice chat so only spectators hear it?",
+      "keywords": "citadel_spectator_voice_mode spectator voice transmit mode",
+      "game": "deadlock",
+      "expect_key": "citadel_spectator_voice_mode",
+      "expect_kind": "convar",
+      "evidence": "description: \"Spectator voice transmit mode: 0 spectators and players, 1 spectators only\"",
+      "source": "spectator voice, cross-game (d)"
+    },
+    {
+      "id": "dl-observer-pawn-schema",
+      "prose": "What schema class represents a Deadlock spectator pawn on the server?",
+      "keywords": "CCitadelObserverPawn",
+      "game": "deadlock",
+      "expect_key": "server:CCitadelObserverPawn",
+      "expect_kind": "schema_class",
+      "evidence": "class \"CCitadelObserverPawn\", module \"server\", bases [\"CCitadelPlayerPawnBase\"], with m_pObserverServices (CPlayer_ObserverServices*)",
+      "source": "spectator state, cross-game (d)"
+    },
+    {
+      "id": "cs2-warmup-pause-timer",
+      "prose": "How do I keep my CS2 server stuck in warmup until I'm ready to start?",
+      "keywords": "stay in warmup indefinitely pause warmup timer",
+      "game": "cs2",
+      "expect_key": "mp_warmup_pausetimer",
+      "expect_kind": "convar",
+      "evidence": "description: \"Set to 1 to stay in warmup indefinitely. Set to 0 to resume the timer.\" (default_value 0)",
+      "source": "derived for eval breadth (server-admin / cs_script themes), not a recorded user ask"
+    },
+    {
+      "id": "cs2-bot-add-command",
+      "prose": "What command adds a bot to the CT or T side with a chosen difficulty and name?",
+      "keywords": "add bot team difficulty name command",
+      "game": "cs2",
+      "expect_key": "bot_add",
+      "expect_kind": "command",
+      "evidence": "description: \"bot_add <t|ct> <type> <difficulty> <name> - Adds a bot matching the given criteria.\" (kind command)",
+      "source": "derived for eval breadth (server-admin / cs_script themes), not a recorded user ask"
+    },
+    {
+      "id": "cs2-script-round-restart-hook",
+      "prose": "In cs_script, how do I run my own code when a round restart begins?",
+      "keywords": "cs_script callback round restart cleanup",
+      "game": "cs2",
+      "expect_key": "Domain.OnBeginRoundRestart",
+      "expect_kind": "script",
+      "evidence": "signature \"OnBeginRoundRestart(callback: () => void): void\", doc: \"Called at the start of cleanup for a round restart\"",
+      "source": "derived for eval breadth (server-admin / cs_script themes), not a recorded user ask"
+    },
+    {
+      "id": "cs2-script-input-from-hammer",
+      "prose": "How do I call a function in my cs_script when a Hammer button fires an output at the script entity?",
+      "keywords": "RunScriptInput point_script callback input name",
+      "game": "cs2",
+      "expect_key": "Domain.OnScriptInput",
+      "expect_kind": "script",
+      "evidence": "signature \"OnScriptInput(name: string, callback: (inputData: { caller?: Entity, activator?: Entity }) => void): void\", doc: \"Called when input RunScriptInput is triggered on the point_script entity with a parameter value that matches name.\"",
+      "source": "derived for eval breadth (server-admin / cs_script themes), not a recorded user ask"
+    },
+    {
+      "id": "cs2-event-round-prestart",
+      "prose": "Which game event is sent before any of the round restart actions happen?",
+      "keywords": "game event before round restart actions",
+      "game": "cs2",
+      "expect_key": "round_prestart",
+      "expect_kind": "event",
+      "evidence": "description: \"sent before all other round restart actions\" (source_file mod.gameevents, no fields)",
+      "source": "derived for eval breadth (server-admin / cs_script themes), not a recorded user ask"
+    },
+    {
+      "id": "cs2-script-modify-player-damage",
+      "prose": "How can my cs_script change or cancel the damage a player is about to take?",
+      "keywords": "cs_script modify player damage before applied abort",
+      "game": "cs2",
+      "expect_key": "Domain.OnModifyPlayerDamage",
+      "expect_kind": "script",
+      "evidence": "doc: \"Called immediately before a CSPlayerPawn takes damage to armor and health.\" ... \"Return `{ damage: N }` to modify the amount of damage.\" ... \"Return `{ abort: true }` to cancel the damage event.\"",
+      "source": "derived for eval breadth (server-admin / cs_script themes), not a recorded user ask"
+    },
+    {
+      "id": "cs2-bot-difficulty",
+      "prose": "How do I set the skill level of bots that join my CS2 server, from easy to expert?",
+      "keywords": "bot skill level easy normal hard expert",
+      "game": "cs2",
+      "expect_key": "bot_difficulty",
+      "expect_kind": "convar",
+      "evidence": "description: \"Defines the skill of bots joining the game.  Values are: 0=easy, 1=normal, 2=hard, 3=expert.\" (default_value 1)",
+      "source": "derived for eval breadth (server-admin / cs_script themes), not a recorded user ask"
+    },
+    {
+      "id": "cs2-ent-teleport-command",
+      "prose": "Is there a console command to move a named entity to where I'm looking?",
+      "keywords": "teleport entity to crosshair look position command",
+      "game": "cs2",
+      "expect_key": "ent_teleport",
+      "expect_kind": "command",
+      "evidence": "description: \"Teleport the specified entity to where the player is looking.\\nFormat: ent_teleport <entity name>\" (flags cheat, gamedll)",
+      "source": "derived for eval breadth (server-admin / cs_script themes), not a recorded user ask"
+    },
+    {
+      "id": "cs2-ff-bullet-penetration",
+      "prose": "With friendly fire off, can bullets still go through a teammate and hurt whoever is behind them?",
+      "keywords": "friendly fire off bullet penetration through teammate damage scale",
+      "game": "cs2",
+      "expect_key": "ff_damage_bullet_penetration",
+      "expect_kind": "convar",
+      "evidence": "description: \"If friendly fire is off, this will scale the penetration power and damage a bullet does when penetrating another friendly player\" (default_value 0, min 0, max 1)",
+      "source": "derived for eval breadth (server-admin / cs_script themes), not a recorded user ask"
+    },
+    {
+      "id": "cs2-auto-adjust-bot-difficulty",
+      "prose": "Why do my bots keep getting harder or easier from round to round?",
+      "keywords": "bots difficulty adjusts each round contribution score",
+      "game": "cs2",
+      "expect_key": "sv_auto_adjust_bot_difficulty",
+      "expect_kind": "convar",
+      "evidence": "description: \"Adjust the difficulty of bots each round based on contribution score.\" (default_value true)",
+      "source": "derived for eval breadth (server-admin / cs_script themes), not a recorded user ask"
+    },
+    {
+      "id": "dl-zipline-new-latch",
+      "prose": "Is there a setting for the new latch animation when grabbing onto a zipline in Deadlock?",
+      "keywords": "zipline latch motion getting on",
+      "game": "deadlock",
+      "expect_key": "zipline_use_new_latch",
+      "expect_kind": "convar",
+      "evidence": "description: \"Use the new latch motion for getting on a zipline. 0: Dont use 1: Just those with b_UseNewZipLineSetup 2: Everyone use\" (default_value 2)",
+      "source": "derived for eval breadth (Deadlock map/NPC themes), not a recorded user ask"
+    },
+    {
+      "id": "dl-zipline-rebuild-paths",
+      "prose": "I moved some zipline points in my Deadlock map; how do I regenerate the zipline paths?",
+      "keywords": "rebuild zipline splines paths command",
+      "game": "deadlock",
+      "expect_key": "citadel_zipline_rebuildpaths",
+      "expect_kind": "command",
+      "evidence": "description: \"Rebuilds all zipline splines\" (kind command; flags developmentonly, gamedll)",
+      "source": "derived for eval breadth (Deadlock map/NPC themes), not a recorded user ask"
+    },
+    {
+      "id": "dl-trooper-types-enum",
+      "prose": "What different kinds of troopers does Deadlock have?",
+      "keywords": "TrooperType_t trooper normal medic melee",
+      "game": "deadlock",
+      "expect_key": "client:TrooperType_t",
+      "expect_kind": "schema_enum",
+      "evidence": "enum \"TrooperType_t\" (module client, uint32_t): TROOPER_INVALID=0, TROOPER_NORMAL=1, TROOPER_MEDIC=2, TROOPER_MELEE=3, TROOPER_ZIPLINE_CONTAINER=4",
+      "source": "derived for eval breadth (Deadlock map/NPC themes), not a recorded user ask"
+    },
+    {
+      "id": "dl-midboss-npc-class",
+      "prose": "Which server class implements the Mid Boss NPC in Deadlock?",
+      "keywords": "CNPC_MidBoss mid boss npc",
+      "game": "deadlock",
+      "expect_key": "server:CNPC_MidBoss",
+      "expect_kind": "schema_class",
+      "evidence": "class \"CNPC_MidBoss\", module \"server\", bases [\"CAI_CitadelNPC\"], inheritance CAI_CitadelNPC > CAI_BaseNPC > CBaseCombatCharacter ...; fields include m_vecWeakPoints",
+      "source": "derived for eval breadth (Deadlock map/NPC themes), not a recorded user ask"
+    },
+    {
+      "id": "dl-mod-directory-name",
+      "prose": "What folder name does Deadlock use for its mod directory when I'm looking for game files?",
+      "keywords": "Deadlock mod directory citadel folder layout",
+      "game": "deadlock",
+      "expect_key": "s2wiki:/Basics/working-on-content/directory-layout",
+      "expect_kind": "doc",
+      "evidence": "table row: \"| Deadlock | `Deadlock` | `citadel` |\" under \"The folder the engine mounts is not the Steam folder name\" (columns Game | Steam folder | Mod directory)",
+      "source": "derived for eval breadth (Source 2 modding/content-pipeline themes), not a recorded user ask"
+    },
+    {
+      "id": "cs2-navmesh-radar-image",
+      "prose": "How can I generate a radar overview image for my CS2 map from its navmesh?",
+      "keywords": "radar image from navmesh hammer5tools generate",
+      "game": "cs2",
+      "expect_key": "s2wiki:/ExternalTools/Hammer5Tools/utilities/navmesh-radar",
+      "expect_kind": "doc",
+      "evidence": "description: \"Generates radar images from compiled navigation data.\" body: \"NavMesh: Generates radar faces from the navmesh.\" ... \"Generation writes or replaces `maps/<addon>_generated_radar.vmap`.\"",
+      "source": "derived for eval breadth (Source 2 modding/content-pipeline themes), not a recorded user ask"
+    },
+    {
+      "id": "s2-schema-system",
+      "prose": "What is the schema system in Source 2 and how do Hammer keyvalues relate to it?",
+      "keywords": "schema system reflection classes fields keyvalues",
+      "game": null,
+      "expect_key": "s2wiki:/Basics/schemas",
+      "expect_kind": "doc",
+      "evidence": "\"Source 2 keeps a description of its own C++ classes at runtime: every class, every field, the field's name, type and offset in memory. That registry is the **schema system**\" and \"**Entity properties are schema fields.** The keyvalues set in Hammer end up bound to real class members.\"",
+      "source": "derived for eval breadth (Source 2 modding/content-pipeline themes), not a recorded user ask"
+    },
+    {
+      "id": "s2-content-mounting-gameinfo",
+      "prose": "How does the game decide which folders and VPKs to load, and what is gameinfo.gi for?",
+      "keywords": "gameinfo.gi search paths mounting content",
+      "game": null,
+      "expect_key": "s2wiki:/Basics/content-mounting",
+      "expect_kind": "doc",
+      "evidence": "\"A Source 2 game does not reference `pak01_dir.vpk` by name anywhere. Mounting is configured by `gameinfo.gi` files, which list directories; the filesystem discovers the archives inside those directories.\"",
+      "source": "derived for eval breadth (Source 2 modding/content-pipeline themes), not a recorded user ask"
+    },
+    {
+      "id": "cs2-env-particle-glow",
+      "prose": "What entity do I use to put a particle-editor light glow into my CS2 map?",
+      "keywords": "light glow particle editor entity",
+      "game": "cs2",
+      "expect_key": "server:env_particle_glow",
+      "expect_kind": "entity",
+      "evidence": "description: \"An entity to create light glows built via the particle editor\" (cpp_class CEnvParticleGlow, bases [\"info_particle_system\"], fgd csgo.fgd)",
+      "source": "derived for eval breadth (Source 2 modding/content-pipeline themes), not a recorded user ask"
+    },
+    {
+      "id": "dl-soul-urn-subtitles",
+      "prose": "How do I turn off the Soul Urn subtitles in Deadlock?",
+      "keywords": "soul urn subtitles toggle",
+      "game": "deadlock",
+      "expect_key": "citadel_subtitles_soul_urn",
+      "expect_kind": "convar",
+      "evidence": "description: \"Show subtitles for the Soul Urn.\" (default_value true; flags archive, clientdll, per_user)",
+      "source": "derived for eval breadth (Deadlock gameplay/settings themes), not a recorded user ask"
+    },
+    {
+      "id": "dl-bot-director-respawn-window",
+      "prose": "How much respawn time can a Deadlock hero have left and still be counted as being in a lane by the bot director?",
+      "keywords": "bot director respawn time remaining hero lane",
+      "game": "deadlock",
+      "expect_key": "citadel_bot_director_respawn_window",
+      "expect_kind": "convar",
+      "evidence": "description: \"Amount of Respawn time remaining for Hero to be considered in this lane\" (default_value 10)",
+      "source": "derived for eval breadth (Deadlock gameplay/settings themes), not a recorded user ask"
+    },
+    {
+      "id": "dl-respawn-credit-vdata",
+      "prose": "Which Deadlock vdata class sets a fixed respawn delay after dying for the respawn-credit modifier?",
+      "keywords": "CCitadel_Modifier_RespawnCreditVData respawn delay fixed",
+      "game": "deadlock",
+      "expect_key": "server:CCitadel_Modifier_RespawnCreditVData",
+      "expect_kind": "schema_class",
+      "evidence": "field m_flRespawnDelay with MPropertyDescription = \"Respawn time is set to this fixed duration after dying.\" (suppressed unless m_eRespawnMechanic == RejuvenatorRespawnMechanic_FixedDelay; group \"Respawn Settings\"). Note: a client:-module twin of this class also exists.",
+      "source": "derived for eval breadth (Deadlock gameplay/settings themes), not a recorded user ask"
+    },
+    {
+      "id": "dl-ability-cast-stages-enum",
+      "prose": "What stages of an ability cast does Deadlock distinguish, like cast delay or channeling?",
+      "keywords": "AbilityCastEvent_t cast delay completed channel",
+      "game": "deadlock",
+      "expect_key": "client:AbilityCastEvent_t",
+      "expect_kind": "schema_enum",
+      "evidence": "enum \"AbilityCastEvent_t\" (module client, uint32_t): CAST_DELAY_STARTED=0, CAST_COMPLETED=1, CAST_TOGGLED_ON=2, CAST_CHANNEL_STARTED=3",
+      "source": "derived for eval breadth (Deadlock gameplay/settings themes), not a recorded user ask"
+    },
+    {
+      "id": "cs2-bot-behavior-trees",
+      "prose": "How do I make CS2 bots run my own custom AI instead of the classic bot logic?",
+      "keywords": "bot behavior tree kv3 custom bot AI mp_bot_ai_bt",
+      "game": "cs2",
+      "expect_key": "s2wiki:/Scripting/Counter-Strike 2/bot-behavior-trees",
+      "expect_kind": "doc",
+      "evidence": "\"A **bot behavior tree** is a KV3 file that describes what a Counter-Strike 2 bot does ... instead of the hardcoded classic bot AI. ... any server or map can point bots at its own tree.\" and \"When `mp_bot_ai_bt` is not empty, every bot uses that file, otherwise bots run the classic bot AI.\"",
+      "source": "derived for eval breadth (server-admin / cs_script themes), not a recorded user ask"
+    },
+    {
+      "id": "cs2-env-instructor-hint",
+      "prose": "Which entity lets my map logic show instructor hint lessons to players?",
+      "keywords": "instructor lesson hint entity map logic",
+      "game": "cs2",
+      "expect_key": "server:env_instructor_hint",
+      "expect_kind": "entity",
+      "evidence": "description: \"An entity that allows for creation and control of instructor lessons by map logic\" (cpp_class CEnvInstructorHint)",
+      "source": "derived for eval breadth (Source 2 modding/content-pipeline themes), not a recorded user ask"
+    }
+  ],
+  "known_gaps": [
+    {
+      "question": "How do I let spectators see through walls only in a specific area (a region/trigger volume where xray applies)?",
+      "why": "No document describes region-restricted or per-area spectator xray. Searches: 'xray area'(0), 'spectator xray area'(0), 'occluder area'(1, only the Hammer VIS doc), 'trigger_multiple visibility'(0). The only xray control is the global spec_show_xray convar.",
+      "game": "cs2"
+    },
+    {
+      "question": "How do I remove or fade only the wall that is currently blocking/occluding the player (DOTA-style depth fade of occluded geometry)?",
+      "why": "No doc covers runtime depth-based fading of occluding world geometry. Searches: 'player behind wall'(0), 'silhouette behind wall'(0), 'wall transparency'(0), 'fade occluded geometry'(0), 'dissolve wall'(0), 'render through wall'(1, unrelated styleguide), 'depth fade'(21, all env_* / fog entities), 'make wall invisible'(1, unrelated import-tool guide).",
+      "game": "cs2"
+    },
+    {
+      "question": "Where are CS2 runtime wall/visibility 'occluders' (the invisible-wall kind the user meant) documented?",
+      "why": "The corpus only knows two unrelated meanings. Searches: 'occluder'(total 3) top hit r_csgo_sky_occluder is a SKYBOX convar, plus server:prop_static and the Hammer visibility doc; 'vis occluder'(2), 'visblocker'(1 -> Hammer visibility doc), 'visibility occluder wall'(0), 'occluder' deadlock(1 -> Hammer visibility doc). All hits are map-compile-time precomputed VIS, not a runtime per-wall visibility/occlusion feature.",
+      "game": "cs2"
+    },
+    {
+      "question": "Why does editing the .vjs_c source baked into a map's vpk do nothing, and how do I re-bake cs_script into the map vpk?",
+      "why": "Partially answered: s2wiki:/Scripting/Counter-Strike 2/cs_script/introduction states the .vjs_c is loaded at map load and that tools mode recompiles on save, but NO document explains repacking/re-baking a .vjs into the map's .vpk. Searches: 'baked vpk'(6, none about vjs), 'cs_script recompile'(1 -> the intro doc only).",
+      "game": "cs2"
+    },
+    {
+      "question": "How do I make a mod or client DLL to change CS2 rendering?",
+      "why": "No document describes client-side DLL mods for rendering. Searches: 'gameinfo dll'(0), 'inject dll'(0), 'custom dll'(3, unrelated), 'client mod'(2393, all schema/Modifier noise), 'dll'(14, unrelated).",
+      "game": "cs2"
+    },
+    {
+      "question": "Can CS2 render like DOTA (silhouette/see-through) when a player is behind something?",
+      "why": "No doc describes DOTA-style occluded-player rendering in CS2. Searches: 'DOTA' cs2(33, all dota_* convars, none about rendering players), 'dota style render'(3, unrelated), 'render like dota'(3, unrelated), 'silhouette behind'(0). The nearest real feature is the global spec_show_xray convar (already a row).",
+      "game": "cs2"
+    },
+    {
+      "question": "What controls Deadlock player outline visibility behind geometry (citadel_player_outline_*)?",
+      "why": "The convars exist (citadel_player_outline_allies/enemies, citadel_player_outline_fade_range_min, citadel_player_outline_fade_at_min) but they carry NO description in the corpus (description: null), so there is no quotable passage that answers the question. Excluded as a retrieval row for lack of verifiable evidence.",
+      "game": "deadlock"
+    }
+  ],
+  "rejections": [
+    {
+      "candidate": "mp_autoteambalance",
+      "game": "cs2",
+      "reason": "no_evidence: description is null in the corpus; same exclusion rule as the citadel_player_outline_* gap"
+    },
+    {
+      "candidate": "BaseModelEntity.Glow",
+      "game": "cs2",
+      "reason": "no_evidence: script doc is null (signature only 'Glow(color?: ColorArg): void')"
+    },
+    {
+      "candidate": "server:point_script",
+      "game": "cs2",
+      "reason": "no_evidence: entity description null; only a bare cs_script keyvalue, nothing quotable that answers 'which entity runs a script'"
+    },
+    {
+      "candidate": "jointeam_failed / CSPlayerController.JoinTeam",
+      "game": "cs2",
+      "reason": "anti_leak: jointeam_failed is a training identifier in train_pairs.jsonl; and the join-a-team ask is already gate-adjacent (spectator theme)"
+    },
+    {
+      "candidate": "mp_round_restart_delay",
+      "game": "cs2",
+      "reason": "anti_leak: identifier present in train_pairs_retrieval(_evidence).jsonl"
+    },
+    {
+      "candidate": "player_death",
+      "game": "cs2",
+      "reason": "anti_leak: fixture target 'game_event player_death' and training identifier"
+    },
+    {
+      "candidate": "server:point_teleport",
+      "game": "cs2",
+      "reason": "anti_leak: identifier present in train_pairs_retrieval_evidence.jsonl"
+    },
+    {
+      "candidate": "s2wiki:/Scripting/Counter-Strike 2/rush",
+      "game": "cs2",
+      "reason": "anti_leak: key signature 'rush' is contained in training target 'rush intro map'"
+    },
+    {
+      "candidate": "mp_spawnprotectiontime",
+      "game": "cs2",
+      "reason": "anti_leak: identifier present in train_pairs_retrieval.jsonl"
+    },
+    {
+      "candidate": "trooper_kill_all",
+      "game": "deadlock",
+      "reason": "anti_leak: identifier present in train_pairs_retrieval(_evidence).jsonl"
+    },
+    {
+      "candidate": "trooper_kill_non_bosses",
+      "game": "deadlock",
+      "reason": "anti_leak: identifier present in train_pairs_retrieval(_evidence).jsonl"
+    },
+    {
+      "candidate": "citadel_shop_default_tab",
+      "game": "deadlock",
+      "reason": "no_evidence: description is null"
+    },
+    {
+      "candidate": "server:info_mid_boss_spawn",
+      "game": "deadlock",
+      "reason": "no_evidence: entity description null and only generic transform keyvalues"
+    },
+    {
+      "candidate": "zipline_player_attached",
+      "game": "deadlock",
+      "reason": "no_evidence: event description null, single undocumented userid field"
+    },
+    {
+      "candidate": "server:citadel_trigger_secure_souls",
+      "game": "deadlock",
+      "reason": "no_evidence: entity description null, only generic trigger keyvalues"
+    },
+    {
+      "candidate": "s2wiki:/EngineTools/WorkshopManager",
+      "game": "cs2",
+      "reason": "anti_leak: identifier present in train_pairs_retrieval_evidence.jsonl"
+    },
+    {
+      "candidate": "s2wiki:/EngineTools/ParticleEditor",
+      "game": "cs2",
+      "reason": "anti_leak: identifier present in train_pairs_retrieval_evidence.jsonl"
+    },
+    {
+      "candidate": "s2wiki:/FileFormats/kv3",
+      "game": "cs2",
+      "reason": "anti_leak: identifier in training and signature 'kv3' inside target 'kv3 untyped'"
+    },
+    {
+      "candidate": "server:func_physical_button",
+      "game": "cs2",
+      "reason": "ambiguous: description ('rotating player-useable button') is the same text as func_rot_button, so the prose cannot point at one document"
+    },
+    {
+      "candidate": "citadel_spawn_urn",
+      "game": "deadlock",
+      "reason": "anti_leak: identifier present in train_pairs_retrieval(_evidence).jsonl"
+    },
+    {
+      "candidate": "citadel_start_local_bot_match",
+      "game": "deadlock",
+      "reason": "anti_leak: identifier present in train_pairs_retrieval(_evidence).jsonl"
+    },
+    {
+      "candidate": "party_start_match",
+      "game": "deadlock",
+      "reason": "anti_leak: identifier present in train_pairs_retrieval(_evidence).jsonl"
+    },
+    {
+      "candidate": "server:info_citadel_matchmaking_status",
+      "game": "deadlock",
+      "reason": "no_evidence: entity description null"
+    },
+    {
+      "candidate": "player_respawn_time_changed",
+      "game": "deadlock",
+      "reason": "no_evidence: event description null (only 'user ID on server' on userid)"
+    },
+    {
+      "candidate": "bomb_planted",
+      "game": "cs2",
+      "reason": "anti_leak: key signature 'bomb planted' contained in training target 'player planted bomb'"
+    },
+    {
+      "candidate": "contributionscore_bomb_planted",
+      "game": "cs2",
+      "reason": "anti_leak: identifier present in train_pairs_retrieval_evidence.jsonl"
+    },
+    {
+      "candidate": "server:npc_boss_tier2 / server:npc_boss_tier3",
+      "game": "deadlock",
+      "reason": "no_evidence: entity description null; only generic NPC inputs documented, nothing tying tier2/tier3 to a named in-game boss"
+    },
+    {
+      "candidate": "player_used_ability / ability_cast_failed",
+      "game": "deadlock",
+      "reason": "no_evidence: event and all field descriptions null"
+    },
+    {
+      "candidate": "cs_script/chess.js (example)",
+      "game": "cs2",
+      "reason": "ambiguous + unreadable: every Valve cs_script example has a s2wiki doc twin (examples/chess) answering the same prose, and /api/games/cs2/examples/cs_script/chess.js returns 404 so the example document could not be read"
+    },
+    {
+      "candidate": "server:game_text",
+      "game": "cs2",
+      "reason": "anti_leak: identifier present in train_pairs_retrieval_evidence.jsonl"
+    },
+    {
+      "candidate": "server:logic_timer",
+      "game": "cs2",
+      "reason": "anti_leak: identifier present in train_pairs_retrieval_evidence.jsonl"
+    },
+    {
+      "candidate": "server:point_worldtext",
+      "game": "cs2",
+      "reason": "anti_leak: identifier present in train_pairs.jsonl"
+    }
+  ]
+}

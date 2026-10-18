@@ -995,14 +995,18 @@ def test_migration_0013_rebuilds_jobs_and_keeps_children(tmp_path):
     """0013 adds 'inconclusive' to the jobs CHECK by rebuilding the table. jobs IS referenced by
     job_events/job_links (ON DELETE CASCADE), so the rebuild must not lose the timeline: every count is
     unchanged, integrity + foreign keys are clean, every old status still validates, and the cascade
-    still works on the rebuilt tables."""
+    still works on the rebuilt tables.
+
+    A v12 database today upgrades past 0013 to the current schema (14), so this exercises the real
+    path an old checkout takes — and 0014 must leave everything the rebuild produced alone.
+    """
     from s2docs.db import connection
 
     path = _v12_db_with_every_status(tmp_path)
     conn = connection.connect(path)
     tables = ("jobs", "job_events", "job_links")
     before = {t: conn.execute(f'SELECT count(*) FROM "{t}"').fetchone()[0] for t in tables}
-    assert connection.migrate(conn) == 13
+    assert connection.migrate(conn) == 14, "a v12 database upgrades all the way to the current schema"
     after = {t: conn.execute(f'SELECT count(*) FROM "{t}"').fetchone()[0] for t in tables}
     assert before == after == {"jobs": 6, "job_events": 6, "job_links": 6}
     # the children survived intact (ids, phases, links — not just the counts)
@@ -1015,6 +1019,10 @@ def test_migration_0013_rebuilds_jobs_and_keeps_children(tmp_path):
     assert {r["status"] for r in conn.execute("SELECT status FROM jobs")} == {
         "queued", "running", "passed", "failed", "error", "cancelled",
     }
+    # 0014 runs immediately after the rebuild: the column is present, and every row that predates it
+    # reads 'agent' — a v12 database carries no provenance to recover, and guessing one would be
+    # inventing data (see 0014_job_origin.sql).
+    assert conn.execute("SELECT count(*) FROM jobs WHERE origin = 'agent'").fetchone()[0] == 6
     conn.execute("UPDATE jobs SET status = 'inconclusive' WHERE id = 'j-2'")
     with pytest.raises(sqlite3.IntegrityError):
         conn.execute("UPDATE jobs SET status = 'not-a-status' WHERE id = 'j-3'")

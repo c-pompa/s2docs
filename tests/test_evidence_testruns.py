@@ -227,6 +227,37 @@ def test_mcp_evidence_and_test_flow(edb, tmp_path):
     assert bad.is_error and "kind" in bad.content[0].text
 
 
+def test_mcp_add_evidence_does_not_require_a_step(edb, tmp_path):
+    """A project-level evidence row (no ``step_id``) must be storable over MCP, as it is over HTTP.
+
+    The REST route has always accepted ``step_id: null`` — the column is nullable and ``evidence.add``
+    defaults it to None. The MCP tool made it a required argument, so the identical call was rejected
+    by argument validation *before* the tool body ran. An agent posting evidence over MCP then got a
+    payload-shaped error back and nothing stored, while the same call via the API succeeded: MCP must
+    not be stricter than the REST surface it wraps.
+    """
+    server = create_mcp_server(edb, workspace=tmp_path / "ws")
+
+    async def main():
+        async with Client(server) as c:
+            started = await c.call_tool(
+                "start_project", {"workflow": "server_config", "goal": "aim practice", "game": "cs2"}
+            )
+            pid = started.structured_content["project_id"]
+            ev = await c.call_tool(
+                "add_evidence",
+                {"project_id": pid, "kind": "console_transcript", "ref": "probe", "data": {"x": 1}},
+            )
+            listed = await c.call_tool("list_evidence", {"project_id": pid})
+            return ev, listed
+
+    ev, listed = anyio.run(main)
+    assert not ev.is_error, ev.content
+    assert ev.structured_content["step_id"] is None
+    assert ev.structured_content["ref"] == "probe"
+    assert listed.structured_content["result"][0]["id"] == ev.structured_content["id"]
+
+
 # --------------------------------------------------------------- facades: HTTP
 @pytest.fixture
 def client(edb):

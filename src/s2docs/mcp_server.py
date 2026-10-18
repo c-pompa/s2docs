@@ -698,8 +698,17 @@ def create_mcp_server(db: Database, workspace: Path | None = None) -> MCPServer:
     @server.tool(annotations=NON_IDEMPOTENT)
     def add_evidence(
         project_id: ProjectId,
-        step_id: Annotated[str, Field(description="Project step the evidence proves (e.g. 'research')")],
         kind: m.EvidenceKind,
+        step_id: Annotated[
+            str | None,
+            Field(
+                description=(
+                    "Project step the evidence proves (e.g. 'research'). Omit for project-level evidence "
+                    "that is not tied to a step — the column is nullable and the REST route has always "
+                    "accepted null, so MCP must not be stricter than HTTP."
+                )
+            ),
+        ] = None,
         ref: Annotated[str | None, Field(description="Path / url / command the evidence points at")] = None,
         data: Annotated[
             dict | None,
@@ -708,7 +717,11 @@ def create_mcp_server(db: Database, workspace: Path | None = None) -> MCPServer:
     ) -> m.Evidence:
         """Record structured evidence for a step. This is what the `evidence` gate checks — a step with an
         evidence gate CANNOT be marked done until at least one non-note row exists for it. Use kind='note'
-        only for a supplementary remark (it does not satisfy the gate)."""
+        only for a supplementary remark (it does not satisfy the gate).
+
+        Pass `step_id` to attach the row to a project step, or omit it to record evidence at project
+        level (a measurement, a console transcript, a negative result). A step-less row satisfies no
+        step gate, by design."""
         return _ev(lambda: evidence.add(db, kind=kind, project_id=project_id, step_id=step_id, ref=ref, data=data))
 
     @server.tool(annotations=READ_ONLY)
@@ -837,6 +850,16 @@ def create_mcp_server(db: Database, workspace: Path | None = None) -> MCPServer:
         cleanup: Annotated[list[str] | None, Field(description="Things that must be gone at the end")] = None,
         requested_by: Annotated[str | None, Field(description="Coordinator session id")] = None,
         project_id: Annotated[str | None, Field(description="Project this job belongs to")] = None,
+        origin: Annotated[
+            str | None,
+            Field(
+                description=(
+                    "Who asked for this run: human | agent | driver | eval | probe | warmup "
+                    "(default agent). The learning loop reads the ledger by origin, so tag synthetic "
+                    "runs (driver/eval/probe/warmup) — an untagged repeat inflates a training artifact."
+                )
+            ),
+        ] = None,
     ) -> m.Job:
         """Enqueue a job (validated intake -> queued). The intake is the gate: every missing required field
         comes back in one error with a field list. Set `host_choice='ask'` to queue unassigned."""
@@ -860,6 +883,7 @@ def create_mcp_server(db: Database, workspace: Path | None = None) -> MCPServer:
                 cleanup=cleanup,
                 requested_by=requested_by,
                 project_id=project_id,
+                origin=origin,
             )
         )
 
