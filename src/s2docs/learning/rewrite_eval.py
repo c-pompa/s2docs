@@ -186,7 +186,10 @@ def score(rows: list[dict], *, search=None, k: int = K, rewriter: Rewriter = rew
     model, say) to score it as an additional ``model`` condition alongside the deterministic
     ``rewrite`` condition — the two are then directly comparable on the same rows.
 
-    Returns ``{"n", "conditions": {name: {recall@1, recall@5, mrr, per}}, "fixable": [...]}`` where
+    Returns ``{"n", "conditions": {name: {recall@1, recall@5, mrr, per}}, "fixable": [...],
+    "fixable_model": [...]}`` where ``fixable`` describes the built-in deterministic rewriter and
+    ``fixable_model`` (non-empty only when a rewriter was supplied) describes that rewriter, each
+    drawn from its own scored ranks and carrying its own emitted query.
     ``per`` is one ``{"id","rank"}`` per row (rank ``None`` = miss)."""
     do_search = search if search is not None else _default_search
     n = len(rows)
@@ -216,22 +219,41 @@ def score(rows: list[dict], *, search=None, k: int = K, rewriter: Rewriter = rew
         }
         ranks[name] = {p["id"]: p["rank"] for p in per}
 
-    # The most useful line for a human: a row the oracle finds and the rewriter does not is fixable.
-    fixable = []
-    for row in rows:
-        if ranks["rewrite"][row["id"]] is None and ranks["oracle"][row["id"]] is not None:
-            rw = rewrite(row["prose"])
-            fixable.append({
+    # The most useful line for a human: a row the oracle finds and a rewriter does not is fixable.
+    #
+    # FILL EVERY LIST FROM THE CONDITION THAT WAS SCORED -- both the rows and the query shown.
+    # Reading the module-level ``rewrite`` (the built-in deterministic one) while the ranks came from
+    # ``conds["model"]`` is silent and badly misleading: a supplied fine-tune gets its misses listed
+    # next to another rewriter's queries, so the debugging session reads prose echoes like
+    # "spectators see enemy player outlines xray" and concludes the MODEL emitted them. It did not --
+    # that was the deterministic rewriter. Hence two lists, each labelled with its own condition.
+    def fixable_for(name: str, *, with_notes: bool) -> list[dict]:
+        out = []
+        for row in rows:
+            if ranks[name][row["id"]] is not None or ranks["oracle"][row["id"]] is None:
+                continue
+            if with_notes:
+                # the very callable scored as this condition, so notes belong to these ranks
+                rw = rewriter(row["prose"])
+                query, game, notes = rw.query, rw.game, tuple(rw.notes)
+            else:
+                query, game = conds[name](row)      # exactly what this condition searched
+                notes = ()
+            out.append({
                 "id": row["id"],
                 "prose": row["prose"],
                 "expect_key": row["expect_key"],
-                "rewrite_query": rw.query,
-                "rewrite_game": rw.game,
-                "rewrite_notes": list(rw.notes),
+                "rewrite_query": query,
+                "rewrite_game": game,
+                "rewrite_notes": list(notes),
                 "oracle_keywords": row["keywords"],
                 "oracle_game": row.get("game"),
             })
-    return {"n": n, "conditions": conditions, "fixable": fixable}
+        return out
+
+    fixable = fixable_for("rewrite", with_notes=False)
+    fixable_model = fixable_for("model", with_notes=True) if "model" in conds else []
+    return {"n": n, "conditions": conditions, "fixable": fixable, "fixable_model": fixable_model}
 
 
 def decide(scores: dict, *, floors: dict[str, float] | None = None) -> tuple[int, str | None]:
@@ -284,6 +306,7 @@ def evaluate(*, search=None, rows: list[dict] | None = None, rewriter: Rewriter 
                        for name, metrics in scores["conditions"].items()},
         "floors": floors,
         "fixable": scores["fixable"],
+        "fixable_model": scores["fixable_model"],
     }
 
 
@@ -300,15 +323,31 @@ def report_lines(result: dict) -> list[str]:
         lines.append(f"{label:32} {c['recall@1']:9.0%} {c['recall@5']:9.0%} {c['mrr']:7.3f}"
                      f"   {result['floors'][name]:.0%}")
     lines.append("")
+    # Two sections, because the two are different rewriters and conflating them misleads. The
+    # deterministic section always prints (it is the floor); the supplied-rewriter section prints
+    # only when a model was actually scored, and then it is the one a fine-tune is debugged with.
+    def _section(title: str, rows_: list[dict], who: str) -> None:
+        if not rows_:
+            return
+        lines.append(f"{title}: {len(rows_)}")
+        for f in rows_:
+            lines.append(f"  {f['id']}: prose={f['prose']}")
+            lines.append(f"      {who} gave {f['rewrite_query']!r} game={f['rewrite_game']}"
+                         f"  |  oracle wants {f['oracle_keywords']!r} game={f['oracle_game']}")
+
     fix = result["fixable"]
     if fix:
-        lines.append(f"fixable misses (rewriter missed, oracle hit): {len(fix)}")
-        for f in fix:
-            lines.append(f"  {f['id']}: prose={f['prose']}")
-            lines.append(f"      rewriter gave {f['rewrite_query']!r} game={f['rewrite_game']}"
-                         f"  |  oracle wants {f['oracle_keywords']!r} game={f['oracle_game']}")
+        _section("fixable misses (DETERMINISTIC rewriter missed, oracle hit)", fix, "rewriter")
     else:
-        lines.append("fixable misses: none")
+        lines.append("fixable misses (DETERMINISTIC rewriter missed, oracle hit): none")
+    fix_model = result.get("fixable_model") or []
+    if "model" in result["conditions"]:
+        lines.append("")
+        if fix_model:
+            _section("fixable misses (SUPPLIED rewriter missed, oracle hit)", fix_model,
+                     "supplied rewriter")
+        else:
+            lines.append("fixable misses (SUPPLIED rewriter missed, oracle hit): none")
     return lines
 
 

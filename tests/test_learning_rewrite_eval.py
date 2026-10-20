@@ -542,3 +542,75 @@ def test_cli_rewriter_that_raises_exits_six_without_a_traceback(monkeypatch, tmp
     assert rc == 6
     assert "COULD NOT EVALUATE" in err
     assert "Traceback" not in err
+
+
+def _stub(prose_to_query, *, game="cs2"):
+    """A supplied rewriter: prose -> a distinctive query, so its output is unmistakable."""
+    def rw(prose):
+        return Rewrite(query=prose_to_query.get(prose, ""), game=game, dropped=(), notes=())
+    return rw
+
+
+def test_fixable_model_reports_the_supplied_rewriters_query_not_the_built_in_one():
+    """The supplied rewriter's misses must show the SUPPLIED rewriter's query.
+
+    This is the regression the two lists exist for. Reading the module-level ``rewrite`` (the
+    built-in deterministic one) while the ranks came from the model condition listed one
+    rewriter's misses beside another rewriter's queries -- and a fine-tune debugger then reads
+    prose echoes and concludes the MODEL emitted them. Here the two rewriters emit deliberately
+    different strings for the same row, so picking the wrong one is impossible to miss.
+    """
+    fake = _fake({
+        "alpha": [], "beta": ["beta"],                    # deterministic: misses 'a', hits 'b'
+        "alpha kw": ["alpha"], "beta kw": ["beta"],       # oracle: hits both
+        "MODEL-A": [], "MODEL-B": ["beta"],               # model: misses 'a', hits 'b' too
+    })
+    s = score(_rows(), search=fake, rewriter=_stub({"what is alpha": "MODEL-A",
+                                                    "what is beta": "MODEL-B"}))
+
+    assert [f["id"] for f in s["fixable"]] == ["a"]
+    assert s["fixable"][0]["rewrite_query"] == "alpha"          # the deterministic query
+    assert [f["id"] for f in s["fixable_model"]] == ["a"]
+    assert s["fixable_model"][0]["rewrite_query"] == "MODEL-A"  # NOT "alpha"
+    assert s["fixable_model"][0]["rewrite_game"] == "cs2"
+
+
+def test_each_fixable_list_is_decided_by_its_own_rewriters_ranks():
+    """Two rewriters that miss DIFFERENT rows must produce different lists.
+
+    Ranking the model's list by the deterministic condition's ranks would put the model's HIT in
+    its own miss list and hide its actual miss. Both directions are asserted.
+    """
+    fake = _fake({
+        "alpha": [], "beta": ["beta"],                    # deterministic misses 'a'
+        "alpha kw": ["alpha"], "beta kw": ["beta"],       # oracle hits both
+        "MODEL-A": ["alpha"], "MODEL-B": [],              # model HITS 'a', misses 'b'
+    })
+    s = score(_rows(), search=fake, rewriter=_stub({"what is alpha": "MODEL-A",
+                                                    "what is beta": "MODEL-B"}))
+    assert [f["id"] for f in s["fixable"]] == ["a"]
+    assert [f["id"] for f in s["fixable_model"]] == ["b"]
+    assert s["fixable_model"][0]["rewrite_query"] == "MODEL-B"
+
+
+def test_the_report_labels_the_two_fixable_sections_separately():
+    """A human must be able to tell whose misses they are reading -- that conflation is the bug."""
+    fake = _fake({
+        "alpha": [], "beta": [], "alpha kw": ["alpha"], "beta kw": ["beta"],
+        "MODEL-A": ["alpha"], "MODEL-B": [],
+    })
+    res = evaluate(rows=_rows(), search=fake,
+                   rewriter=_stub({"what is alpha": "MODEL-A", "what is beta": "MODEL-B"}))
+    text = "\n".join(report_lines(res))
+    assert "fixable misses (DETERMINISTIC rewriter missed, oracle hit): 2" in text
+    assert "fixable misses (SUPPLIED rewriter missed, oracle hit): 1" in text
+    assert "supplied rewriter gave 'MODEL-B'" in text
+
+
+def test_no_supplied_rewriter_means_no_model_section_and_no_model_list():
+    """The default path is unchanged: with no supplied rewriter there is no model condition."""
+    fake = _fake({"alpha": [], "beta": ["beta"], "alpha kw": ["alpha"], "beta kw": ["beta"]})
+    s = score(_rows(), search=fake)
+    assert "model" not in s["conditions"]
+    assert s["fixable_model"] == []
+    assert "SUPPLIED" not in "\n".join(report_lines(evaluate(rows=_rows(), search=fake)))
