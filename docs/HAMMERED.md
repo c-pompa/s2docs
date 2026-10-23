@@ -1,23 +1,23 @@
 # Hammered — a hosted backend for the s2docs plugin
 
 Status: **plan + decisions** (nothing here ships yet except the local half, which already does).
-Questions this answers: what Meshy actually runs, what the same shape would be for us, what we can
+Questions this answers: what the audited vendor actually runs, what the same shape would be for us, what we can
 sell, on which hardware, and what has to be decided before a line of the vendor service is written.
 
-## 1. What Meshy actually runs (measured, not assumed)
+## 1. What the vendor actually runs (measured, not assumed)
 
-We unpacked their client: `npm pack @meshy-ai/meshy-mcp-server@0.6.5` → 992 KB tarball,
+We unpacked their client: `npm pack <audited-package>@<version>` → 992 KB tarball,
 `package/dist/*.js` only.
 
 | question | answer | evidence |
 |---|---|---|
 | does the MCP server contain a model? | **no** — zero weights, zero inference code | `find -iname '*.safetensors\|*.onnx\|*.pt'` → nothing; `grep -i 'torch\|diffusion\|cuda\|weights'` → nothing |
-| what does it talk to? | exactly one host, `https://api.meshy.ai` | `grep -oE 'https://[a-z0-9.-]+'` → `api.meshy.ai`, `docs.meshy.ai` |
+| what does it talk to? | exactly one host, `https://api.vendor.ai` | `grep -oE 'https://[a-z0-9.-]+'` → the vendor's API host |
 | is Hermes/the agent's model in the loop? | **no** | server-side there is no Hermes; the local process is a request builder |
-| where does the work happen? | Meshy's inference farm behind their REST API | the plugin pays per call: 5–62 credits, `MESHY_API_KEY`, Pro plan |
-| where does the money come from? | an account + credits on their API | `plugin-catalog/meshy.yaml` disclosure + their README |
+| where does the work happen? | the vendor's inference farm behind its REST API | the plugin pays per call: 5–62 credits, `VENDOR_API_KEY`, Pro plan |
+| where does the money come from? | an account + credits on their API | `plugin-catalog/<vendor>.yaml` disclosure + their README |
 
-So Meshy's product is **models + GPU capacity + billing**; the MCP server is the free, MIT-licensed
+So That vendor's product is **models + GPU capacity + billing**; the MCP server is the free, MIT-licensed
 pipe that makes their API feel native inside an agent. That is why the catalog entry is 8 lines: the
 thing being listed is a pointer to a repo, and the repo is a pointer to an API.
 
@@ -51,11 +51,11 @@ asset**. Everything in front of and behind them already exists.
 | **image → mesh** | medium-high (quality + wiring is hard) | RTX 5080 16 GB (own) or a provider API | **the product's front door** |
 | **mesh → Source 2 asset** (scale, collision, materials, `.vmdl`/`.vmat`, preview) | **highest** — this is our automation + the index telling us what the engine accepts | CPU + Windows | **the moat**; nobody selling 3D assets does this. First gear shipped: `s2docs asset` writes a `.vmdl` from a mesh, and it **compiles** (below) |
 | compile (resourcecompiler, VMap) | high per-run cost: a VMap compile is 20+ min of one Windows box | 1–2 boxes, one compile at a time | never sell raw minutes; bundle as a queued step with a per-job cap |
-| "see it in game" (deploy + screenshot evidence) | high — needs the game, the host, the HUD hooks | same Windows boxes | the differentiator vs Meshy: *their* asset ends as a download; **ours ends as a frame from inside CS2** |
+| "see it in game" (deploy + screenshot evidence) | high — needs the game, the host, the HUD hooks | same Windows boxes | the differentiator vs the vendor: *their* asset ends as a download; **ours ends as a frame from inside CS2** |
 
 Pricing shape should follow the platform's existing single-tier + units model
 (`docs/adr/0005-single-tier-pricing.md`), not a new ladder: one subscription, asset jobs metered in
-units, a job's cost published *before* it runs (Meshy's per-tool credit ranges are the precedent).
+units, a job's cost published *before* it runs (per-tool credit ranges are the precedent).
 
 ## 4. Architecture: Hammered is a product line, not a second stack
 
@@ -79,7 +79,7 @@ units, a job's cost published *before* it runs (Meshy's per-tool credit ranges a
   tools are advertised only when a key exists; without one the plugin is exactly what ships today.
   This is not a workaround — it is the only correct shape here: a portable `mcp.json` **cannot** pass a
   secret to a remote server (Agent Plugins v1 remote entries expand nothing in `url`/`headers`), which
-  is precisely why Meshy ships an `npx` client holding `MESHY_API_KEY` instead of a hosted URL entry.
+  is precisely why the vendor ships an `npx` client holding `VENDOR_API_KEY` instead of a hosted URL entry.
 - **Asset store:** job artifacts under the platform's storage, with signed URLs; a job's outputs are
   never public by default.
 - **Windows/GPU nodes:** the existing node/PAIR fleet concept already models "hardware we own that
@@ -88,7 +88,7 @@ units, a job's cost published *before* it runs (Meshy's per-tool credit ranges a
 
 ## 5. API contract v1 (what the client calls)
 
-Async, Meshy-shaped: submit → task id → poll (the plugin does the polling; the user sees progress).
+Async, task-shaped: submit → task id → poll (the plugin does the polling; the user sees progress).
 
 | endpoint | body → result | units |
 |---|---|---|
@@ -103,7 +103,7 @@ Async, Meshy-shaped: submit → task id → poll (the plugin does the polling; t
 | `GET /v1/s2/catalog` | what this account may call, with unit ranges **before** the call | — |
 
 Every job is metered once on settlement (the ledger already works that way), and the cost of a job is
-shown to the user before it starts — the discipline Meshy applies with credit ranges.
+shown to the user before it starts — the discipline those credit ranges imply.
 
 ## 6. Asset and licence policy (non-negotiable)
 
@@ -135,7 +135,7 @@ the game, not a file.
 | # | decision | answer |
 |---|---|---|
 | 1 | hostname | **`hammered.cpompa.com`** now (no purchase). `hammered.ai` is **taken** — RDAP: registered 2023-08-02, expires 2027-08-02, GoDaddy nameservers, `client*Prohibited`; `hammered.dev` also resolves to a live GCP site; `hammered.gg` has no A record but needs a registry check before assuming it is free. A new domain is a later branding move with `api.` → the same tunnel. |
-| 2 | mesh route | **both, chosen per job**: `route: "local"` (TRELLIS/Hunyuan3D on our GPU) or `route: "provider"` (Meshy finish). The caller picks; the API never picks silently, and a job records which route it took. |
+| 2 | mesh route | **both, chosen per job**: `route: "local"` (TRELLIS/Hunyuan3D on our GPU) or `route: "provider"` (a hosted provider finish). The caller picks; the API never picks silently, and a job records which route it took. |
 | 3 | which GPU serves tenants | **both boxes are candidates**, so the fleet gets a *device discovery* surface: a UI/API that scans the network for GPUs and ComfyUI servers (local or another box), shows what it found, and requires **HITL approval** before a device is allowed to take tenant work. Neither `desktop-pc` (3080, also the compile host) nor `pomps-pc` (5080, live machine) serves a tenant job until approved, and `pomps-pc` approval should be scoped (e.g. idle-only, paused on request). |
 | 4 | billing | **Stripe test-mode through Phase 1–2**; live keys and the trading name go in when the asset pipeline produces an in-game frame. |
 
@@ -170,5 +170,5 @@ the game, not a file.
   public repo is a leak, not a shortcut).
 - Ship Valve-derived assets through the API, or make the index a paid endpoint.
 - Run tenant jobs on the live 5080, or a compile on a host the user is using.
-- Copy Meshy's models; we are not in the model-training business this quarter — the moat is the
+- Copy that vendor's models; we are not in the model-training business this quarter — the moat is the
   Source 2 half, where they have nothing.
