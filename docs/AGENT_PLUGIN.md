@@ -1,7 +1,7 @@
-# Shipping s2docs as a Hermes plugin (like Meshy's official one)
+# Shipping s2docs as a Hermes plugin (as a catalog plugin)
 
 Goal: `hermes plugins install s2docs` in any Hermes install, and the agent gets the s2docs tool
-surface plus the workflow skill — the same way Meshy's official plugin ships its MCP server.
+surface plus the workflow skill — the same way a catalog plugin ships its MCP server.
 
 This document records how Hermes actually loads such a plugin (read from the runtime, not the
 docs), what this repo now contains, what was measured, and what is still blocking catalog admission.
@@ -22,15 +22,15 @@ The live catalog the Desktop browser and `hermes plugins search` read is
 `plugin-catalog/*.yaml` on every docs build (6h TTL client cache, in-tree copy as fallback). So an
 entry can reach users without a Hermes update — but only a reviewed in-tree YAML can create one.
 
-Meshy's entry (`plugin-catalog/meshy.yaml` upstream, tier `official`) points at
-`https://github.com/NousResearch/hermes-official-plugins`, `subdir: meshy`, pinned at a 40-hex sha.
+the vendor's entry (`plugin-catalog/<vendor>.yaml` upstream, tier `official`) points at
+the vendors' plugin repository, one package subdirectory, pinned at a 40-hex sha.
 That directory is a **portable Agent Plugins v1 package**:
 
 ```
-meshy/plugin.json     # v1 manifest + extensions.com.nousresearch.hermes (servers, trust, costs, settings)
-meshy/mcp.json        # mcpServers: npx -y @meshy-ai/meshy-mcp-server@0.6.5 (stdio), cwd ${PLUGIN_DATA}
-meshy/skills/meshy-3d # the workflow skill (+ references/tools.md generated from a live tools/list)
-meshy/desktop/        # optional Desktop UI (plugin.js), dashboard/ for a server page
+plugin.json          # v1 manifest + extensions.com.nousresearch.hermes (servers, trust, costs, settings)
+mcp.json             # mcpServers: a pinned npx server over stdio, cwd ${PLUGIN_DATA}
+skills/<skill>/      # the workflow skill (+ references/tools.md generated from a live tools/list)
+desktop/             # optional Desktop UI (plugin.js), dashboard/ for a server page
 ```
 
 Runtime mechanics that decide our design (`hermes_cli/agent_plugins.py`, `hermes_cli/config.py`):
@@ -60,7 +60,7 @@ scripts/plugin_tools_md.py                          # regenerates the table from
 tests/test_plugin_package.py                        # the package cannot drift from the server
 ```
 
-Launch path: `uvx --from git+<repo>@<40-hex sha> s2docs mcp`. `uvx` is the analogue of Meshy's
+Launch path: `uvx --from git+<repo>@<40-hex sha> s2docs mcp`. `uvx` is the analogue of an npm
 `npx`: a per-session stdio server built from an immutable pin, no `mcp_servers` editing, no
 "please keep a daemon running". The Server is the same FastMCP instance the HTTP mount uses
 (`create_mcp_server`), so both transports expose one surface.
@@ -106,8 +106,7 @@ Two traps were caught while wiring this:
   and anonymously cloneable (`git clone` with the credential helper disabled works). The canonical
   repository stays private on GitLab; the public repo is a mirror published from it. The plugin
   package lives at `plugin/` (`subdir: plugin`).
-- **Licence.** MIT, the same licence as the reference plugin (`meshy/LICENSE` in
-  `NousResearch/hermes-official-plugins` — identical text, its own copyright holder). Carried at the
+- **Licence.** MIT, the same licence as other catalog plugins (identical text, our own copyright holder). Carried at the
   repo root and inside the package (`plugin/LICENSE`), matching the reference's layout, plus
   `license: MIT` in `plugin.json`.
 - **Machine-specific identifiers.** Genericized before publication: private LAN/tailnet addresses →
@@ -137,7 +136,7 @@ own sha). So a re-pin is two commits:
 2. commit `mcp.json` with `@S` (plus the `version` label), then use *that* commit's sha in the
    catalog entry.
 
-The reference plugin avoids the dance only because its server is an npm package version.
+A package whose server is an npm version avoids the dance entirely.
 
 ### Draft catalog entry
 
