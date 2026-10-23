@@ -1773,6 +1773,42 @@ const diffMarkdown = (d, match) => {
   }
   return lines.join("\n");
 };
+
+// ---- Choosing WHICH pair to show -------------------------------------------
+// A patch that only moves binaries leaves two consecutive builds with identical DumpSource2 data, so the
+// literal "previous build → current" pair renders an empty page and reads as a broken diff (CS2 shipped
+// exactly that: 2000933 → 2000934 changed no convar, entity, schema class, event, script type, Pulse
+// binding or Hammer class). The API stays honest — /diff is the diff of the two builds asked for — so
+// the CHOICE of pair is a UI concern and lives here: with no `from` picked, walk back over the retained
+// builds and show the nearest earlier build that actually differs, SAYING SO and linking to the literal
+// pair. Bounded, because a run of identical builds must not cost one request per retained build.
+const DIFF_AUTOPICK_MAX = 4;
+const diffIsEmpty = (d) => !Object.values((d && d.totals) || {}).some((n) => n > 0);
+// Candidate from→to pairs, nearest window first, all ending at the build being shown. Build order is
+// NOT assumed: sort descending here, so the caller can pass GET /builds rows in any order.
+const diffCandidatePairs = (nums, to, max = DIFF_AUTOPICK_MAX) => {
+  const all = (nums || []).map(Number).filter(Number.isFinite).sort((a, b) => b - a);
+  const i = all.indexOf(Number(to));
+  if (i < 0) return []; // an unknown `to` has no window: the caller falls back to the API default
+  return all.slice(i + 1, i + 1 + Math.max(1, max)).map((from) => [from, Number(to)]);
+};
+// Why the page widened the window instead of showing the literal previous→current pair.
+const diffWidenNote = (d, literal) => {
+  const lf = esc(literal[0]), lt = esc(literal[1]);
+  return `<p class="diff-note">Builds <strong>${lf}</strong> → <strong>${lt}</strong> have identical indexed ` +
+    `data (that patch only touched binaries or content), so this shows the nearest earlier build that ` +
+    `differs: <strong>${esc(d.from_build)} → ${esc(d.to_build)}</strong>. ` +
+    `<a href="#/${esc(d.game)}/diff?from=${lf}&to=${lt}">Show ${lf} → ${lt} on its own</a></p>`;
+};
+// A pair with no indexed changes at all: ONE explanation, not seven "no changes" lines in a row.
+const diffEmptyNote = (d) => {
+  const secs = Object.keys(d.sections || {});
+  const what = secs.length ? secs.join(", ") : "every section";
+  return `<p class="diff-note">No indexed changes between build <strong>${esc(d.from_build)}</strong> and ` +
+    `<strong>${esc(d.to_build)}</strong>: ${esc(what)} ${secs.length === 1 ? "is" : "are"} identical, so that ` +
+    `patch only touched binaries or content. Pick an older <em>from</em> build above, or ` +
+    `<a href="#/${esc(d.game)}/diff">show the nearest pair that changed</a>.</p>`;
+};
 // diff-helpers:end
 
 // Map a search hit (kind + key) to its detail route.
@@ -2150,7 +2186,27 @@ const ROUTES = {
     if (builds.length < 2)
       return `<h1>Build diff</h1><p class="muted">Only one build is indexed (${esc(builds[0]?.build_number ?? "none")}).
         Run <code>s2docs sync</code> after the next game update to diff patches.</p>`;
-    const d = await api(`/games/${state.game}/diff`, { from: p.from, to: p.to });
+    // Which pair to show. An explicit ?from= is honoured EXACTLY (a deep link must show what it names,
+    // even when that pair has no changes). With no `from`, show the nearest pair that actually differs:
+    // start at the literal previous→current pair and widen one build at a time, bounded by
+    // DIFF_AUTOPICK_MAX — consecutive builds can share identical data, and an empty page reads as broken.
+    const to = p.to != null && p.to !== "" ? Number(p.to) : Math.max(...builds.map((b) => b.build_number));
+    const explicit = p.from != null && p.from !== "";
+    const pairs = diffCandidatePairs(builds.map((b) => b.build_number), to);
+    const literalPair = explicit ? null : pairs[0] || null;
+    let d;
+    if (explicit) {
+      d = await api(`/games/${state.game}/diff`, { from: p.from, to });
+    } else if (pairs.length) {
+      for (const [cf, ct] of pairs) {
+        d = await api(`/games/${state.game}/diff`, { from: cf, to: ct });
+        if (!diffIsEmpty(d)) break;
+      }
+    } else {
+      d = await api(`/games/${state.game}/diff`, {}); // stale/unknown ?to=: let the API pick the default pair
+    }
+    const empty = diffIsEmpty(d);
+    const widened = !!literalPair && (d.from_build !== literalPair[0] || d.to_build !== literalPair[1]);
     const opts = builds.map((b) => [String(b.build_number), `${b.build_number} (${b.patch_version || ""})`]);
     const byNum = Object.fromEntries(builds.map((b) => [b.build_number, b]));
     // Build metadata for the summary header, from GET /api/games/{game}/builds.
@@ -2187,6 +2243,7 @@ const ROUTES = {
         ${select("change", p.change, changeOpts)}
         ${input("q", p.q, "filter changed names…")}</form>
       <div class="diff-head">${meta(d.from_build)}<span class="diff-arrow">→</span>${meta(d.to_build)}</div>
+      ${!explicit && widened && !empty ? diffWidenNote(d, literalPair) : ""}
       <p class="diff-counts">${badge(c.added + " added", "kind")}${badge(c.removed + " removed", "warn")}${badge(c.changed + " changed")}
         <span class="muted">total changes across ${c.sections} section${c.sections === 1 ? "" : "s"}${
           c.truncated ? ` · sections capped at ${d.limit || 500} rows${capNote}` : ""
@@ -2195,7 +2252,7 @@ const ROUTES = {
         }</p>
       <div class="diff-actions"><button type="button" data-copy-md>Copy as Markdown</button>
         <textarea id="diff-md" class="diff-md mono" hidden aria-label="diff as Markdown">${esc(md)}</textarea></div>
-      ${diffSectionsHtml(d, match)}`;
+      ${empty ? diffEmptyNote(d) : diffSectionsHtml(d, match)}`;
   },
 
   // Game-independent: ONE mission-control wallboard. Layout is invariant between idle and running

@@ -620,6 +620,116 @@ def test_diff_render_executes_in_node(client):
     assert "| added | client:C_CSPlayerPawn | `C_CSPlayerPawn.m_flEmitSoundTime_Client` | — | GameTime_t |" in out["md"]
 
 
+# ------------------------------------- Build Diff: which pair the page shows
+# A patch that only moves binaries leaves two consecutive builds with identical DumpSource2 data (CS2
+# 2000933 -> 2000934 changed nothing indexable), so the literal previous->current pair rendered a page of
+# zeros and seven "no changes" lines. The pick belongs to the UI: the page widens to the nearest pair that
+# differs and SAYS SO; a pair with no changes at all gets one explanation, not a wall of empty sections.
+def test_frontend_diff_autopick_markers(client):
+    """The widened-window pick, its explanation and the empty-pair explanation are wired in app.js/css."""
+    js = client.get("/app.js").text
+    css = client.get("/style.css").text
+    assert "DIFF_AUTOPICK_MAX" in js and "diffIsEmpty" in js and "diffCandidatePairs" in js
+    assert "const diffWidenNote" in js and "const diffEmptyNote" in js
+    # the page widens only when it has not been told which pair to show: a deep link wins
+    assert 'const explicit = p.from != null && p.from !== "";' in js
+    assert '${!explicit && widened && !empty ? diffWidenNote(d, literalPair) : ""}' in js
+    # an empty pair renders one explanation instead of every section's "no changes" line
+    assert "${empty ? diffEmptyNote(d) : diffSectionsHtml(d, match)}" in js
+    # the widening note names the pair it skipped and links back to it
+    # the phrase is built by string concatenation in the source, so assert its two halves
+    assert "nearest earlier build that " in js and "differs: <strong>" in js
+    assert "Show ${lf} → ${lt} on its own" in js
+    # the empty-pair note explains WHY and offers the nearest pair that did change
+    assert "No indexed changes between build" in js
+    assert "only touched binaries or content" in js
+    assert "show the nearest pair that changed" in js
+    # the bounded walk: at most DIFF_AUTOPICK_MAX candidate pairs, no request per retained build
+    assert "diffCandidatePairs(builds.map((b) => b.build_number), to)" in js
+    # the CSS the note relies on
+    assert ".diff-note" in css
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_diff_autopick_executes_in_node(client):
+    """Lift the shipped helpers and execute the pair planner + emptiness test + both notes: nearest window
+    first, bounded, order-independent, tolerant of a string `to`, and no window for an unknown build."""
+    assert NODE is not None  # skipif above
+    js = client.get("/app.js").text
+    block = js.split("// diff-helpers:start", 1)[1].split("// diff-helpers:end", 1)[0]
+    prologue = (
+        "const ESC_MAP = " + json.dumps({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}) + ";\n"
+        'const esc = (v) => String(v ?? "").replace(/[&<>"\']/g, (c) => ESC_MAP[c]);\n'
+        'const badge = (t, cls = "") => `<span class="badge ${cls}">${esc(t)}</span>`;\n'
+    )
+    empty = {
+        "game": "cs2",
+        "from_build": 2000933,
+        "to_build": 2000934,
+        "limit": 500,
+        "totals": {"convars": 0, "entities": 0, "schema": 0},
+        "sections": {"convars": [], "entities": [], "schema": []},
+    }
+    full = {
+        "game": "cs2",
+        "from_build": 2000932,
+        "to_build": 2000934,
+        "limit": 500,
+        "totals": {"convars": 3, "entities": 0, "schema": 4},
+        "sections": {
+            "convars": [
+                {"name": "convar:cl_demo_freecam", "change": "added", "before": None,
+                 "after": "true During demo playback", "group": None},
+            ],
+            "entities": [],
+            "schema": [],
+        },
+    }
+    script = (
+        prologue
+        + block
+        + """
+const EMPTY_D = """ + json.dumps(empty) + """;
+const FULL_D = """ + json.dumps(full) + """;
+const nums = [2000934, 2000933, 2000932, 2000930];
+console.log(JSON.stringify({
+  pairs: diffCandidatePairs(nums, 2000934),
+  capped: diffCandidatePairs(nums, 2000934, 2),
+  unsorted: diffCandidatePairs([2000932, 2000930, 2000934, 2000933], "2000934"),
+  unknown: diffCandidatePairs(nums, 9999),
+  emptyIsEmpty: diffIsEmpty(EMPTY_D),
+  fullIsEmpty: diffIsEmpty(FULL_D),
+  noTotals: diffIsEmpty({ sections: {} }),
+  zeroTotals: diffIsEmpty({ totals: { convars: 0, schema: 0 } }),
+  widen: diffWidenNote(FULL_D, [2000933, 2000934]),
+  emptyNote: diffEmptyNote(EMPTY_D),
+}));
+"""
+    )
+    proc = subprocess.run([NODE, "-e", script], capture_output=True, text=True, encoding="utf-8", timeout=60)
+    assert proc.returncode == 0, proc.stderr
+    out = json.loads(proc.stdout)
+    # nearest window first, every pair ending at the build being shown, bounded by the cap
+    assert out["pairs"] == [[2000933, 2000934], [2000932, 2000934], [2000930, 2000934]]
+    assert out["capped"] == [[2000933, 2000934], [2000932, 2000934]]
+    # input order and a string `to` (straight off the hash query) both work
+    assert out["unsorted"] == out["pairs"]
+    # an unknown `to` has no window, so the caller falls back to the API's own default pair
+    assert out["unknown"] == []
+    # emptiness is about the server's totals, not about rows arriving
+    assert out["emptyIsEmpty"] is True and out["fullIsEmpty"] is False
+    assert out["noTotals"] is True and out["zeroTotals"] is True
+    # the widening note names the skipped pair, the shown pair, and links back to the literal one
+    assert "nearest earlier build that differs" in out["widen"]
+    assert "<strong>2000932 → 2000934</strong>" in out["widen"]
+    assert 'href="#/cs2/diff?from=2000933&to=2000934"' in out["widen"]
+    assert "Show 2000933 → 2000934 on its own" in out["widen"]
+    # the empty-pair note lists what was compared and points at the nearest pair that changed
+    assert "No indexed changes between build" in out["emptyNote"]
+    assert "convars, entities, schema are identical" in out["emptyNote"]
+    assert 'href="#/cs2/diff"' in out["emptyNote"]
+
+
 # ------------------------------------------------- Job page: verification UX
 # The user ask: "make it clear we have changed to the next verification — all look the same and the
 # button doesn't look pressed and nothing looks like it's loading or moving to the next". These tests
