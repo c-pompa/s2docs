@@ -745,7 +745,8 @@ class Job(BaseModel):
     status: JobStatus
     origin: JobOrigin = Field(
         default="agent",
-        description="Who asked for this run (human | agent | driver | eval | probe | warmup) — scopes the learning loop",
+        description="Who asked for this run (human | agent | driver | eval | probe | warmup) — "
+        "scopes the learning loop",
     )
     position: int = 100
     params: dict = Field(default_factory=dict, description="Intake: purpose, expected, caps, flags, pending_shot, ...")

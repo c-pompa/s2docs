@@ -239,6 +239,39 @@ def _cmd_scaffold(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_asset(args: argparse.Namespace) -> int:
+    """Write a Source 2 model document (`.vmdl`) for a mesh inside an addon's content tree.
+
+    The document is generated from the shape a real CS2 document uses and is compiled for real by
+    `resourcecompiler` (see docs/HAMMERED.md); this command only authors it.
+    """
+    from s2docs.asset.model import ModelDocError, render_model_doc, write_model_doc
+    from s2docs.build.workspace import addon_root
+
+    settings = get_settings()
+    root = addon_root(settings.workspace_dir, args.game, args.addon)
+    if not root.is_dir():
+        return _fail(
+            f"addon {args.addon!r} does not exist in {settings.workspace_dir}; "
+            f"run `s2docs scaffold {args.addon}` first",
+            3,
+        )
+    target = root / "models" / args.name / f"{args.name}.vmdl"
+    try:
+        doc = render_model_doc(args.name, args.mesh, translation=tuple(args.translate) if args.translate else None)
+        write_model_doc(target, doc, overwrite=args.force)
+    except ModelDocError as exc:
+        return _fail(str(exc), 2)
+    rel = target.relative_to(root).as_posix()
+    payload = {"path": str(target), "addon": args.addon, "mesh": args.mesh, "bytes": len(doc.encode())}
+    _emit(args, payload, [
+        f"wrote {rel} ({payload['bytes']} B)",
+        f"  mesh reference: {args.mesh} (addon-relative)",
+        f"  compile it on a host: resourcecompiler -i <addon content>/{rel} -nop4",
+    ])
+    return 0
+
+
 def _cmd_host(args: argparse.Namespace) -> int:
     from s2docs import hosts
 
@@ -968,6 +1001,16 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--game", default="cs2", choices=["cs2"])
     p.set_defaults(fn=_cmd_scaffold)
 
+    p = sub.add_parser("asset", help="Author Source 2 asset documents (model .vmdl) in an addon")
+    p.add_argument("--addon", required=True, help="Addon name in the local workspace")
+    p.add_argument("--name", required=True, help="Model name (addon-safe: [a-z][a-z0-9_]+)")
+    p.add_argument("--mesh", required=True, help="Addon-relative mesh path, e.g. models/probe/probe.dmx")
+    p.add_argument("--translate", nargs=3, type=float, metavar=("X", "Y", "Z"),
+                   help="Optional ModelModifier_Translate for the whole model")
+    p.add_argument("--force", action="store_true", help="Replace an existing .vmdl")
+    p.add_argument("--game", default="cs2", choices=["cs2"])
+    p.set_defaults(fn=_cmd_asset)
+
     p = sub.add_parser("prompt", help="Render a prompt template, e.g. prompt cs2_script task='...'")
     p.add_argument("name")
     p.add_argument("arg", nargs="*", help="key=value")
@@ -993,7 +1036,7 @@ def main(argv: list[str] | None = None) -> int:
     q.add_argument("host_id")
     q = hc.add_parser("register", help="Register/update a host")
     q.add_argument("host_id")
-    q.add_argument("ssh_target")
+    q.add_argument("ssh_target", help="ssh alias or [user@]host[:port]; never starts with '-'")
     q.add_argument("--hostname")
     q.add_argument("--ssh-key")
     q.add_argument("--shell", choices=["cmd", "powershell"])

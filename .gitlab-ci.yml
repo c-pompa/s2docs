@@ -1,0 +1,93 @@
+# s2docs CI: two pipelines that never check the same thing (docs/FEEDBACK_CI.md).
+#
+#   hermes-pr-feedback-ci   every rule an upstream hermes-agent reviewer asked for (HPF-*)
+#   cpompa-hermes-ci        our house standards (CHC-*)
+#
+# Which rule runs in which pipeline is decided by ci/feedback-rules.yaml alone; this file only names
+# the pipelines. Each job is one command from scripts/ci/ and runs the same way on a workstation:
+#   scripts/ci/run.sh enforce <pipeline>   every rule against this commit
+#   scripts/ci/run.sh falsify <pipeline>   every rule rejects its planted violations and accepts its clean cases
+# Both pipelines start as soon as the registry validates (needs:), so neither waits for the other.
+
+workflow:
+  name: "s2docs: hermes-pr-feedback-ci + cpompa-hermes-ci"
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH && $CI_OPEN_MERGE_REQUESTS
+      when: never # the merge-request pipeline covers this push
+    - if: $CI_COMMIT_BRANCH
+    - if: $CI_COMMIT_TAG
+
+stages:
+  - registry
+  - hermes-pr-feedback-ci
+  - cpompa-hermes-ci
+
+variables:
+  GIT_DEPTH: "0" # HPF-008 needs the pinned commit's history; CHC-COMMITS/SECRETS need the reviewed range
+  GIT_STRATEGY: clone
+  UV_CACHE_DIR: "$CI_PROJECT_DIR/.cache/uv" # ignored by .gitignore, so never part of a checked tree
+  UV_LINK_MODE: copy
+  UV_PYTHON_DOWNLOADS: never # the image's CPython 3.11 is the interpreter under test
+  CI_REPORT_DIR: "$CI_PROJECT_DIR/ci-reports"
+
+default:
+  # uv 0.13.5 (the version uv.lock is written with) on Debian trixie with CPython 3.11, pinned by digest.
+  image: ghcr.io/astral-sh/uv:0.13.5-python3.11-trixie@sha256:d1df4f51a3351691af7b1a887c287070cd387d32c08cdfc46a448ba08a2c0cc2
+  interruptible: true
+  cache:
+    key:
+      files: [uv.lock]
+    paths: [.cache/uv]
+
+.reports:
+  artifacts:
+    when: always
+    expire_in: 30 days
+    paths: [ci-reports/]
+    reports:
+      junit: ci-reports/*.xml
+
+registry:validate:
+  stage: registry
+  script:
+    - scripts/ci/bootstrap.sh python
+    - .venv/bin/python scripts/ci/registry.py validate
+
+# ------------------------------------------------------------------ hermes-pr-feedback-ci
+hermes-pr-feedback-ci:enforce:
+  extends: .reports
+  stage: hermes-pr-feedback-ci
+  needs: [registry:validate]
+  timeout: 45m
+  script:
+    - scripts/ci/bootstrap.sh python node
+    - scripts/ci/run.sh enforce hermes-pr-feedback-ci
+
+hermes-pr-feedback-ci:falsify:
+  extends: .reports
+  stage: hermes-pr-feedback-ci
+  needs: [registry:validate]
+  timeout: 90m
+  script:
+    - scripts/ci/bootstrap.sh python node
+    - scripts/ci/run.sh falsify hermes-pr-feedback-ci
+
+# ------------------------------------------------------------------ cpompa-hermes-ci
+cpompa-hermes-ci:enforce:
+  extends: .reports
+  stage: cpompa-hermes-ci
+  needs: [registry:validate]
+  timeout: 45m
+  script:
+    - scripts/ci/bootstrap.sh python node gitleaks
+    - scripts/ci/run.sh enforce cpompa-hermes-ci
+
+cpompa-hermes-ci:falsify:
+  extends: .reports
+  stage: cpompa-hermes-ci
+  needs: [registry:validate]
+  timeout: 90m
+  script:
+    - scripts/ci/bootstrap.sh python node gitleaks
+    - scripts/ci/run.sh falsify cpompa-hermes-ci

@@ -14,7 +14,6 @@ produce a case the gate fails.
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import pytest
@@ -26,7 +25,6 @@ from s2docs.ingest.wiki import load_wiki
 from s2docs.learning import gate, review
 from tests.conftest import write_tree, write_wiki
 from tests.test_learning import _enqueue, db_for
-
 
 # --------------------------------------------------------------------- helpers
 

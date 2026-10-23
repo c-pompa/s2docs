@@ -50,8 +50,7 @@ _TOKEN_RE = re.compile(r"[a-z0-9_]+")
 # retrieval signal in this corpus. No dependency: the set is meant to be read. Domain words are
 # deliberately absent (see test_stopword_set_has_no_domain_terms) — dropping 'prop' or 'addon' would be
 # catastrophic, dropping 'please' is free.
-STOPWORDS: frozenset[str] = frozenset(
-    """
+_STOPWORDS_TEXT = """
     a an the and or but if then than so as of to in on at by for with from into about over under
     up down out off within without inside outside near around between among during through across
     along behind below above beneath beside onto upon via per
@@ -63,8 +62,8 @@ STOPWORDS: frozenset[str] = frozenset(
     please want wanted need needed like get got gets use uses used using make makes made
     think thought know knows look looks help helps show shows shown tell tells say says said
     research create creates created make also allow allows specific certain general thing things work
-    """.split()
-)
+"""
+STOPWORDS: frozenset[str] = frozenset(_STOPWORDS_TEXT.split())
 
 # Multi-word phrasings -> the engine's own term. Longest first so 'players info ui' wins over
 # 'player info'. Each entry cites (in tests/test_learning_rewrite.py) why it is real.
@@ -122,7 +121,7 @@ _DOMAIN_VOCAB: frozenset[str] = frozenset(
         "spawn", "trigger", "nav", "cs_script", "weapon", "item", "particle", "material", "texture",
         "model", "map", "sound", "keyvalues", "hammer", "cs2", "deadlock", "citadel", "ability",
         "hero", "patron", "urn", "mp_roundtime", "mp_roundvtime", "dust2",
-        "xray", "vis", "visibility", "occluder", "contributor", "contributors",
+        "xray", "vis", "visibility", "contributor", "contributors",
     }
 )
 

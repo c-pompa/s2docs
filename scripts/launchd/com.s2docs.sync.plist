@@ -6,7 +6,7 @@
   `.venv/bin/s2docs sync` from the repo root).
 
   WHY THE PROGRAM IS THE VENV PYTHON BINARY WITH -m, and NOT scripts/sync_index.sh or .venv/bin/s2docs:
-  a launchd-spawned /bin/bash cannot read files under /Volumes/SSD_2 (agent exits 126 with
+  a launchd-spawned /bin/bash cannot read files under /Users/you (agent exits 126 with
   "bash: /Volumes/.../sync_index.sh: Operation not permitted", and a WorkingDirectory there gives
   "shell-init: error retrieving current directory"). The venv's python is a real Mach-O binary and runs
   fine from that volume — the same pattern ai.hittle.server uses. `.venv/bin/s2docs` is only a shebang
@@ -26,21 +26,21 @@
   <string>com.s2docs.sync</string>
   <key>ProgramArguments</key>
   <array>
-    <string>/Volumes/SSD_2/XCode_Repos/myprojects/valve-mcp-api-project/.venv/bin/python</string>
+    <string>/Users/you/source/s2docs/.venv/bin/python</string>
     <string>-m</string>
     <string>s2docs.cli</string>
     <string>sync</string>
   </array>
   <key>WorkingDirectory</key>
-  <string>/Volumes/SSD_2/XCode_Repos/myprojects/valve-mcp-api-project</string>
+  <string>/Users/you/source/s2docs</string>
   <key>EnvironmentVariables</key>
   <dict>
     <key>S2DOCS_DATA_DIR</key>
-    <string>/Volumes/SSD_2/XCode_Repos/myprojects/valve-mcp-api-project/data</string>
+    <string>/Users/you/source/s2docs/data</string>
     <key>HOME</key>
-    <string>/Users/christianpompa</string>
+    <string>/Users/you</string>
     <key>PATH</key>
-    <string>/Volumes/SSD_2/XCode_Repos/myprojects/valve-mcp-api-project/.venv/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <string>/Users/you/source/s2docs/.venv/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
   </dict>
   <key>StartCalendarInterval</key>
   <array>
@@ -60,8 +60,8 @@
   <key>RunAtLoad</key>
   <false/>
   <key>StandardOutPath</key>
-  <string>/Users/christianpompa/.hermes/logs/s2docs-sync.log</string>
+  <string>/Users/you/.hermes/logs/s2docs-sync.log</string>
   <key>StandardErrorPath</key>
-  <string>/Users/christianpompa/.hermes/logs/s2docs-sync.log</string>
+  <string>/Users/you/.hermes/logs/s2docs-sync.log</string>
 </dict>
 </plist>

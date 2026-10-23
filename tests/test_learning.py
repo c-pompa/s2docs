@@ -15,7 +15,6 @@ the shared `db`/`repo` fixtures in `tests/conftest.py`.
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import pytest
@@ -127,11 +126,11 @@ def test_origin_is_visible_on_the_job_page_payload(tmp_path: Path):
     from s2docs.api.app import create_app
 
     db = Database(tmp_path / "data" / "s2docs.db")
-    hosts.register_host(db, "desktop-pc", "pompa@x", shell="powershell")
+    hosts.register_host(db, "build-pc", "pompa@x", shell="powershell")
     with TestClient(create_app(db.path)) as client:
         created = client.post("/api/jobs", json={
             "kind": "demo", "title": "t", "target": "x@a", "purpose": "p", "expected": "e",
-            "host_id": "desktop-pc", "origin": "human",
+            "host_id": "build-pc", "origin": "human",
         })
         assert created.status_code == 201, created.text
         body = created.json()
@@ -142,7 +141,7 @@ def test_origin_is_visible_on_the_job_page_payload(tmp_path: Path):
         # an unknown origin is a 422 naming the field, through the same intake gate the CLI and MCP use
         bad = client.post("/api/jobs", json={
             "kind": "demo", "title": "t", "target": "x@a", "purpose": "p", "expected": "e",
-            "host_id": "desktop-pc", "origin": "definitely-not-an-origin",
+            "host_id": "build-pc", "origin": "definitely-not-an-origin",
         })
         assert bad.status_code == 422, bad.text
 
@@ -159,10 +158,10 @@ def test_cli_job_enqueue_records_the_origin_and_rejects_an_unknown_one(tmp_path,
 
     get_settings.cache_clear()
     db = Database(tmp_path / "data" / "s2docs.db")
-    hosts.register_host(db, "desktop-pc", "pompa@x", shell="powershell")
+    hosts.register_host(db, "build-pc", "pompa@x", shell="powershell")
 
     argv = ["job", "enqueue", "--kind", "demo", "--title", "t", "--target", "x@a",
-            "--purpose", "p", "--expected", "e", "--host", "desktop-pc", "--origin", "driver"]
+            "--purpose", "p", "--expected", "e", "--host", "build-pc", "--origin", "driver"]
     monkeypatch.setattr(sys, "argv", ["s2docs", *argv])
     assert cli.main(argv) == cli.EXIT_OK, capsys.readouterr().err
 
@@ -170,7 +169,7 @@ def test_cli_job_enqueue_records_the_origin_and_rejects_an_unknown_one(tmp_path,
         assert conn.execute("SELECT origin FROM jobs").fetchone()[0] == "driver"
 
     bad = ["job", "enqueue", "--kind", "demo", "--title", "t", "--target", "x@a",
-           "--purpose", "p", "--expected", "e", "--host", "desktop-pc", "--origin", "nope"]
+           "--purpose", "p", "--expected", "e", "--host", "build-pc", "--origin", "nope"]
     monkeypatch.setattr(sys, "argv", ["s2docs", *bad])
     with pytest.raises(SystemExit):          # argparse rejects a value outside the closed set
         cli.main(bad)
@@ -185,14 +184,14 @@ def test_mcp_job_enqueue_carries_origin(tmp_path):
     from s2docs.mcp_server import create_mcp_server
 
     db = Database(tmp_path / "data" / "s2docs.db")
-    hosts.register_host(db, "desktop-pc", "pompa@x", shell="powershell")
+    hosts.register_host(db, "build-pc", "pompa@x", shell="powershell")
     server = create_mcp_server(db)
 
     async def call():
         async with Client(server) as c:
             res = await c.call_tool("job_enqueue", {
                 "kind": "demo", "title": "t", "target": "x@a", "purpose": "p", "expected": "e",
-                "host_id": "desktop-pc", "origin": "eval",
+                "host_id": "build-pc", "origin": "eval",
             })
             return res
 
@@ -246,7 +245,7 @@ def test_events_are_scoped_by_the_jobs_origin_and_report_their_sample(tmp_path: 
 def test_events_refuse_a_missing_source_instead_of_returning_nothing(tmp_path: Path):
     """Rule 6, the load-bearing one: an unreadable source raises. A loop that reports '0 signals'
     because it could not read its input reads as a quiet week, which is a lie of omission."""
-    from s2docs.learning import events, LearningSourceMissing
+    from s2docs.learning import LearningSourceMissing, events
 
     db = db_for(tmp_path)                     # no journal has been written yet
     with pytest.raises(LearningSourceMissing) as exc:

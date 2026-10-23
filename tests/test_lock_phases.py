@@ -34,7 +34,7 @@ def _fresh_settings():
 @pytest.fixture
 def hdb(tmp_path) -> Database:
     db = Database(tmp_path / "phases.db")
-    hosts.register_host(db, "desktop-pc", "pompa@100.64.130.72", hostname="DESKTOP-39NF657", shell="powershell")
+    hosts.register_host(db, "build-pc", "pompa@192.0.2.172", hostname="DESKTOP-BUILDPC", shell="powershell")
     return db
 
 
@@ -72,10 +72,10 @@ def test_migration_upgrades_a_v7_db_without_losing_rows(tmp_path):
         if version > 7:
             break
         conn.executescript(f"BEGIN;\n{sql}\nPRAGMA user_version = {version};\nCOMMIT;")
-    conn.execute("INSERT INTO hosts (id, ssh_target) VALUES ('desktop-pc', 'pompa@x')")
-    conn.execute("INSERT INTO host_locks (host_id, owner) VALUES ('desktop-pc', 'ws/a')")
+    conn.execute("INSERT INTO hosts (id, ssh_target) VALUES ('build-pc', 'pompa@x')")
+    conn.execute("INSERT INTO host_locks (host_id, owner) VALUES ('build-pc', 'ws/a')")
     conn.execute(
-        "INSERT INTO host_lock_events (host_id, owner, event, detail) VALUES ('desktop-pc', 'ws/a', 'claimed', 'old')"
+        "INSERT INTO host_lock_events (host_id, owner, event, detail) VALUES ('build-pc', 'ws/a', 'claimed', 'old')"
     )
     conn.commit()
 
@@ -89,9 +89,9 @@ def test_migration_upgrades_a_v7_db_without_losing_rows(tmp_path):
 
 def test_phase_event_shape_is_accepted(hdb):
     # A 'phase' row must pass the rebuilt CHECK constraint.
-    hosts.claim_host(hdb, "desktop-pc", "ws/a", phase="compile")
-    hosts.heartbeat_host(hdb, "desktop-pc", "ws/a", phase="link")
-    events = hosts.lock_history(hdb, "desktop-pc")
+    hosts.claim_host(hdb, "build-pc", "ws/a", phase="compile")
+    hosts.heartbeat_host(hdb, "build-pc", "ws/a", phase="link")
+    events = hosts.lock_history(hdb, "build-pc")
     phase_events = [e for e in events if e.event == "phase"]
     assert phase_events and phase_events[0].phase == "link"
     assert "compile" in (phase_events[0].detail or "")
@@ -99,83 +99,83 @@ def test_phase_event_shape_is_accepted(hdb):
 
 # ------------------------------------------------------------ phase transitions
 def test_claim_sets_phase_and_same_phase_heartbeat_keeps_since(hdb):
-    lock = hosts.claim_host(hdb, "desktop-pc", "ws/a", phase="compile")
+    lock = hosts.claim_host(hdb, "build-pc", "ws/a", phase="compile")
     assert lock.phase == "compile" and lock.phase_since is not None
     _age(hdb, phase_sec=5000)
     # same phase on a refresh: phase_since is kept (a faithful heartbeat must not hide a stuck phase)
-    kept = hosts.heartbeat_host(hdb, "desktop-pc", "ws/a", phase="compile")
+    kept = hosts.heartbeat_host(hdb, "build-pc", "ws/a", phase="compile")
     assert kept.phase == "compile" and kept.phase_age_sec > 4000
 
 
 def test_phase_change_resets_phase_since(hdb):
-    hosts.claim_host(hdb, "desktop-pc", "ws/a", phase="compile")
+    hosts.claim_host(hdb, "build-pc", "ws/a", phase="compile")
     _age(hdb, phase_sec=5000)
-    changed = hosts.heartbeat_host(hdb, "desktop-pc", "ws/a", phase="link")
+    changed = hosts.heartbeat_host(hdb, "build-pc", "ws/a", phase="link")
     assert changed.phase == "link" and changed.phase_age_sec < 60
     # a claim that changes the phase resets it too
     _age(hdb, phase_sec=5000)
-    reclaimed = hosts.claim_host(hdb, "desktop-pc", "ws/a", phase="finalize")
+    reclaimed = hosts.claim_host(hdb, "build-pc", "ws/a", phase="finalize")
     assert reclaimed.phase == "finalize" and reclaimed.phase_age_sec < 60
 
 
 def test_heartbeat_without_phase_keeps_reported_phase(hdb):
-    hosts.claim_host(hdb, "desktop-pc", "ws/a", phase="compile")
+    hosts.claim_host(hdb, "build-pc", "ws/a", phase="compile")
     _age(hdb, phase_sec=5000)
-    same = hosts.heartbeat_host(hdb, "desktop-pc", "ws/a")  # old client: no phase argument
+    same = hosts.heartbeat_host(hdb, "build-pc", "ws/a")  # old client: no phase argument
     assert same.phase == "compile" and same.phase_age_sec > 4000
 
 
 # ------------------------------------------------------------------- stuck matrix
 def test_stuck_when_fresh_but_phase_is_old(hdb):
-    hosts.claim_host(hdb, "desktop-pc", "ws/a", phase="compile")
+    hosts.claim_host(hdb, "build-pc", "ws/a", phase="compile")
     _age(hdb, phase_sec=2000)  # fresh heartbeat, stale phase (default threshold 1800)
-    lock = hosts.get_host(hdb, "desktop-pc").lock
+    lock = hosts.get_host(hdb, "build-pc").lock
     assert lock.fresh and lock.stuck
     assert "compile" in (lock.stuck_reason or "") and "1800" in (lock.stuck_reason or "")
 
 
 def test_not_stuck_when_phase_is_recent(hdb):
-    hosts.claim_host(hdb, "desktop-pc", "ws/a", phase="compile")
+    hosts.claim_host(hdb, "build-pc", "ws/a", phase="compile")
     _age(hdb, phase_sec=100)
-    lock = hosts.get_host(hdb, "desktop-pc").lock
+    lock = hosts.get_host(hdb, "build-pc").lock
     assert lock.fresh and not lock.stuck and lock.stuck_reason is None
 
 
 def test_not_stuck_when_heartbeat_is_stale(hdb):
-    hosts.claim_host(hdb, "desktop-pc", "ws/a", phase="compile", ttl_sec=1800)
+    hosts.claim_host(hdb, "build-pc", "ws/a", phase="compile", ttl_sec=1800)
     _age(hdb, heartbeat_sec=4000, phase_sec=4000)
-    lock = hosts.get_host(hdb, "desktop-pc").lock
+    lock = hosts.get_host(hdb, "build-pc").lock
     assert not lock.fresh and not lock.stuck  # a stale lock is already reported as stale
 
 
 def test_no_phase_is_never_stuck(hdb):
     # Fail-soft for old clients: a lock that never reports a phase can't be judged stuck.
-    hosts.claim_host(hdb, "desktop-pc", "ws/legacy")
-    lock = hosts.get_host(hdb, "desktop-pc").lock
+    hosts.claim_host(hdb, "build-pc", "ws/legacy")
+    lock = hosts.get_host(hdb, "build-pc").lock
     assert lock.phase == "" and lock.phase_since is None and not lock.stuck
     # even a contrived old phase_since on an empty-phase lock is not stuck
     _age(hdb, phase_sec=100000)
-    assert hosts.get_host(hdb, "desktop-pc").lock.stuck is False
+    assert hosts.get_host(hdb, "build-pc").lock.stuck is False
 
 
 def test_stuck_threshold_from_env(hdb, monkeypatch):
     monkeypatch.setenv("S2DOCS_STUCK_SEC", "100")
-    hosts.claim_host(hdb, "desktop-pc", "ws/a", phase="compile")
+    hosts.claim_host(hdb, "build-pc", "ws/a", phase="compile")
     _age(hdb, phase_sec=200)
-    assert hosts.get_host(hdb, "desktop-pc").lock.stuck
+    assert hosts.get_host(hdb, "build-pc").lock.stuck
 
 
 def test_stuck_phase_allowlist_override(hdb, monkeypatch):
     # 'compile' may legitimately run long: a per-phase override raises its threshold.
     monkeypatch.setenv("S2DOCS_STUCK_PHASES", '{"compile": 3000}')
-    hosts.claim_host(hdb, "desktop-pc", "ws/a", phase="compile")
+    hosts.claim_host(hdb, "build-pc", "ws/a", phase="compile")
     _age(hdb, phase_sec=2000)
-    compile_lock = hosts.get_host(hdb, "desktop-pc").lock
+    compile_lock = hosts.get_host(hdb, "build-pc").lock
     assert not compile_lock.stuck  # 2000 < 3000 override
-    hosts.release_host(hdb, "desktop-pc", "ws/a")
-    hosts.claim_host(hdb, "desktop-pc", "ws/b", phase="link")
+    hosts.release_host(hdb, "build-pc", "ws/a")
+    hosts.claim_host(hdb, "build-pc", "ws/b", phase="link")
     _age(hdb, phase_sec=2000)
-    link_lock = hosts.get_host(hdb, "desktop-pc").lock
+    link_lock = hosts.get_host(hdb, "build-pc").lock
     assert link_lock.stuck  # 'link' has no override, so the 1800 default applies
 
 
@@ -195,16 +195,16 @@ def client(hdb):
 
 
 def test_api_exposes_phase_and_stuck(hdb, client):
-    client.post("/api/hosts/desktop-pc/lock", json={"owner": "ws/a", "phase": "compile", "note": "dust2 rebuild"})
+    client.post("/api/hosts/build-pc/lock", json={"owner": "ws/a", "phase": "compile", "note": "dust2 rebuild"})
     _age(hdb, phase_sec=2000)
     host = client.get("/api/hosts").json()[0]
     lock = host["lock"]
     assert lock["phase"] == "compile" and lock["stuck"] and lock["phase_age_sec"] >= 2000
     assert lock["note"] == "dust2 rebuild"
     # heartbeat with a new phase clears stuck
-    hb = client.post("/api/hosts/desktop-pc/heartbeat", json={"owner": "ws/a", "phase": "link"}).json()
+    hb = client.post("/api/hosts/build-pc/heartbeat", json={"owner": "ws/a", "phase": "link"}).json()
     assert hb["phase"] == "link" and not hb["stuck"]
-    assert client.get("/api/hosts/desktop-pc").json()["lock"]["stuck"] is False
+    assert client.get("/api/hosts/build-pc").json()["lock"]["stuck"] is False
 
 
 # ------------------------------------------------------------------- surfaces: MCP
@@ -213,7 +213,7 @@ def test_mcp_list_hosts_exposes_stuck(hdb):
 
     async def claim():
         async with Client(server) as c:
-            await c.call_tool("claim_host", {"host_id": "desktop-pc", "owner": "ws/a", "phase": "compile"})
+            await c.call_tool("claim_host", {"host_id": "build-pc", "owner": "ws/a", "phase": "compile"})
 
     async def list_hosts_tool():
         async with Client(server) as c:
@@ -231,8 +231,8 @@ def test_mcp_heartbeat_takes_phase(hdb):
 
     async def run():
         async with Client(server) as c:
-            await c.call_tool("claim_host", {"host_id": "desktop-pc", "owner": "ws/a", "phase": "compile"})
-            return await c.call_tool("heartbeat_host", {"host_id": "desktop-pc", "owner": "ws/a", "phase": "link"})
+            await c.call_tool("claim_host", {"host_id": "build-pc", "owner": "ws/a", "phase": "compile"})
+            return await c.call_tool("heartbeat_host", {"host_id": "build-pc", "owner": "ws/a", "phase": "link"})
 
     hb = anyio.run(run)
     assert hb.structured_content["phase"] == "link" and not hb.structured_content["stuck"]
@@ -250,14 +250,14 @@ def _run_cli(monkeypatch, tmp_path, argv):
 
 def test_cli_host_list_prints_stuck_marker(tmp_path, monkeypatch, capsys):
     db = Database(tmp_path / "data" / "s2docs.db")
-    hosts.register_host(db, "desktop-pc", "pompa@x", shell="powershell")
-    hosts.claim_host(db, "desktop-pc", "ws/hung", phase="compile")
+    hosts.register_host(db, "build-pc", "pompa@x", shell="powershell")
+    hosts.claim_host(db, "build-pc", "ws/hung", phase="compile")
     _age(db, phase_sec=2000)
 
     rc = _run_cli(monkeypatch, tmp_path, ["host", "list"])
     assert rc == 0
     captured = capsys.readouterr()
-    assert "STUCK: desktop-pc" in captured.err and "compile" in captured.err
+    assert "STUCK: build-pc" in captured.err and "compile" in captured.err
     assert '"stuck": true' in captured.out  # the JSON still carries the field
 
 
@@ -285,20 +285,20 @@ class _HangingProc:
 
 def test_build_start_sets_phase_and_release_clears_it(hdb, tmp_path, monkeypatch):
     monkeypatch.setattr(builds.subprocess, "Popen", _HangingProc)
-    run = builds.start(hdb, "desktop-pc", "resourcecompiler addon", kind="compile")
-    lock = hosts.get_host(hdb, "desktop-pc").lock
+    run = builds.start(hdb, "build-pc", "resourcecompiler addon", kind="compile")
+    lock = hosts.get_host(hdb, "build-pc").lock
     assert lock is not None and lock.owner == f"build:{run.id}" and lock.phase == "compile"
     builds.cancel(hdb, run.id)
     builds.wait(hdb, run.id, timeout_sec=5, poll_sec=0.02)
-    assert hosts.get_host(hdb, "desktop-pc").lock is None  # release clears the phase
+    assert hosts.get_host(hdb, "build-pc").lock is None  # release clears the phase
 
 
 def test_test_start_sets_test_phase_and_finish_clears_it(hdb):
-    run = test_runs.start(hdb, "iso_test", host_id="desktop-pc")
-    lock = hosts.get_host(hdb, "desktop-pc").lock
+    run = test_runs.start(hdb, "iso_test", host_id="build-pc")
+    lock = hosts.get_host(hdb, "build-pc").lock
     assert lock is not None and lock.owner == f"test:{run.id}" and lock.phase == "test"
     test_runs.finish(hdb, run.id, "pass")
-    assert hosts.get_host(hdb, "desktop-pc").lock is None
+    assert hosts.get_host(hdb, "build-pc").lock is None
 
 
 # ------------------------------------------------------- explicit expiry behaviour
@@ -308,7 +308,7 @@ def test_build_renews_its_lease_while_running(hdb, tmp_path, monkeypatch):
     monkeypatch.setattr(builds.subprocess, "Popen", _HangingProc)
     run = builds.start(
         hdb,
-        "desktop-pc",
+        "build-pc",
         "compile",
         kind="compile",
         ttl_sec=60,
@@ -318,11 +318,11 @@ def test_build_renews_its_lease_while_running(hdb, tmp_path, monkeypatch):
     _age(hdb, heartbeat_sec=120)  # force the lease to look expired for its 60 s TTL
     deadline = time.monotonic() + 3
     while time.monotonic() < deadline:
-        lock = hosts.get_host(hdb, "desktop-pc").lock
+        lock = hosts.get_host(hdb, "build-pc").lock
         if lock is not None and lock.fresh:
             break
         time.sleep(0.02)
-    assert hosts.get_host(hdb, "desktop-pc").lock.fresh  # renewed by the server, not the client
+    assert hosts.get_host(hdb, "build-pc").lock.fresh  # renewed by the server, not the client
     builds.cancel(hdb, run.id)
     builds.wait(hdb, run.id, timeout_sec=5, poll_sec=0.02)
 
@@ -332,15 +332,15 @@ def test_build_cancelled_when_lease_is_taken(hdb, tmp_path, monkeypatch):
     monkeypatch.setattr(builds.subprocess, "Popen", _HangingProc)
     run = builds.start(
         hdb,
-        "desktop-pc",
+        "build-pc",
         "compile",
         kind="compile",
         ttl_sec=60,
         lease_renew_sec=0.02,
         poll_sec=0.01,
     )
-    hosts.claim_host(hdb, "desktop-pc", "ws/new-owner", force=True)
+    hosts.claim_host(hdb, "build-pc", "ws/new-owner", force=True)
     final = builds.wait(hdb, run.id, timeout_sec=5, poll_sec=0.02)
     assert final.status == "cancelled" and "lease lost" in (final.notes or "")
     # the new owner's lock is untouched
-    assert hosts.get_host(hdb, "desktop-pc").lock.owner == "ws/new-owner"
+    assert hosts.get_host(hdb, "build-pc").lock.owner == "ws/new-owner"

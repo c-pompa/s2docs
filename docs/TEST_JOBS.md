@@ -182,9 +182,9 @@ absolute `web_url` the caller can open (single + list). It is `<base>/#/<route>`
 
 The `<base>` resolves in this order (`s2docs/weburls.py`):
 1. **`S2DOCS_PUBLIC_URL`** setting, when set (trailing slash stripped);
-2. else the incoming REST request's `scheme://host:port` — a browser on `http://10.88.15.208:8812`
+2. else the incoming REST request's `scheme://host:port` — a browser on `http://127.0.0.1:8812`
    gets URLs back on that same origin;
-3. else the LAN fallback `http://10.88.15.208:8812` — used by the MCP tools and the CLI, which have
+3. else the LAN fallback `http://127.0.0.1:8812` — used by the MCP tools and the CLI, which have
    no request.
 
 `GET /api/health` (and MCP `server_info`) carry **`public_url`**. `s2docs job …` prints a

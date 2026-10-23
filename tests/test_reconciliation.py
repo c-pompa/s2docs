@@ -36,7 +36,7 @@ def _fresh_settings(monkeypatch, tmp_path):
 @pytest.fixture
 def rdb(tmp_path) -> Database:
     db = Database(tmp_path / "data" / "s2docs.db")
-    hosts.register_host(db, "desktop-pc", "pompa@100.64.130.72", shell="powershell")
+    hosts.register_host(db, "build-pc", "pompa@192.0.2.172", shell="powershell")
     hosts.register_host(db, "mini", "mini.local", shell="cmd")
     return db
 
@@ -77,12 +77,12 @@ def test_reconcile_interrupts_orphaned_build_runs_and_releases_their_lease(rdb, 
     """A run left 'running'/'queued' with no live watcher in this process is finalized 'interrupted'."""
     monkeypatch.setattr(builds.subprocess, "Popen", _DeadProc)
     # A live run in *this* process (its watcher thread is registered) must survive the pass.
-    live = builds.start(rdb, "desktop-pc", "compile", kind="compile")
+    live = builds.start(rdb, "build-pc", "compile", kind="compile")
     # Orphans written directly: one still owns its lease, one whose lease is gone.
     _insert_build(rdb, "b-orphan", "mini", "running")
     hosts.claim_host(rdb, "mini", "build:b-orphan", phase="compile")
-    _insert_build(rdb, "b-queued", "desktop-pc", "queued")
-    # b-queued never acquired a lease (its owner does not hold desktop-pc; the live run does)
+    _insert_build(rdb, "b-queued", "build-pc", "queued")
+    # b-queued never acquired a lease (its owner does not hold build-pc; the live run does)
 
     interrupted = builds.reconcile_orphans(rdb)
     assert set(interrupted) >= {"b-orphan", "b-queued"}
@@ -93,24 +93,24 @@ def test_reconcile_interrupts_orphaned_build_runs_and_releases_their_lease(rdb, 
     assert hosts.get_host(rdb, "mini").lock is None
     # ...but the live run is untouched and still holds its host
     assert builds.get_run(rdb, live.id).status == "running"
-    assert hosts.get_host(rdb, "desktop-pc").lock.owner == f"build:{live.id}"
+    assert hosts.get_host(rdb, "build-pc").lock.owner == f"build:{live.id}"
     builds.cancel(rdb, live.id)
     builds.wait(rdb, live.id, timeout_sec=5, poll_sec=0.02)
 
 
 def test_reconcile_does_not_release_a_lease_taken_over_by_someone_else(rdb):
-    _insert_build(rdb, "b-orphan2", "desktop-pc", "running")
-    hosts.claim_host(rdb, "desktop-pc", "build:b-orphan2")
-    hosts.claim_host(rdb, "desktop-pc", "ws/new-owner", force=True)
+    _insert_build(rdb, "b-orphan2", "build-pc", "running")
+    hosts.claim_host(rdb, "build-pc", "build:b-orphan2")
+    hosts.claim_host(rdb, "build-pc", "ws/new-owner", force=True)
     builds.reconcile_orphans(rdb)
     assert builds.get_run(rdb, "b-orphan2").status == "interrupted"
-    assert hosts.get_host(rdb, "desktop-pc").lock.owner == "ws/new-owner"
+    assert hosts.get_host(rdb, "build-pc").lock.owner == "ws/new-owner"
 
 
 # ------------------------------------------------------- 6b test-run reaper
 def test_reaper_moves_test_runs_with_a_lost_lease_to_idle(rdb):
-    taken = test_runs.start(rdb, "iso_taken", host_id="desktop-pc")
-    hosts.claim_host(rdb, "desktop-pc", "ws/new-owner", force=True)  # the lease is stolen
+    taken = test_runs.start(rdb, "iso_taken", host_id="build-pc")
+    hosts.claim_host(rdb, "build-pc", "ws/new-owner", force=True)  # the lease is stolen
     gone = test_runs.start(rdb, "iso_gone", host_id="mini")
     hosts.release_host(rdb, "mini", f"test:{gone.id}", force=True)  # lease released underneath it
     plain = test_runs.start(rdb, "iso_plain")  # host-less
@@ -137,20 +137,20 @@ def test_reaper_reaps_host_less_runs_that_went_stale(rdb):
 
 
 def test_reaper_keeps_a_healthy_running_run(rdb):
-    run = test_runs.start(rdb, "iso_ok", host_id="desktop-pc")
+    run = test_runs.start(rdb, "iso_ok", host_id="build-pc")
     assert test_runs.reap_stale(rdb, stale_sec=3600) == []
     assert test_runs.get(rdb, run.id).state == "running"
-    assert hosts.get_host(rdb, "desktop-pc").lock.owner == f"test:{run.id}"
+    assert hosts.get_host(rdb, "build-pc").lock.owner == f"test:{run.id}"
 
 
 # ------------------------------------------- 6c test-run lease renewal on step
 def test_test_step_renews_the_run_lease(rdb):
-    run = test_runs.start(rdb, "iso_long", host_id="desktop-pc")
+    run = test_runs.start(rdb, "iso_long", host_id="build-pc")
     with rdb.writer() as conn, conn:  # age the lease well past its TTL
         conn.execute("UPDATE host_locks SET heartbeat_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-4000 seconds')")
-    assert not hosts.get_host(rdb, "desktop-pc").lock.fresh
+    assert not hosts.get_host(rdb, "build-pc").lock.fresh
     test_runs.step(rdb, run.id, "long in-game probe")
-    lock = hosts.get_host(rdb, "desktop-pc").lock
+    lock = hosts.get_host(rdb, "build-pc").lock
     assert lock.fresh and lock.owner == f"test:{run.id}"  # renewed by the step call
 
 
@@ -274,7 +274,7 @@ def test_data_dir_warning_fires_only_for_serve_and_mcp(monkeypatch):
 def test_build_start_rejects_a_log_path_outside_the_data_dir(rdb):
     for evil in ("/tmp/evil.log", "../../etc/passwd.log"):
         with pytest.raises(builds.BuildError, match="data dir|outside|log path"):
-            builds.start(rdb, "desktop-pc", "compile", log_path=evil)
+            builds.start(rdb, "build-pc", "compile", log_path=evil)
     assert builds.list_runs(rdb) == []  # nothing was recorded
 
 
@@ -282,7 +282,7 @@ def test_build_start_accepts_a_log_path_inside_the_data_dir(rdb, monkeypatch):
     monkeypatch.setattr(builds.subprocess, "Popen", _DeadProc)
     inside = get_settings().data_dir / "logs" / "custom.log"
     inside.parent.mkdir(parents=True, exist_ok=True)
-    run = builds.start(rdb, "desktop-pc", "compile", log_path=inside)
+    run = builds.start(rdb, "build-pc", "compile", log_path=inside)
     assert Path(run.log_path) == inside.resolve()
     builds.cancel(rdb, run.id)
     builds.wait(rdb, run.id, timeout_sec=5, poll_sec=0.02)
@@ -291,7 +291,7 @@ def test_build_start_accepts_a_log_path_inside_the_data_dir(rdb, monkeypatch):
 # ------------------------------------------- 8 lock summary on list responses
 def test_build_and_test_list_carry_the_host_lock_summary(rdb, monkeypatch):
     monkeypatch.setattr(builds.subprocess, "Popen", _DeadProc)
-    build = builds.start(rdb, "desktop-pc", "compile", kind="compile")
+    build = builds.start(rdb, "build-pc", "compile", kind="compile")
     # make the build's phase old so the server marks it STUCK
     with rdb.writer() as conn, conn:
         conn.execute(

@@ -25,6 +25,7 @@ import re
 import sqlite3
 import subprocess
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 from s2docs import models as m
@@ -35,6 +36,23 @@ HOST_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
 DEFAULT_TTL_SEC = 1800
 PROBE_SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "windows" / "probe_host.ps1"
 
+# An ssh destination as the registry accepts it: an ssh_config alias, or [user@]host[:port].
+# The first character of the user and of the host must be a letter, digit or '_', so the target can
+# never start with '-': ssh and scp would otherwise read it as an option, and `-oProxyCommand=...` runs
+# a command on THIS machine (NousResearch/hermes-agent#143393, review item 1). The charset leaves no
+# room for whitespace, quotes or shell/ssh metacharacters. IPv6 literals are not accepted; give such a
+# host an ssh_config alias. fullmatch + ASCII so a trailing newline or a Unicode letter cannot slip in.
+_SSH_TARGET_RE = re.compile(
+    r"(?:(?P<user>[A-Za-z0-9_][A-Za-z0-9._-]{0,63})@)?"
+    r"(?P<host>[A-Za-z0-9_][A-Za-z0-9._-]{0,252})"
+    r"(?::(?P<port>[1-9][0-9]{0,4}))?",
+    re.ASCII,
+)
+_SSH_TARGET_HELP = (
+    "expected an ssh alias or [user@]host[:port] made of letters, digits, '.', '_' and '-' "
+    "(not starting with '-'), e.g. 'rtx-pc' or 'pompa@192.0.2.172:22'"
+)
+
 
 class HostError(ValueError):
     pass
@@ -44,9 +62,28 @@ class HostLocked(HostError):
     pass
 
 
+@dataclass(frozen=True)
+class SshTarget:
+    """A validated ssh destination: ``destination`` is ``[user@]host``; ``port`` is the optional port."""
+
+    destination: str
+    port: int | None = None
+
+
+def parse_ssh_target(target: object) -> SshTarget:
+    """Validate an ssh_target and split off its port. Raises HostError for anything option-like."""
+    if not isinstance(target, str):
+        raise HostError(f"invalid ssh_target {target!r}: {_SSH_TARGET_HELP}")
+    match = _SSH_TARGET_RE.fullmatch(target)
+    if match is None or (match["port"] is not None and int(match["port"]) > 65535):
+        raise HostError(f"invalid ssh_target {target!r}: {_SSH_TARGET_HELP}")
+    user, host, port = match["user"], match["host"], match["port"]
+    return SshTarget(destination=f"{user}@{host}" if user else host, port=int(port) if port else None)
+
+
 def _check_id(host_id: str) -> None:
     if not HOST_ID_RE.match(host_id):
-        raise HostError(f"invalid host id {host_id!r}: lowercase [a-z0-9-], e.g. 'desktop-pc'")
+        raise HostError(f"invalid host id {host_id!r}: lowercase [a-z0-9-], e.g. 'build-pc'")
 
 
 def _now() -> str:
@@ -129,18 +166,42 @@ def _load(conn: sqlite3.Connection, host_id: str) -> m.Host:
     return _row_to_host(row, lock)
 
 
-def ssh_argv(host: m.Host) -> list[str]:
-    """Base ssh argv for a host (connection timeout + identity file when set).
-
-    Start with this and append the remote command; the build and deploy services use it so a
-    single place owns the ssh flags. The remote command is passed as one argv element — ssh
-    joins the remaining arguments and hands them to the remote shell.
-    """
-    argv = ["ssh", "-o", "ConnectTimeout=15"]
+def _connection_options(host: m.Host, target: SshTarget, *, port_flag: str) -> list[str]:
+    """The flags ssh and scp share: connect timeout, identity file, port (scp spells it -P)."""
+    options = ["-o", "ConnectTimeout=15"]
     if host.ssh_key:
-        argv += ["-i", host.ssh_key, "-o", "IdentitiesOnly=yes"]
-    argv.append(host.ssh_target)
-    return argv
+        options += ["-i", host.ssh_key, "-o", "IdentitiesOnly=yes"]
+    if target.port is not None:
+        options += [port_flag, str(target.port)]
+    return options
+
+
+def ssh_argv(host: m.Host) -> list[str]:
+    """Base ssh argv for a host: connection flags, then ``--``, then the destination.
+
+    Start with this and append the remote command; the probe, build and deploy services all use it
+    so a single place owns the ssh flags. The stored target is re-validated here, so a row written
+    before registration validated it is refused at use time instead of reaching ssh. ``--`` ends
+    option parsing right before the destination: nothing after it — the destination or the remote
+    command — can be read as an option (OpenSSH otherwise re-parses the words after the host).
+    The remote command is passed as one argv element; ssh hands it to the remote shell.
+    """
+    target = parse_ssh_target(host.ssh_target)
+    return ["ssh", *_connection_options(host, target, port_flag="-p"), "--", target.destination]
+
+
+def scp_argv(host: m.Host, local: Path, remote: str) -> list[str]:
+    """scp argv copying ``local`` to ``remote`` on the host, hardened like :func:`ssh_argv`.
+
+    ``--`` precedes both operands; the ``host:path`` operand starts with the validated destination,
+    so it can never start with '-'; and the local path is made absolute, so it can neither look like
+    an option nor be mistaken for a ``host:path`` operand.
+    """
+    target = parse_ssh_target(host.ssh_target)
+    operand = f"{target.destination}:{remote}"
+    if operand.startswith("-"):  # unreachable for a validated destination; kept as the invariant
+        raise HostError(f"refusing an scp operand that starts with '-': {operand!r}")
+    return ["scp", *_connection_options(host, target, port_flag="-P"), "--", str(Path(local).resolve()), operand]
 
 
 def _record_lock_event(
@@ -237,6 +298,7 @@ def register_host(
     notes: str | None = None,
 ) -> m.Host:
     _check_id(host_id)
+    parse_ssh_target(ssh_target)  # refuse option-like / malformed targets before anything is stored
     if shell is not None and shell not in ("cmd", "powershell"):
         raise HostError("shell must be 'cmd' or 'powershell'")
     with db.writer() as conn, conn:
@@ -390,10 +452,7 @@ def probe_host(db: Database, host_id: str, *, timeout: int = 90) -> m.Host:
     if not PROBE_SCRIPT.exists():
         raise HostError(f"probe script missing at {PROBE_SCRIPT}")
     encoded = base64.b64encode(PROBE_SCRIPT.read_bytes().decode("utf-8").encode("utf-16-le")).decode()
-    cmd = ["ssh", "-o", "ConnectTimeout=15"]
-    if host.ssh_key:
-        cmd += ["-i", host.ssh_key, "-o", "IdentitiesOnly=yes"]
-    cmd += [host.ssh_target, f"powershell -NoProfile -ExecutionPolicy Bypass -EncodedCommand {encoded}"]
+    cmd = ssh_argv(host) + [f"powershell -NoProfile -ExecutionPolicy Bypass -EncodedCommand {encoded}"]
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
     except subprocess.TimeoutExpired as exc:

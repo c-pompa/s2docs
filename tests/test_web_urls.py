@@ -31,7 +31,7 @@ INTAKE = {
 @pytest.fixture
 def wdb(tmp_path) -> Database:
     db = Database(tmp_path / "data" / "s2docs.db")
-    hosts.register_host(db, "desktop-pc", "pompa@x", shell="powershell")
+    hosts.register_host(db, "build-pc", "pompa@x", shell="powershell")
     return db
 
 
@@ -42,7 +42,7 @@ def client(wdb):
 
 
 def _enq(client, **over):
-    return client.post("/api/jobs", json={**INTAKE, "host_id": "desktop-pc", **over})
+    return client.post("/api/jobs", json={**INTAKE, "host_id": "build-pc", **over})
 
 
 # ------------------------------------------------------------------- weburls
@@ -50,15 +50,15 @@ def test_public_base_url_precedence(monkeypatch):
     """The setting wins; else the request's scheme://host; else the LAN fallback."""
     get_settings.cache_clear()
     # no setting, no request -> LAN fallback
-    assert weburls.public_base_url(None) == "http://10.88.15.208:8812"
+    assert weburls.public_base_url(None) == "http://127.0.0.1:8812"
 
     class _Req:
-        headers = {"host": "10.88.15.208:8812"}
+        headers = {"host": "127.0.0.1:8812"}
 
         class url:  # noqa: N801 - mimic the starlette request.url.scheme access
             scheme = "http"
 
-    assert weburls.public_base_url(_Req()) == "http://10.88.15.208:8812"
+    assert weburls.public_base_url(_Req()) == "http://127.0.0.1:8812"
 
     monkeypatch.setenv("S2DOCS_PUBLIC_URL", "https://docs.example.com")
     get_settings.cache_clear()
@@ -90,13 +90,13 @@ def test_health_reports_request_derived_public_url(client):
 
 
 def test_public_url_setting_overrides_request(monkeypatch, wdb):
-    monkeypatch.setenv("S2DOCS_PUBLIC_URL", "http://10.88.15.208:8812/")
+    monkeypatch.setenv("S2DOCS_PUBLIC_URL", "http://127.0.0.1:8812/")
     get_settings.cache_clear()
     try:
         with TestClient(create_app(wdb.path)) as c:
-            assert c.get("/api/health").json()["public_url"] == "http://10.88.15.208:8812"
-            jid = c.post("/api/jobs", json={**INTAKE, "host_id": "desktop-pc"}).json()["id"]
-            assert c.get(f"/api/jobs/{jid}").json()["web_url"] == f"http://10.88.15.208:8812/#/jobs/{jid}"
+            assert c.get("/api/health").json()["public_url"] == "http://127.0.0.1:8812"
+            jid = c.post("/api/jobs", json={**INTAKE, "host_id": "build-pc"}).json()["id"]
+            assert c.get(f"/api/jobs/{jid}").json()["web_url"] == f"http://127.0.0.1:8812/#/jobs/{jid}"
     finally:
         monkeypatch.delenv("S2DOCS_PUBLIC_URL", raising=False)
         get_settings.cache_clear()
@@ -120,12 +120,12 @@ def test_build_and_deploy_web_url(wdb, client):
     with wdb.writer() as conn, conn:
         conn.execute(
             "INSERT INTO build_runs (id, host_id, kind, command, status, owner, created_at, updated_at) "
-            "VALUES ('b-1', 'desktop-pc', 'compile', 'x', 'running', 'build:b-1', "
+            "VALUES ('b-1', 'build-pc', 'compile', 'x', 'running', 'build:b-1', "
             "'2026-10-15T10:00:00Z', '2026-10-15T10:00:00Z')"
         )
         conn.execute(
             "INSERT INTO deployments (id, host_id, dest_root, entries, status, created_at, updated_at) "
-            "VALUES ('d-1', 'desktop-pc', 'C:/dst', '[]', 'verified', '2026-10-15T10:00:00Z', '2026-10-15T10:00:30Z')"
+            "VALUES ('d-1', 'build-pc', 'C:/dst', '[]', 'verified', '2026-10-15T10:00:00Z', '2026-10-15T10:00:30Z')"
         )
     assert client.get("/api/builds/b-1").json()["web_url"] == "http://testserver/#/activity"
     assert client.get("/api/builds").json()[0]["web_url"] == "http://testserver/#/activity"
@@ -225,7 +225,7 @@ def test_screenshots_service_derives_seq_and_skips_urlless(client):
 # ----------------------------------------------------------------------- MCP
 def test_mcp_job_get_carries_web_url_and_screenshots(wdb):
     jid = jobs.enqueue(
-        wdb, kind="test", title="mcp url", target="ws/x@1", purpose="p", expected="e", host_id="desktop-pc"
+        wdb, kind="test", title="mcp url", target="ws/x@1", purpose="p", expected="e", host_id="build-pc"
     ).id
     run = test_runs.start(wdb, "iso_mcp")
     jobs.link(wdb, jid, kind="test_run", ref_id=run.id)
@@ -246,7 +246,7 @@ def test_mcp_job_get_carries_web_url_and_screenshots(wdb):
 
     got, shots = anyio.run(main)
     # MCP has no request: the URL is the setting/LAN fallback, still absolute and usable
-    assert got.structured_content["web_url"] == f"http://10.88.15.208:8812/#/jobs/{jid}"
+    assert got.structured_content["web_url"] == f"http://127.0.0.1:8812/#/jobs/{jid}"
     rows = shots.structured_content["result"]
     assert len(rows) == 1 and rows[0]["step"] == "s2" and rows[0]["reason"] == "request"
-    assert rows[0]["web_url"] == f"http://10.88.15.208:8812/#/jobs/{jid}"
+    assert rows[0]["web_url"] == f"http://127.0.0.1:8812/#/jobs/{jid}"

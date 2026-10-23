@@ -21,7 +21,8 @@ from collections import defaultdict
 from pathlib import Path
 
 from s2docs.db.connection import Database
-from s2docs.learning import ORIGINS, SYNTHETIC_ORIGINS, _cutoff, events as _events, jobs_index, learning_dir
+from s2docs.learning import SYNTHETIC_ORIGINS, _cutoff, jobs_index, learning_dir
+from s2docs.learning import events as _events
 
 __all__ = [
     "HARD_NEG_MIN_COUNT",

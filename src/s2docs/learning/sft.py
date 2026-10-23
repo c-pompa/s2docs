@@ -71,7 +71,7 @@ def config() -> dict:
         "lora_rank": 16,
         "learning_rate": 1e-4,
         "epochs": 3,
-        "where": "homelab-pc (RTX 3080, WSL2)",
+        "where": "home-pc (RTX 3080, WSL2)",
         "command": RUN_COMMAND,
         "dataset": str(corpus),
         "eval": "uv run s2docs learning gate   # must not regress vs eval_history.jsonl",

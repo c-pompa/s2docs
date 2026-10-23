@@ -88,13 +88,13 @@ uv run s2docs mcp                     # MCP over stdio
 
 **Hermes Agent** (native tools as `mcp_s2docs_*`; stdio, no server process needed)
 ```bash
-hermes config set mcp_servers.s2docs.command /Volumes/SSD_2/XCode_Repos/myprojects/valve-mcp-api-project/.venv/bin/s2docs
+hermes config set mcp_servers.s2docs.command /Users/you/source/s2docs/.venv/bin/s2docs
 hermes config set mcp_servers.s2docs.args '["mcp"]'
 ```
 
 **Claude Code**
 ```bash
-claude mcp add s2docs -- uv --directory /Volumes/SSD_2/XCode_Repos/myprojects/valve-mcp-api-project run s2docs mcp
+claude mcp add s2docs -- uv --directory /Users/you/source/s2docs run s2docs mcp
 # or, with `s2docs serve` running:
 claude mcp add --transport http s2docs http://127.0.0.1:8000/mcp
 ```
@@ -105,7 +105,7 @@ claude mcp add --transport http s2docs http://127.0.0.1:8000/mcp
   "mcpServers": {
     "s2docs": {
       "command": "uv",
-      "args": ["--directory", "/Volumes/SSD_2/XCode_Repos/myprojects/valve-mcp-api-project", "run", "s2docs", "mcp"]
+      "args": ["--directory", "/Users/you/source/s2docs", "run", "s2docs", "mcp"]
     }
   }
 }

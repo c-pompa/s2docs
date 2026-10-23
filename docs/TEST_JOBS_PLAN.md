@@ -101,8 +101,8 @@ job_finish, job_cancel`. Add them to `tests/test_mcp.py`'s explicit writer set.
 `tools/host/job.py` thin client: `event`, `crash-collect <host>` (cs2 console.log tail, director.log tail,
 Windows Application log last 20 entries for cs2/resourcecompiler, crash dumps list) → `crash` event +
 artifacts; `shot <host> --job` = `peek.run_peek(..., shot=True)` then `PUT` the composed jpg;
-`serve-requests --job` (poll pending_shot → shot). Real smoke on desktop-pc once, after the full demo
-on pomps-pc ends.
+`serve-requests --job` (poll pending_shot → shot). Real smoke on build-pc once, after the full demo
+on rtx-pc ends.
 
 ## Tests (pytest, synthetic DB)
 intake 422s per missing field; queue order + `next` 409 when lease held; event phase update; artifact

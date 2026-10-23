@@ -21,7 +21,7 @@ from s2docs.db.connection import Database
 @pytest.fixture
 def cdb(tmp_path) -> Database:
     db = Database(tmp_path / "confirms.db")
-    hosts.register_host(db, "desktop-pc", "pompa@100.64.130.72", shell="powershell")
+    hosts.register_host(db, "build-pc", "pompa@192.0.2.172", shell="powershell")
     return db
 
 
