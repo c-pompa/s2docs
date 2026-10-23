@@ -226,6 +226,12 @@ button:disabled { opacity: .4; cursor: default; }
 .diff-build strong { font-size: 16px; }
 .diff-arrow { color: var(--muted); font-size: 18px; }
 .diff-counts { margin: 4px 0 10px; }
+/* Why THIS pair: the widened-window note and the "no indexed changes" explanation. A quiet panel with an
+   accent spine, between the build header and the tables, so an empty patch never looks like a broken page. */
+.diff-note { margin: 2px 0 10px; padding: 8px 10px; border: 1px solid var(--border); border-radius: var(--r);
+             border-left: 3px solid var(--accent); background: var(--panel); color: var(--muted); }
+.diff-note strong { color: var(--fg); }
+.diff-note a { color: var(--link); }
 /* The copy button + its fallback textarea. */
 .diff-actions { display: flex; align-items: center; gap: 10px; margin: 6px 0 2px; flex-wrap: wrap; }
 .diff-md { width: 100%; min-height: 150px; margin-top: 8px; }
