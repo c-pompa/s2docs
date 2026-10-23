@@ -650,6 +650,22 @@ def test_frontend_diff_autopick_markers(client):
     assert ".diff-note" in css
 
 
+def test_asset_cache_buster_matches_app_version(client):
+    """index.html's ?v= must equal config.VERSION, for BOTH assets.
+
+    The shell pins the bundle URL, and a browser that already holds app.js may never revalidate it (a
+    plain StaticFiles response invites heuristic freshness), so a UI change is invisible until the URL
+    changes. Bumping the version without the two literals — or the reverse — is exactly how a shipped
+    page keeps serving the old JS; this test makes the pair impossible to drift.
+    """
+    from s2docs.config import VERSION
+
+    html = client.get("/index.html").text
+    vers = re.findall(r"\?v=([^\"'&\s>]+)", html)
+    assert len(vers) == 2, f"expected app.js + style.css cache-busters, got {vers}"
+    assert set(vers) == {VERSION}, f"index.html pins {vers} but config.VERSION is {VERSION} - bump both"
+
+
 @pytest.mark.skipif(NODE is None, reason="node not installed")
 def test_diff_autopick_executes_in_node(client):
     """Lift the shipped helpers and execute the pair planner + emptiness test + both notes: nearest window

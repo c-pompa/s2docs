@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
 
-VERSION = "0.1.0"
+VERSION = "0.1.1"
 # Process start time, captured once at import — surfaces in the DB-identity payload (see server_identity).
 STARTED_AT = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
