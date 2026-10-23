@@ -2,7 +2,7 @@
 
 Why this exists, measured: ``db.fts.build_match_query`` extracts up to 12 word tokens and ANDs them,
 so a real user question retrieves nothing. The literal, recorded inputs below are the evidence:
-``http://10.88.15.208:8812/api/search?q=how+do+i+make+a+breakable+prop&limit=1`` -> ``total=0``, while
+``http://127.0.0.1:8812/api/search?q=how+do+i+make+a+breakable+prop&limit=1`` -> ``total=0``, while
 ``q=breakable+prop`` -> 60 and ``q=prop_physics`` -> 64. Every token must match, so prose loses and
 keywords win.
 

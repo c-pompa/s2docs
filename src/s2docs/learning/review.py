@@ -28,7 +28,6 @@ from __future__ import annotations
 import json
 import secrets
 import time
-from pathlib import Path
 
 from s2docs.db.connection import Database
 from s2docs.learning import harvest, learning_dir

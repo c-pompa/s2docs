@@ -6,8 +6,8 @@
 -- heartbeat is older than its TTL is stale and can be taken over (crashed/interrupted workers).
 
 CREATE TABLE hosts (
-    id         TEXT PRIMARY KEY,              -- short name, e.g. 'desktop-pc'
-    hostname   TEXT,                          -- e.g. 'DESKTOP-39NF657'
+    id         TEXT PRIMARY KEY,              -- short name, e.g. 'build-pc'
+    hostname   TEXT,                          -- e.g. 'DESKTOP-BUILDPC'
     ssh_target TEXT NOT NULL,                 -- ssh alias or user@ip
     ssh_key    TEXT,                          -- identity file path, NULL = ssh default
     shell      TEXT CHECK (shell IN ('cmd', 'powershell')),

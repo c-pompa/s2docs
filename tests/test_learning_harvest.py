@@ -8,9 +8,6 @@ verdict — nothing here infers intent from a count or a length (rule 1).
 from __future__ import annotations
 
 import json
-from pathlib import Path
-
-import pytest
 
 from s2docs import evidence, jobs, test_runs
 from s2docs.learning import harvest, learning_dir

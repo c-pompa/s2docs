@@ -24,6 +24,7 @@ def test_tools_are_listed_read_only(server):
     assert {"search_docs", "get_convar", "get_entity", "get_schema_class", "get_script_api", "diff_builds"} <= names
     writers = {
         "scaffold_addon",
+        "build_model",
         "write_addon_file",
         "start_project",
         "update_step",

@@ -76,10 +76,7 @@ def _hash_remote(host: m.Host, paths: list[str], *, timeout: int = SSH_TIMEOUT_S
 
 
 def _copy_file(host: m.Host, local: Path, remote: str, *, timeout: int = SSH_TIMEOUT_SEC) -> None:
-    argv = ["scp", "-o", "ConnectTimeout=15"]
-    if host.ssh_key:
-        argv += ["-i", host.ssh_key, "-o", "IdentitiesOnly=yes"]
-    argv += [str(local), f"{host.ssh_target}:{remote}"]
+    argv = hosts.scp_argv(host, local, remote)
     try:
         proc = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
     except subprocess.TimeoutExpired as exc:
@@ -204,6 +201,9 @@ def push(
     if not dest_root.strip():
         raise DeployError("dest_root is required")
     host = hosts.get_host(db, host_id)  # raises HostError if unknown
+    # A target stored before registration validated it must fail here, before the lease is taken
+    # or a record written — not halfway through the copy loop.
+    hosts.parse_ssh_target(host.ssh_target)
     resolved = _normalize(files, dest_root)
 
     did = "d-" + secrets.token_hex(4)

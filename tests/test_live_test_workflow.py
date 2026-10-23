@@ -27,7 +27,7 @@ from s2docs.orchestration.workflows import WORKFLOWS
 @pytest.fixture
 def ldb(tmp_path) -> Database:
     db = Database(tmp_path / "live.db")
-    hosts.register_host(db, "desktop-pc", "pompa@100.64.130.72", shell="powershell")
+    hosts.register_host(db, "build-pc", "pompa@192.0.2.172", shell="powershell")
     return db
 
 
@@ -36,14 +36,14 @@ def orch(ldb, tmp_path) -> Orchestrator:
     return Orchestrator(ldb, tmp_path / "ws")
 
 
-INPUTS = {"host_id": "desktop-pc", "deploy_manifest": "addon/*.vpk", "test_description": "the trigger fires"}
+INPUTS = {"host_id": "build-pc", "deploy_manifest": "addon/*.vpk", "test_description": "the trigger fires"}
 
 
 def _start(orch) -> str:
-    return orch.start("cs2_live_test", "smoke the addon on desktop-pc", inputs=INPUTS).project_id
+    return orch.start("cs2_live_test", "smoke the addon on build-pc", inputs=INPUTS).project_id
 
 
-def _insert_deploy(db: Database, did: str, status: str, host_id: str = "desktop-pc") -> str:
+def _insert_deploy(db: Database, did: str, status: str, host_id: str = "build-pc") -> str:
     with db.writer() as conn, conn:
         conn.execute(
             "INSERT INTO deployments (id, host_id, dest_root, entries, status) VALUES (?, ?, 'C:/dst', '[]', ?)",
@@ -58,14 +58,14 @@ def test_workflow_registered_and_inputs_rendered(orch):
     assert [s.step_id for s in brief.next_steps] == ["claim"]
     # workflow-specific inputs and the generated project id render into the instructions
     text = brief.next_steps[0].instructions
-    assert "desktop-pc" in text and f"project:{brief.project_id}" in text
+    assert "build-pc" in text and f"project:{brief.project_id}" in text
 
 
 def test_missing_required_inputs(orch):
     from s2docs.orchestration.engine import OrchestrationError
 
     with pytest.raises(OrchestrationError, match="missing inputs"):
-        orch.start("cs2_live_test", "smoke it", inputs={"host_id": "desktop-pc"})
+        orch.start("cs2_live_test", "smoke it", inputs={"host_id": "build-pc"})
 
 
 def test_claim_gate(orch, ldb):
@@ -74,19 +74,19 @@ def test_claim_gate(orch, ldb):
     with pytest.raises(GateFailed, match="not locked"):
         orch.update(pid, "claim", "done", notes="did it")
     # someone else holds it
-    hosts.claim_host(ldb, "desktop-pc", "ws/other")
+    hosts.claim_host(ldb, "build-pc", "ws/other")
     with pytest.raises(GateFailed, match="locked by"):
         orch.update(pid, "claim", "done", notes="did it")
     # the project claims it → gate passes
-    hosts.release_host(ldb, "desktop-pc", "ws/other", force=True)
-    hosts.claim_host(ldb, "desktop-pc", f"project:{pid}")
+    hosts.release_host(ldb, "build-pc", "ws/other", force=True)
+    hosts.claim_host(ldb, "build-pc", f"project:{pid}")
     brief = orch.update(pid, "claim", "done", notes="claimed")
     assert [s.step_id for s in brief.next_steps] == ["probe"]
 
 
 def test_deploy_gate(orch, ldb):
     pid = _start(orch)
-    hosts.claim_host(ldb, "desktop-pc", f"project:{pid}")
+    hosts.claim_host(ldb, "build-pc", f"project:{pid}")
     orch.update(pid, "claim", "done", notes="ok")
     orch.update(pid, "probe", "done", notes="probed")
     # no deploy id artifact -> the gate needs one (no latest-for-host fallback any more)
@@ -109,7 +109,7 @@ def test_deploy_gate(orch, ldb):
 
 def test_test_gate_and_full_flow(orch, ldb):
     pid = _start(orch)
-    hosts.claim_host(ldb, "desktop-pc", f"project:{pid}")
+    hosts.claim_host(ldb, "build-pc", f"project:{pid}")
     orch.update(pid, "claim", "done", notes="ok")
     orch.update(pid, "probe", "done", notes="probed")
     _insert_deploy(ldb, "d-00000003", "verified")
@@ -121,10 +121,10 @@ def test_test_gate_and_full_flow(orch, ldb):
     brief = orch.update(pid, "test", "done", notes="ran", artifacts=["transcript.log"])
     assert [s.step_id for s in brief.next_steps] == ["release"]
     # release the host and finish
-    hosts.release_host(ldb, "desktop-pc", f"project:{pid}")
+    hosts.release_host(ldb, "build-pc", f"project:{pid}")
     brief = orch.update(pid, "release", "done", notes="released")
     assert brief.status == "done" and brief.progress == "5/5"
-    assert hosts.get_host(ldb, "desktop-pc").lock is None
+    assert hosts.get_host(ldb, "build-pc").lock is None
 
 
 def test_live_test_workflow_over_http(ldb, tmp_path):
@@ -137,7 +137,7 @@ def test_live_test_workflow_over_http(ldb, tmp_path):
         # the claim gate is enforced server-side (409 with the gate flag), not trusted from the client
         r = c.post(f"/api/projects/{pid}/steps/claim", json={"status": "done", "notes": "did it"})
         assert r.status_code == 409 and r.json()["gate_failed"]
-        hosts.claim_host(ldb, "desktop-pc", f"project:{pid}")
+        hosts.claim_host(ldb, "build-pc", f"project:{pid}")
         r = c.post(f"/api/projects/{pid}/steps/claim", json={"status": "done", "notes": "claimed"})
         assert r.status_code == 200 and r.json()["next_steps"][0]["step_id"] == "probe"
 
@@ -187,12 +187,12 @@ def test_deploy_step_instruction_names_the_project_owner(orch):
 def test_deploy_push_without_owner_conflicts_with_the_project_lease(orch, ldb, tmp_path, monkeypatch):
     """Regression for the blocker: no `owner` while the project holds the lease is HostLocked (409)."""
     pid = _start(orch)
-    hosts.claim_host(ldb, "desktop-pc", f"project:{pid}")
+    hosts.claim_host(ldb, "build-pc", f"project:{pid}")
     local = tmp_path / "iso.js"
     local.write_bytes(b"console.log(1)\n")
     monkeypatch.setattr(deploys.subprocess, "run", _fake_ssh({}))
     with pytest.raises(hosts.HostLocked):
-        deploys.push(ldb, "desktop-pc", "C:/dst", [{"path": "iso.js", "local": str(local)}])
+        deploys.push(ldb, "build-pc", "C:/dst", [{"path": "iso.js", "local": str(local)}])
 
 
 def test_deploy_step_happy_path_passes_the_gate_end_to_end(orch, ldb, tmp_path, monkeypatch):
@@ -203,7 +203,7 @@ def test_deploy_step_happy_path_passes_the_gate_end_to_end(orch, ldb, tmp_path, 
     """
     pid = _start(orch)
     owner = f"project:{pid}"
-    hosts.claim_host(ldb, "desktop-pc", owner)
+    hosts.claim_host(ldb, "build-pc", owner)
     orch.update(pid, "claim", "done", notes="claimed")
     orch.update(pid, "probe", "done", notes="probed")
     # the owner the instruction tells the agent to pass is in the rendered brief
@@ -221,7 +221,7 @@ def test_deploy_step_happy_path_passes_the_gate_end_to_end(orch, ldb, tmp_path, 
             return await c.call_tool(
                 "deploy_push",
                 {
-                    "host_id": "desktop-pc",
+                    "host_id": "build-pc",
                     "dest_root": "C:/dst",
                     "files": [{"path": "iso.js", "local": str(local)}],
                     "owner": owner,
@@ -235,6 +235,6 @@ def test_deploy_step_happy_path_passes_the_gate_end_to_end(orch, ldb, tmp_path, 
     brief = orch.update(pid, "deploy", "done", notes="verified", artifacts=[pushed["id"]])
     assert [s.step_id for s in brief.next_steps] == ["test"]
     # the push reused the project's lease and left it locked for the test step
-    lock = hosts.get_host(ldb, "desktop-pc").lock
+    lock = hosts.get_host(ldb, "build-pc").lock
     assert lock is not None and lock.owner == owner
 

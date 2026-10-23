@@ -1,0 +1,332 @@
+# The CI rule registry: the one place that says which pipeline owns a check, where the rule came
+# from and which script enforces it. scripts/ci/run.sh runs exactly the rules listed here for the
+# pipeline it is asked for; scripts/ci/registry.py validates this file before every run, and
+# tests/test_ci_registry.py proves the invariants (above all: no rule, script or concern is claimed by
+# both pipelines). How a review comment becomes a row here: docs/FEEDBACK_CI.md.
+#
+# Per rule:
+#   id            <PREFIX>-<NAME>; the prefix is the pipeline's id_prefix
+#   pipeline      the one pipeline that owns the rule
+#   title         one line, shown in the CI report
+#   concern       what the rule is about, as a slug; unique across BOTH pipelines, so a second rule
+#                 (in either pipeline) about the same thing is refused instead of duplicating it
+#   source        reviewer rules: the URL of the review/comment; house rules: exactly "house rule"
+#   feedback_id   reviewer rules: hermes-agent#<pr>/review-<id>/<item>
+#   reviewer      reviewer rules: who asked
+#   quote         reviewer rules: the reviewer's words the rule enforces (verbatim)
+#   reviewed_at   reviewer rules: the commit the reviewer read
+#   pinned_server reviewer rules: true when the rule is about the server code or its declared
+#                 dependencies, so the commit plugin/mcp.json pins must pass it too (HPF-008)
+#   enforces      what exactly the check asserts
+#   script        scripts/ci/checks/<pipeline>/<id>-<slug>.sh (its header repeats rule/pipeline/source)
+#   fixtures      ci/fixtures/<id>/: reject-* cases the check must fail (exit 1), accept-* cases it
+#                 must pass (exit 0)
+#   clean         tree (default): the unmodified checkout is also an accept case; fixture: only the
+#                 accept-* fixtures are (for rules whose clean state cannot be the bare checkout)
+version: 1
+
+pipelines:
+  hermes-pr-feedback-ci:
+    origin: reviewer
+    id_prefix: HPF-
+    description: >-
+      Every rule an upstream hermes-agent reviewer asked for, one check per request, each traced to
+      the review it came from.
+  cpompa-hermes-ci:
+    origin: house
+    id_prefix: CHC-
+    description: >-
+      Our own standards: lint, tests, security and secret scans, lockfile integrity, commit hygiene,
+      packaging. Nothing a reviewer asked for lives here.
+
+rules:
+  # ---------------------------------------------------------------- hermes-pr-feedback-ci
+  # NousResearch/hermes-agent#143393, review 5631127162 by teknium1 (CHANGES_REQUESTED, 2026-10-23),
+  # read at 531a24c7. Item 1 = the ssh_target injection, item 2 = the dependency policy, item 3 = the
+  # closing request to re-pin the uvx ref.
+  - id: HPF-001
+    pipeline: hermes-pr-feedback-ci
+    title: ssh_target is an ssh alias or [user@]host[:port], never an option
+    concern: ssh-target-validation
+    source: https://github.com/NousResearch/hermes-agent/pull/143393#pullrequestreview-5631127162
+    feedback_id: hermes-agent#143393/review-5631127162/1a
+    reviewer: teknium1
+    reviewed_at: 531a24c7b698b97434048d9f37928f9419a272af
+    pinned_server: true
+    quote: >-
+      Validate `ssh_target` so it can't become an ssh option. [...] Please reject targets starting
+      with `-` and allow only an ssh alias or `[user@]host[:port]` characters
+    enforces: >-
+      register_host - the function, the PUT /api/hosts/{id} route and the register_host MCP tool -
+      refuses every target that starts with '-' or leaves the [user@]host[:port] charset (39 probes,
+      the reviewer's -oProxyCommand= first), stores nothing for a refused target, and still accepts
+      aliases, user@host and host:port.
+    script: scripts/ci/checks/hermes-pr-feedback-ci/HPF-001-ssh-target-charset.sh
+    fixtures: ci/fixtures/HPF-001
+
+  - id: HPF-002
+    pipeline: hermes-pr-feedback-ci
+    title: every ssh call ends option parsing with -- right before the destination
+    concern: ssh-end-of-options
+    source: https://github.com/NousResearch/hermes-agent/pull/143393#pullrequestreview-5631127162
+    feedback_id: hermes-agent#143393/review-5631127162/1b
+    reviewer: teknium1
+    reviewed_at: 531a24c7b698b97434048d9f37928f9419a272af
+    pinned_server: true
+    quote: >-
+      hosts.py:142, hosts.py:396 and deploys.py:82 put it as a bare argument before the remote
+      command. [...] put `--` before the destination in the two ssh calls
+    enforces: >-
+      Every ssh process the server starts (probe_host, build_start, deploy_push's verify) has '--'
+      immediately before the registered destination and a port only as '-p N' before the '--'
+      (behavioural, subprocess faked); and no ssh argv is built anywhere but hosts.ssh_argv (AST scan
+      of src/), so the '--' has a single owner.
+    script: scripts/ci/checks/hermes-pr-feedback-ci/HPF-002-ssh-end-of-options.sh
+    fixtures: ci/fixtures/HPF-002
+
+  - id: HPF-003
+    pipeline: hermes-pr-feedback-ci
+    title: scp's host:path operand can never start with -
+    concern: scp-operand-not-option
+    source: https://github.com/NousResearch/hermes-agent/pull/143393#pullrequestreview-5631127162
+    feedback_id: hermes-agent#143393/review-5631127162/1c
+    reviewer: teknium1
+    reviewed_at: 531a24c7b698b97434048d9f37928f9419a272af
+    pinned_server: true
+    quote: >-
+      A target like `-oProxyCommand=...` is read by ssh/scp as an option [...] keep scp's
+      `host:path` argument from starting with `-`
+    enforces: >-
+      deploy_push's scp host:path operand is the validated destination plus the remote path for every
+      valid target, and never starts with '-' - also for host rows written straight into the database
+      without validation; no scp argv is built anywhere but hosts.scp_argv.
+    script: scripts/ci/checks/hermes-pr-feedback-ci/HPF-003-scp-operand-not-option.sh
+    fixtures: ci/fixtures/HPF-003
+
+  - id: HPF-004
+    pipeline: hermes-pr-feedback-ci
+    title: the -oProxyCommand= regression test exists and passes
+    concern: proxycommand-regression-test
+    source: https://github.com/NousResearch/hermes-agent/pull/143393#pullrequestreview-5631127162
+    feedback_id: hermes-agent#143393/review-5631127162/1d
+    reviewer: teknium1
+    reviewed_at: 531a24c7b698b97434048d9f37928f9419a272af
+    pinned_server: true
+    quote: >-
+      and add a test that `register_host` with `-oProxyCommand=...` raises.
+    enforces: >-
+      The suite collects tests/::test_register_host_rejects_unsafe_ssh_target as a parametrised test
+      with a case that starts with '-oProxyCommand=', and every one of its cases passes - none fails,
+      errors or is skipped.
+    script: scripts/ci/checks/hermes-pr-feedback-ci/HPF-004-proxycommand-regression-test.sh
+    fixtures: ci/fixtures/HPF-004
+
+  - id: HPF-005
+    pipeline: hermes-pr-feedback-ci
+    title: every runtime dependency has an upper bound before its next breaking line
+    concern: runtime-dependency-upper-bounds
+    source: https://github.com/NousResearch/hermes-agent/pull/143393#pullrequestreview-5631127162
+    feedback_id: hermes-agent#143393/review-5631127162/2a
+    reviewer: teknium1
+    reviewed_at: 531a24c7b698b97434048d9f37928f9419a272af
+    pinned_server: true
+    quote: >-
+      Bound the runtime dependencies. The server is started with `uvx --from git+...`, which
+      resolves dependencies fresh on first start without a lock. pyproject.toml:9-14 gives
+      `fastapi`, `pydantic` and `uvicorn[standard]` floors only; please add an upper bound below the
+      next major for each
+    enforces: >-
+      Every [project].dependencies entry is an explicit >=floor,<bound range (!= exclusions allowed)
+      that contains the version uv.lock tests, with the bound no later than the next breaking line
+      after it: <next major for >=1.0 packages, <0.(minor+1) for 0.x ones - a <1 bound on a 0.x
+      package is refused like a bare floor (catalog rule 10's developer-guide shapes).
+    script: scripts/ci/checks/hermes-pr-feedback-ci/HPF-005-runtime-deps-upper-bound.sh
+    fixtures: ci/fixtures/HPF-005
+
+  - id: HPF-006
+    pipeline: hermes-pr-feedback-ci
+    title: runtime floors are the oldest compatible releases, proven at the snapshot
+    concern: runtime-dependency-oldest-floors
+    source: https://github.com/NousResearch/hermes-agent/pull/143393#pullrequestreview-5631127162
+    feedback_id: hermes-agent#143393/review-5631127162/2b
+    reviewer: teknium1
+    reviewed_at: 531a24c7b698b97434048d9f37928f9419a272af
+    pinned_server: true
+    quote: >-
+      and use the oldest compatible floors rather than the newest release (catalog rule 10).
+    enforces: >-
+      At the [tool.uv] exclude-newer snapshot, --resolution lowest-direct installs every floor as
+      declared and the full suite passes on it with nothing skipped; and for each dependency the
+      release just below its floor either cannot resolve with the other floors or fails the suite.
+      Needs uv and the PyPI JSON API; runs the suite up to 1 + one per dependency times.
+    script: scripts/ci/checks/hermes-pr-feedback-ci/HPF-006-runtime-deps-oldest-floor.sh
+    fixtures: ci/fixtures/HPF-006
+
+  - id: HPF-007
+    pipeline: hermes-pr-feedback-ci
+    title: the uvx launch resolves at one fixed --exclude-newer instant
+    concern: uvx-first-start-snapshot
+    source: https://github.com/NousResearch/hermes-agent/pull/143393#pullrequestreview-5631127162
+    feedback_id: hermes-agent#143393/review-5631127162/2c
+    reviewer: teknium1
+    reviewed_at: 531a24c7b698b97434048d9f37928f9419a272af
+    pinned_server: false
+    quote: >-
+      Adding `--exclude-newer` with a fixed date to the `uvx` args in plugin/mcp.json:7-12 would
+      also make first-start resolution reproducible.
+    enforces: >-
+      plugin/mcp.json's uvx launch passes --exclude-newer to uvx itself (before the command) as one
+      RFC 3339 instant with an offset - not a bare date (read in each installer's time zone), not a
+      relative span, not in the future - and the runtime dependencies and the build backend both
+      resolve at it.
+    script: scripts/ci/checks/hermes-pr-feedback-ci/HPF-007-uvx-exclude-newer-fixed.sh
+    fixtures: ci/fixtures/HPF-007
+
+  - id: HPF-008
+    pipeline: hermes-pr-feedback-ci
+    title: the uvx git ref pins a commit that carries the fixes
+    concern: uvx-pin-carries-fixes
+    source: https://github.com/NousResearch/hermes-agent/pull/143393#pullrequestreview-5631127162
+    feedback_id: hermes-agent#143393/review-5631127162/3
+    reviewer: teknium1
+    reviewed_at: 531a24c7b698b97434048d9f37928f9419a272af
+    pinned_server: false
+    quote: >-
+      When you re-pin, point the `uvx` git ref in `plugin/mcp.json` at the fixed commit too.
+    enforces: >-
+      The --from git+<url>@<ref> in plugin/mcp.json is a full 40-hex sha of an ancestor of HEAD
+      (not a branch, tag or short sha; not a side branch), and the git archive of that commit passes
+      every rule marked pinned_server here - users run the pinned server, not HEAD. Needs full
+      history (GIT_DEPTH 0).
+    script: scripts/ci/checks/hermes-pr-feedback-ci/HPF-008-uvx-pin-carries-fixes.sh
+    fixtures: ci/fixtures/HPF-008
+    clean: fixture  # a fixture clone has one synthetic commit, so the real pin is never in its history
+
+  - id: HPF-009
+    pipeline: hermes-pr-feedback-ci
+    title: CI resolves under the same release quarantine as a first start
+    concern: ci-release-quarantine
+    source: https://github.com/NousResearch/hermes-agent/pull/143393#pullrequestreview-5631127162
+    feedback_id: hermes-agent#143393/review-5631127162/2d
+    reviewer: teknium1
+    reviewed_at: 531a24c7b698b97434048d9f37928f9419a272af
+    pinned_server: false
+    quote: >-
+      use the oldest compatible floors rather than the newest release (catalog rule 10). Adding
+      `--exclude-newer` with a fixed date [...] would also make first-start resolution reproducible.
+      - Catalog rule 10, cited there: "authors are strongly recommended to run their own release
+      quarantine (`uv --exclude-newer` in their CI)".
+    enforces: >-
+      pyproject.toml sets [tool.uv] exclude-newer to a fixed RFC 3339 instant that is not in the
+      future and equals the instant plugin/mcp.json passes to uvx, so uv.lock and every CI
+      resolution see exactly the releases a first start can install.
+    script: scripts/ci/checks/hermes-pr-feedback-ci/HPF-009-ci-release-quarantine.sh
+    fixtures: ci/fixtures/HPF-009
+
+  # ---------------------------------------------------------------- cpompa-hermes-ci
+  - id: CHC-LINT
+    pipeline: cpompa-hermes-ci
+    title: ruff is clean, including the CI scripts' embedded Python
+    concern: python-lint
+    source: house rule
+    enforces: >-
+      `ruff check` with the project configuration reports nothing for src/, tests/ and scripts/, nor
+      for any <<'PY' heredoc embedded in a scripts/ shell script.
+    script: scripts/ci/checks/cpompa-hermes-ci/CHC-LINT-ruff.sh
+    fixtures: ci/fixtures/CHC-LINT
+
+  - id: CHC-SHELL
+    pipeline: cpompa-hermes-ci
+    title: every shell script parses and passes ShellCheck
+    concern: shell-lint
+    source: house rule
+    enforces: >-
+      Every shipped *.sh parses with `bash -n` and passes ShellCheck 0.11.0 (pinned shellcheck-py via
+      uvx) at its default severity, following sourced files.
+    script: scripts/ci/checks/cpompa-hermes-ci/CHC-SHELL-shellcheck.sh
+    fixtures: ci/fixtures/CHC-SHELL
+
+  - id: CHC-SAST
+    pipeline: cpompa-hermes-ci
+    title: no dangerous calls in application or CI code
+    concern: dangerous-calls
+    source: house rule
+    enforces: >-
+      src/ and scripts/ make none of the flake8-bandit calls S102, S301, S302, S307, S323, S501,
+      S506, S602, S605, S701, S702: exec/eval, pickle/marshal loads, unsafe yaml.load, a local shell
+      (subprocess shell=True, os.system, os.popen), unverified TLS, unescaped templates.
+    script: scripts/ci/checks/cpompa-hermes-ci/CHC-SAST-dangerous-calls.sh
+    fixtures: ci/fixtures/CHC-SAST
+
+  - id: CHC-TESTS
+    pipeline: cpompa-hermes-ci
+    title: the full suite passes with nothing skipped
+    concern: test-suite
+    source: house rule
+    enforces: >-
+      The whole pytest suite passes against the tree's own src/ with no failure, no error and no
+      skipped test (a skip is unverified behaviour; the cs_script tests need node and the pinned
+      tools/tsc).
+    script: scripts/ci/checks/cpompa-hermes-ci/CHC-TESTS-pytest.sh
+    fixtures: ci/fixtures/CHC-TESTS
+
+  - id: CHC-SECRETS
+    pipeline: cpompa-hermes-ci
+    title: no secrets in shipped files or in the commits under review
+    concern: secret-scan
+    source: house rule
+    enforces: >-
+      gitleaks 8.30.1 (default rules, redacted) finds nothing in the shipped files (tracked +
+      untracked-not-ignored) nor in any commit of the range under review, so a secret added and then
+      deleted still fails.
+    script: scripts/ci/checks/cpompa-hermes-ci/CHC-SECRETS-gitleaks.sh
+    fixtures: ci/fixtures/CHC-SECRETS
+
+  - id: CHC-IOC
+    pipeline: cpompa-hermes-ci
+    title: no compromised-npm indicator anywhere in the tree
+    concern: compromised-npm-indicators
+    source: house rule
+    enforces: >-
+      None of the indicators in the workspace AGENTS.md security note appears: the two hijacked axios
+      releases (pin, lockfile entry or installed package), an axios dependency that is not an exact
+      known-safe version, their payload package, the C2 domain or address - in any shipped file,
+      text or binary, or in any node_modules on disk.
+    script: scripts/ci/checks/cpompa-hermes-ci/CHC-IOC-compromised-npm.sh
+    fixtures: ci/fixtures/CHC-IOC
+
+  - id: CHC-LOCKFILE
+    pipeline: cpompa-hermes-ci
+    title: uv.lock is current, PyPI-only and fully hashed
+    concern: lockfile-integrity
+    source: house rule
+    enforces: >-
+      `uv lock --check` passes (uv.lock matches pyproject.toml), every locked package but the project
+      itself comes from https://pypi.org/simple, and every locked sdist and wheel carries a sha256.
+    script: scripts/ci/checks/cpompa-hermes-ci/CHC-LOCKFILE-uv-lock.sh
+    fixtures: ci/fixtures/CHC-LOCKFILE
+
+  - id: CHC-COMMITS
+    pipeline: cpompa-hermes-ci
+    title: the commits under review are clean
+    concern: commit-hygiene
+    source: house rule
+    enforces: >-
+      Every commit in the range has a non-empty subject of at most 120 characters with no trailing
+      whitespace, a blank line before any body, and is no fixup!/squash!/amend! or WIP commit; the
+      range adds no whitespace errors or conflict markers (git diff --check) and no file over 5 MiB.
+    script: scripts/ci/checks/cpompa-hermes-ci/CHC-COMMITS-hygiene.sh
+    fixtures: ci/fixtures/CHC-COMMITS
+
+  - id: CHC-PACKAGING
+    pipeline: cpompa-hermes-ci
+    title: sdist and wheel build, and the wheel works installed
+    concern: packaging
+    source: house rule
+    enforces: >-
+      uv builds one sdist and one wheel; the wheel ships every tracked file under src/s2docs/ and
+      exactly the [project.scripts] entry points; installed with the locked runtime dependencies into a
+      fresh venv outside the tree, every console script answers --help and the server modules import
+      from the wheel.
+    script: scripts/ci/checks/cpompa-hermes-ci/CHC-PACKAGING-wheel.sh
+    fixtures: ci/fixtures/CHC-PACKAGING

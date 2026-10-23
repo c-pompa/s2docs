@@ -27,7 +27,7 @@ from s2docs.mcp_server import create_mcp_server
 @pytest.fixture
 def bdb(tmp_path) -> Database:
     db = Database(tmp_path / "builds.db")
-    hosts.register_host(db, "desktop-pc", "pompa@100.64.130.72", hostname="DESKTOP-39NF657", shell="powershell")
+    hosts.register_host(db, "build-pc", "pompa@192.0.2.172", hostname="DESKTOP-BUILDPC", shell="powershell")
     return db
 
 
@@ -82,10 +82,20 @@ def fake_popen(payload: bytes = b"", rc: int = 0, hang: bool = False, record: li
 
 def _start(bdb, tmp_path, **kw):
     # The log path is derived server-side (inside the data dir); a client cannot point it elsewhere.
-    return builds.start(bdb, "desktop-pc", "resourcecompiler -game csgo -nop4 addon", **kw)
+    return builds.start(bdb, "build-pc", "resourcecompiler -game csgo -nop4 addon", **kw)
 
 
 # ------------------------------------------------------------------- build runs
+def _lease_released(db, host_id: str, timeout_sec: float = 5) -> bool:
+    """True once the host lease is gone. The watcher commits a run's terminal status first and
+    releases the lease right after, so builds.wait() can return inside that window: poll briefly
+    instead of racing it (the race was lost under load)."""
+    deadline = time.monotonic() + timeout_sec
+    while hosts.get_host(db, host_id).lock is not None and time.monotonic() < deadline:
+        time.sleep(0.02)
+    return hosts.get_host(db, host_id).lock is None
+
+
 def test_build_start_success(bdb, tmp_path, monkeypatch):
     payload = "Compile Summary: 1234 compiled, 2 failed, 0 warnings\r\nDone.\r\n".encode("utf-16")
     gate = threading.Event()
@@ -96,12 +106,8 @@ def test_build_start_success(bdb, tmp_path, monkeypatch):
     finished = builds.wait(bdb, run.id, timeout_sec=5, poll_sec=0.02)
     assert finished.status == "succeeded" and finished.exit_code == 0
     assert finished.summary == {"compiled": 1234, "failed": 2, "warnings": 0}
-    # the server released the host lease on the terminal status (finalize commits the status
-    # first and releases right after — poll briefly instead of racing that window)
-    deadline = time.monotonic() + 5
-    while hosts.get_host(bdb, "desktop-pc").lock is not None and time.monotonic() < deadline:
-        time.sleep(0.02)
-    assert hosts.get_host(bdb, "desktop-pc").lock is None
+    # the server released the host lease on the terminal status
+    assert _lease_released(bdb, "build-pc")
     # the UTF-16 log decodes (this is what broke the hand-rolled probes)
     tail = builds.log_tail(bdb, run.id)
     assert tail.encoding == "utf-16" and any("1234 compiled" in ln for ln in tail.lines)
@@ -111,11 +117,11 @@ def test_build_start_failure_exit_code(bdb, tmp_path, monkeypatch):
     monkeypatch.setattr(builds.subprocess, "Popen", fake_popen(payload="boom\r\n".encode("utf-16"), rc=1))
     run = builds.wait(bdb, _start(bdb, tmp_path).id, timeout_sec=5, poll_sec=0.02)
     assert run.status == "failed" and run.exit_code == 1
-    assert hosts.get_host(bdb, "desktop-pc").lock is None
+    assert _lease_released(bdb, "build-pc")
 
 
 def test_build_start_locked_is_server_side(bdb, tmp_path, monkeypatch):
-    hosts.claim_host(bdb, "desktop-pc", "ws/other")
+    hosts.claim_host(bdb, "build-pc", "ws/other")
     monkeypatch.setattr(builds.subprocess, "Popen", fake_popen(rc=0))
     with pytest.raises(hosts.HostLocked):
         _start(bdb, tmp_path)
@@ -129,7 +135,7 @@ def test_build_start_refuses_when_host_already_has_a_running_run(bdb, tmp_path, 
     first = _start(bdb, tmp_path)
     assert first.status == "running"
     # simulate a lease that expired/freed while the run record is still 'running'
-    hosts.release_host(bdb, "desktop-pc", f"build:{first.id}")
+    hosts.release_host(bdb, "build-pc", f"build:{first.id}")
     with pytest.raises(builds.BuildError, match="running build"):
         _start(bdb, tmp_path)
     assert [r.id for r in builds.list_runs(bdb, active=True)] == [first.id]
@@ -143,14 +149,14 @@ def test_build_cancel_terminates_and_releases(bdb, tmp_path, monkeypatch):
     cancelled = builds.cancel(bdb, run.id)
     assert cancelled.status == "cancelled"
     builds.wait(bdb, run.id, timeout_sec=5, poll_sec=0.02)
-    assert hosts.get_host(bdb, "desktop-pc").lock is None
+    assert hosts.get_host(bdb, "build-pc").lock is None
 
 
 def test_build_wait_timeout(bdb):
     with bdb.writer() as conn, conn:
         conn.execute(
             "INSERT INTO build_runs (id, host_id, kind, command, status, owner) "
-            "VALUES ('b-manual', 'desktop-pc', 'build', 'x', 'running', 'build:b-manual')"
+            "VALUES ('b-manual', 'build-pc', 'build', 'x', 'running', 'build:b-manual')"
         )
     with pytest.raises(builds.BuildTimeout):
         builds.wait(bdb, "b-manual", timeout_sec=0.2, poll_sec=0.05)
@@ -188,7 +194,7 @@ def test_log_tail_utf16_no_bom(bdb, tmp_path):
     with bdb.writer() as conn, conn:
         conn.execute(
             "INSERT INTO build_runs (id, host_id, kind, command, status, owner, log_path) "
-            "VALUES ('b-log', 'desktop-pc', 'build', 'x', 'running', 'build:b-log', ?)",
+            "VALUES ('b-log', 'build-pc', 'build', 'x', 'running', 'build:b-log', ?)",
             (str(log),),
         )
     tail = builds.log_tail(bdb, "b-log", lines=2)
@@ -200,7 +206,7 @@ def test_record_artifacts_hashes_local_files(bdb, tmp_path):
     with bdb.writer() as conn, conn:
         conn.execute(
             "INSERT INTO build_runs (id, host_id, kind, command, status, owner) "
-            "VALUES ('b-art', 'desktop-pc', 'build', 'x', 'succeeded', 'build:b-art')"
+            "VALUES ('b-art', 'build-pc', 'build', 'x', 'succeeded', 'build:b-art')"
         )
     art = tmp_path / "addon.vpk"
     art.write_bytes(b"payload")
@@ -242,11 +248,11 @@ def test_deploy_push_verifies_md5(bdb, tmp_path, monkeypatch):
     dest = "C:/iso_build/addons"
     remote = "C:/iso_build/addons/scripts/jump_arena.js"
     monkeypatch.setattr(deploys.subprocess, "run", fake_ssh({remote: md5_file(local)}))
-    deploy = deploys.push(bdb, "desktop-pc", dest, [{"path": "scripts/jump_arena.js", "local": str(local)}])
+    deploy = deploys.push(bdb, "build-pc", dest, [{"path": "scripts/jump_arena.js", "local": str(local)}])
     assert deploy.status == "verified"
     entry = deploy.entries[0]
     assert entry.verified and entry.md5 == md5_file(local) and entry.size == local.stat().st_size
-    assert [d.id for d in deploys.list_deployments(bdb, host_id="desktop-pc")] == [deploy.id]
+    assert [d.id for d in deploys.list_deployments(bdb, host_id="build-pc")] == [deploy.id]
 
 
 def test_deploy_push_mismatch_fails(bdb, tmp_path, monkeypatch):
@@ -254,7 +260,7 @@ def test_deploy_push_mismatch_fails(bdb, tmp_path, monkeypatch):
     dest = "C:/dst"
     monkeypatch.setattr(deploys.subprocess, "run", fake_ssh({"C:/dst/cfg/a.cfg": "0" * 32}))
     with pytest.raises(deploys.DeployError):
-        deploys.push(bdb, "desktop-pc", dest, [{"path": "cfg/a.cfg", "local": str(local)}])
+        deploys.push(bdb, "build-pc", dest, [{"path": "cfg/a.cfg", "local": str(local)}])
     recorded = deploys.list_deployments(bdb)[0]
     assert recorded.status == "failed" and not recorded.entries[0].verified
 
@@ -263,7 +269,7 @@ def test_deploy_push_dry_run_does_not_copy(bdb, tmp_path, monkeypatch):
     local = _local(tmp_path, "m.txt", b"x")
     calls: list = []
     monkeypatch.setattr(deploys.subprocess, "run", fake_ssh({}, calls=calls))
-    deploy = deploys.push(bdb, "desktop-pc", "C:/dst", [{"path": "m.txt", "local": str(local)}], dry_run=True)
+    deploy = deploys.push(bdb, "build-pc", "C:/dst", [{"path": "m.txt", "local": str(local)}], dry_run=True)
     assert deploy.id.startswith("d-") and deploy.notes == "dry-run: nothing copied"
     assert calls == [] and deploys.list_deployments(bdb) == []
 
@@ -283,7 +289,7 @@ def test_deploy_push_partial_failure_returns_record(bdb, tmp_path, monkeypatch):
     monkeypatch.setattr(deploys.subprocess, "run", flaky)
     deploy = deploys.push(
         bdb,
-        "desktop-pc",
+        "build-pc",
         dest,
         [{"path": "good.txt", "local": str(good)}, {"path": "bad.txt", "local": str(bad)}],
     )
@@ -295,7 +301,7 @@ def test_deploy_verify_recheck(bdb, tmp_path, monkeypatch):
     dest = "C:/dst"
     remote = f"{dest}/v.txt"
     monkeypatch.setattr(deploys.subprocess, "run", fake_ssh({remote: md5_file(local)}))
-    deploy = deploys.push(bdb, "desktop-pc", dest, [{"path": "v.txt", "local": str(local)}])
+    deploy = deploys.push(bdb, "build-pc", dest, [{"path": "v.txt", "local": str(local)}])
     assert deploy.status == "verified"
     # now the host copy drifts
     monkeypatch.setattr(deploys.subprocess, "run", fake_ssh({remote: "deadbeef" * 4}))
@@ -305,7 +311,7 @@ def test_deploy_verify_recheck(bdb, tmp_path, monkeypatch):
 
 def test_deploy_missing_local_file(bdb):
     with pytest.raises(deploys.DeployError):
-        deploys.push(bdb, "desktop-pc", "C:/dst", [{"path": "x", "local": "/no/such/file"}])
+        deploys.push(bdb, "build-pc", "C:/dst", [{"path": "x", "local": "/no/such/file"}])
 
 
 # ------------------------------------------------------------- deploy leases
@@ -314,11 +320,11 @@ def test_deploy_push_blocked_by_another_owner_copies_nothing(bdb, tmp_path, monk
     local = _local(tmp_path, "a.js", b"code")
     calls: list = []
     monkeypatch.setattr(deploys.subprocess, "run", fake_ssh({}, calls=calls))
-    hosts.claim_host(bdb, "desktop-pc", "ws/other")
+    hosts.claim_host(bdb, "build-pc", "ws/other")
     with pytest.raises(hosts.HostLocked):
-        deploys.push(bdb, "desktop-pc", "C:/dst", [{"path": "a.js", "local": str(local)}])
+        deploys.push(bdb, "build-pc", "C:/dst", [{"path": "a.js", "local": str(local)}])
     assert calls == []  # the copy never ran
-    assert hosts.get_host(bdb, "desktop-pc").lock.owner == "ws/other"  # untouched
+    assert hosts.get_host(bdb, "build-pc").lock.owner == "ws/other"  # untouched
     assert deploys.list_deployments(bdb) == []
 
 
@@ -334,22 +340,22 @@ def test_deploy_push_free_host_takes_and_releases_the_lease(bdb, tmp_path, monke
         return real_claim(db, host_id, owner, **kw)
 
     monkeypatch.setattr(deploys.hosts, "claim_host", spy_claim)
-    deploy = deploys.push(bdb, "desktop-pc", "C:/dst", [{"path": "b.js", "local": str(local)}])
+    deploy = deploys.push(bdb, "build-pc", "C:/dst", [{"path": "b.js", "local": str(local)}])
     assert deploy.status == "verified"
     assert seen["owner"].startswith("deploy:") and deploy.owner == seen["owner"]
-    assert hosts.get_host(bdb, "desktop-pc").lock is None  # released after the copy window
+    assert hosts.get_host(bdb, "build-pc").lock is None  # released after the copy window
 
 
 def test_deploy_push_owner_holding_the_lease_proceeds_without_releasing(bdb, tmp_path, monkeypatch):
     local = _local(tmp_path, "c.js", b"code")
     remote = "C:/dst/c.js"
     monkeypatch.setattr(deploys.subprocess, "run", fake_ssh({remote: md5_file(local)}))
-    hosts.claim_host(bdb, "desktop-pc", "ws/tester")
+    hosts.claim_host(bdb, "build-pc", "ws/tester")
     deploy = deploys.push(
-        bdb, "desktop-pc", "C:/dst", [{"path": "c.js", "local": str(local)}], owner="ws/tester"
+        bdb, "build-pc", "C:/dst", [{"path": "c.js", "local": str(local)}], owner="ws/tester"
     )
     assert deploy.status == "verified" and deploy.owner == "ws/tester"
-    lock = hosts.get_host(bdb, "desktop-pc").lock
+    lock = hosts.get_host(bdb, "build-pc").lock
     assert lock is not None and lock.owner == "ws/tester"  # the caller's lease is kept
 
 
@@ -357,8 +363,8 @@ def test_deploy_push_releases_the_lease_even_on_failure(bdb, tmp_path, monkeypat
     local = _local(tmp_path, "d.js", b"code")
     monkeypatch.setattr(deploys.subprocess, "run", fake_ssh({}, fail_scp=True))
     with pytest.raises(deploys.DeployError):
-        deploys.push(bdb, "desktop-pc", "C:/dst", [{"path": "d.js", "local": str(local)}])
-    assert hosts.get_host(bdb, "desktop-pc").lock is None
+        deploys.push(bdb, "build-pc", "C:/dst", [{"path": "d.js", "local": str(local)}])
+    assert hosts.get_host(bdb, "build-pc").lock is None
 
 
 # ------------------------------------------------------------------ facades: MCP
@@ -372,14 +378,14 @@ def test_mcp_build_and_deploy_flow(bdb, tmp_path, monkeypatch):
 
     async def main():
         async with Client(server) as c:
-            started = await c.call_tool("build_start", {"host_id": "desktop-pc", "command": "compile"})
+            started = await c.call_tool("build_start", {"host_id": "build-pc", "command": "compile"})
             run_id = started.structured_content["id"]
             waited = await c.call_tool("build_wait", {"run_id": run_id, "timeout_sec": 5})
             log = await c.call_tool("build_log", {"run_id": run_id})
             listed = await c.call_tool("build_list", {})
             pushed = await c.call_tool(
                 "deploy_push",
-                {"host_id": "desktop-pc", "dest_root": "C:/dst", "files": [{"path": "s.js", "local": str(local)}]},
+                {"host_id": "build-pc", "dest_root": "C:/dst", "files": [{"path": "s.js", "local": str(local)}]},
             )
             verified = await c.call_tool("deploy_verify", {"deploy_id": pushed.structured_content["id"]})
             deployment_list = await c.call_tool("deploy_list", {})
@@ -410,19 +416,19 @@ def test_mcp_deploy_push_respects_the_host_lease(bdb, tmp_path, monkeypatch):
     local = _local(tmp_path, "m.js", b"code")
     remote = "C:/dst/m.js"
     monkeypatch.setattr(deploys.subprocess, "run", fake_ssh({remote: md5_file(local)}))
-    hosts.claim_host(bdb, "desktop-pc", "ws/tester")
+    hosts.claim_host(bdb, "build-pc", "ws/tester")
     server = create_mcp_server(bdb)
 
     async def main():
         async with Client(server) as c:
             blocked = await c.call_tool(
                 "deploy_push",
-                {"host_id": "desktop-pc", "dest_root": "C:/dst", "files": [{"path": "m.js", "local": str(local)}]},
+                {"host_id": "build-pc", "dest_root": "C:/dst", "files": [{"path": "m.js", "local": str(local)}]},
             )
             ok = await c.call_tool(
                 "deploy_push",
                 {
-                    "host_id": "desktop-pc",
+                    "host_id": "build-pc",
                     "dest_root": "C:/dst",
                     "files": [{"path": "m.js", "local": str(local)}],
                     "owner": "ws/tester",
@@ -450,17 +456,17 @@ def test_api_build_and_deploy_routes(bdb, client, tmp_path, monkeypatch):
     remote = "C:/dst/a.js"
     monkeypatch.setattr(deploys.subprocess, "run", fake_ssh({remote: md5_file(local)}))
 
-    started = client.post("/api/hosts/desktop-pc/builds", json={"command": "compile"})
+    started = client.post("/api/hosts/build-pc/builds", json={"command": "compile"})
     assert started.status_code == 201
     run_id = started.json()["id"]
     assert client.get(f"/api/builds/{run_id}/log").json()["encoding"] == "utf-16"
     assert client.post(f"/api/builds/{run_id}/wait", json={"timeout_sec": 5}).json()["status"] == "failed"
-    assert client.get("/api/builds", params={"host_id": "desktop-pc"}).json()[0]["id"] == run_id
+    assert client.get("/api/builds", params={"host_id": "build-pc"}).json()[0]["id"] == run_id
     assert client.get(f"/api/builds/{run_id}").json()["summary"]["compiled"] == 3
 
     pushed = client.post(
         "/api/deploys",
-        json={"host_id": "desktop-pc", "dest_root": "C:/dst", "files": [{"path": "a.js", "local": str(local)}]},
+        json={"host_id": "build-pc", "dest_root": "C:/dst", "files": [{"path": "a.js", "local": str(local)}]},
     )
     assert pushed.status_code == 201 and pushed.json()["status"] == "verified"
     assert client.post(f"/api/deploys/{pushed.json()['id']}/verify").json()["status"] == "verified"
@@ -468,9 +474,9 @@ def test_api_build_and_deploy_routes(bdb, client, tmp_path, monkeypatch):
 
 
 def test_api_build_locked_is_409(bdb, client, monkeypatch):
-    hosts.claim_host(bdb, "desktop-pc", "ws/other")
+    hosts.claim_host(bdb, "build-pc", "ws/other")
     monkeypatch.setattr(builds.subprocess, "Popen", fake_popen(rc=0))
-    r = client.post("/api/hosts/desktop-pc/builds", json={"command": "compile"})
+    r = client.post("/api/hosts/build-pc/builds", json={"command": "compile"})
     assert r.status_code == 409 and r.json()["host_locked"]
 
 
@@ -478,10 +484,10 @@ def test_api_deploy_locked_is_409(bdb, client, tmp_path, monkeypatch):
     local = _local(tmp_path, "z.js", b"x")
     calls: list = []
     monkeypatch.setattr(deploys.subprocess, "run", fake_ssh({}, calls=calls))
-    hosts.claim_host(bdb, "desktop-pc", "ws/other")
+    hosts.claim_host(bdb, "build-pc", "ws/other")
     r = client.post(
         "/api/deploys",
-        json={"host_id": "desktop-pc", "dest_root": "C:/dst", "files": [{"path": "z.js", "local": str(local)}]},
+        json={"host_id": "build-pc", "dest_root": "C:/dst", "files": [{"path": "z.js", "local": str(local)}]},
     )
     assert r.status_code == 409 and r.json()["host_locked"]
     assert calls == [] and deploys.list_deployments(bdb) == []
@@ -502,7 +508,7 @@ def _run_cli(monkeypatch, tmp_path, argv):
 
 def test_cli_build_and_deploy(tmp_path, monkeypatch, capsys):
     db = Database(tmp_path / "data" / "s2docs.db")
-    hosts.register_host(db, "desktop-pc", "pompa@x", shell="powershell")
+    hosts.register_host(db, "build-pc", "pompa@x", shell="powershell")
     payload = "9 compiled, 0 failed\r\n".encode("utf-16")
     monkeypatch.setattr(builds.subprocess, "Popen", fake_popen(payload=payload, rc=0))
     local = _local(tmp_path, "c.js", b"code")
@@ -512,7 +518,7 @@ def test_cli_build_and_deploy(tmp_path, monkeypatch, capsys):
     rc = _run_cli(
         monkeypatch,
         tmp_path,
-        ["--json", "build", "start", "my_addon", "--host", "desktop-pc", "--command", "compile", "--wait"],
+        ["--json", "build", "start", "my_addon", "--host", "build-pc", "--command", "compile", "--wait"],
     )
     assert rc == 0
     out = capsys.readouterr().out.strip()
@@ -521,17 +527,17 @@ def test_cli_build_and_deploy(tmp_path, monkeypatch, capsys):
     rc = _run_cli(
         monkeypatch,
         tmp_path,
-        ["--json", "build", "list", "--host", "desktop-pc"],
+        ["--json", "build", "list", "--host", "build-pc"],
     )
     assert rc == 0 and '"runs"' in capsys.readouterr().out
 
 
 def test_cli_locked_exit_code(tmp_path, monkeypatch, capsys):
     db = Database(tmp_path / "data" / "s2docs.db")
-    hosts.register_host(db, "desktop-pc", "pompa@x")
-    hosts.claim_host(db, "desktop-pc", "ws/other")
+    hosts.register_host(db, "build-pc", "pompa@x")
+    hosts.claim_host(db, "build-pc", "ws/other")
     monkeypatch.setattr(builds.subprocess, "Popen", fake_popen(rc=0))
-    rc = _run_cli(monkeypatch, tmp_path, ["build", "start", "a", "--host", "desktop-pc", "--command", "x"])
+    rc = _run_cli(monkeypatch, tmp_path, ["build", "start", "a", "--host", "build-pc", "--command", "x"])
     assert rc == 2 and "LOCKED" in capsys.readouterr().err
 
 
@@ -583,7 +589,7 @@ def test_build_material_warnings_surface_in_summary(bdb, tmp_path, monkeypatch):
     monkeypatch.setattr(builds.subprocess, "Popen", fake_popen(payload=_utf16_log(_INCIDENT_LINES), rc=0))
     run = builds.start(
         bdb,
-        "desktop-pc",
+        "build-pc",
         "resourcecompiler -game csgo addon",
         notes="target=de_dust2_iso map=de_dust2_iso",
     )
@@ -606,7 +612,7 @@ def test_build_material_warnings_surface_in_summary(bdb, tmp_path, monkeypatch):
 
 def test_cli_strict_materials_exit_code(tmp_path, monkeypatch, capsys):
     db = Database(tmp_path / "data" / "s2docs.db")
-    hosts.register_host(db, "desktop-pc", "pompa@x", shell="powershell")
+    hosts.register_host(db, "build-pc", "pompa@x", shell="powershell")
     monkeypatch.setattr(builds.subprocess, "Popen", fake_popen(payload=_utf16_log(_INCIDENT_LINES), rc=0))
     base = [
         "--json",
@@ -614,7 +620,7 @@ def test_cli_strict_materials_exit_code(tmp_path, monkeypatch, capsys):
         "start",
         "iso",
         "--host",
-        "desktop-pc",
+        "build-pc",
         "--command",
         "compile",
         "--map",
@@ -635,7 +641,7 @@ def test_cli_strict_materials_exit_code(tmp_path, monkeypatch, capsys):
 
 def test_api_build_material_guard_surfaces(bdb, client, tmp_path, monkeypatch):
     monkeypatch.setattr(builds.subprocess, "Popen", fake_popen(payload=_utf16_log(_INCIDENT_LINES), rc=0))
-    started = client.post("/api/hosts/desktop-pc/builds", json={"command": "compile", "notes": "map=de_dust2_iso"})
+    started = client.post("/api/hosts/build-pc/builds", json={"command": "compile", "notes": "map=de_dust2_iso"})
     assert started.status_code == 201
     run_id = started.json()["id"]
     assert client.post(f"/api/builds/{run_id}/wait", json={"timeout_sec": 5}).json()["status"] == "succeeded"
@@ -652,7 +658,7 @@ def test_mcp_material_guard_surfaces_and_strict(bdb, tmp_path, monkeypatch):
 
     async def main():
         async with Client(server) as c:
-            started = await c.call_tool("build_start", {"host_id": "desktop-pc", "command": "compile"})
+            started = await c.call_tool("build_start", {"host_id": "build-pc", "command": "compile"})
             rid = started.structured_content["id"]
             waited = await c.call_tool("build_wait", {"run_id": rid, "timeout_sec": 5})
             status = await c.call_tool("build_status", {"run_id": rid})

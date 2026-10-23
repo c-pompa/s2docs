@@ -18,7 +18,7 @@ STARTED_AT = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 # The public base URL of the web UI. The S2DOCS_PUBLIC_URL setting wins outright; with no request to
 # derive from (MCP tools, the CLI, the director's reporters) this is the fallback — the LAN address
 # the user opens the UI from.
-DEFAULT_PUBLIC_URL = "http://10.88.15.208:8812"
+DEFAULT_PUBLIC_URL = "http://127.0.0.1:8812"
 
 # Lock stuck-ness defaults (see hosts.py). A fresh heartbeat whose phase has not moved for longer
 # than the threshold reads STUCK; a per-phase override wins (e.g. {'compile': 7200} lets a legitimate
@@ -164,6 +164,29 @@ def default_data_dir() -> Path:
     return _platform_data_dir()
 
 
+def _env_ref(name: str) -> str | None:
+    """Read an env setting, treating an UNEXPANDED ``${REF}`` placeholder as unset.
+
+    A portable Agent Plugins package passes settings through ``mcp.json`` as
+    ``"S2DOCS_DATA_DIR": "${S2DOCS_DATA_DIR}"``. When the profile does not define the variable,
+    Hermes keeps the literal placeholder (it warns and assigns the raw ``${...}`` string), so a
+    naive read here would resolve a data dir literally named ``${S2DOCS_DATA_DIR}`` and quietly
+    create a shadow store beside the launched process. Anything still carrying a placeholder is a
+    launcher bug, not a value: warn loudly and fall back to the documented default.
+    """
+    raw = (os.environ.get(name) or "").strip()
+    if not raw:
+        return None
+    if "${" in raw:
+        print(
+            f"WARNING: {name} arrived unexpanded ({raw!r}) — treating it as unset. "
+            "Define it in the profile (hermes config set) or in mcp_servers.<name>.env.",
+            file=sys.stderr,
+        )
+        return None
+    return raw
+
+
 def _stuck_phases() -> dict[str, int]:
     """Per-phase stuck thresholds: the built-in defaults merged with S2DOCS_STUCK_PHASES (env wins per key).
 
@@ -196,10 +219,10 @@ def _stuck_sec() -> int:
 
 @lru_cache
 def get_settings() -> Settings:
-    raw_data_dir = os.environ.get("S2DOCS_DATA_DIR")
+    raw_data_dir = _env_ref("S2DOCS_DATA_DIR")
     data_dir = Path(raw_data_dir if raw_data_dir else default_data_dir()).expanduser().resolve()
-    db_path = Path(os.environ.get("S2DOCS_DB", data_dir / "s2docs.db")).expanduser().resolve()
-    workspace = Path(os.environ.get("S2DOCS_WORKSPACE", data_dir / "workspace")).expanduser().resolve()
+    db_path = Path(_env_ref("S2DOCS_DB") or data_dir / "s2docs.db").expanduser().resolve()
+    workspace = Path(_env_ref("S2DOCS_WORKSPACE") or data_dir / "workspace").expanduser().resolve()
     return Settings(
         data_dir=data_dir,
         db_path=db_path,
@@ -207,8 +230,8 @@ def get_settings() -> Settings:
         workspace_dir=workspace,
         stuck_sec=_stuck_sec(),
         stuck_phases=_stuck_phases(),
-        auth_token=os.environ.get("S2DOCS_AUTH_TOKEN") or None,
-        public_url=(os.environ.get("S2DOCS_PUBLIC_URL") or "").strip().rstrip("/") or None,
+        auth_token=_env_ref("S2DOCS_AUTH_TOKEN") or None,
+        public_url=(_env_ref("S2DOCS_PUBLIC_URL") or "").rstrip("/") or None,
     )
 
 

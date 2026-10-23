@@ -1,0 +1,2 @@
+# Falsification fixtures are diffs: their context lines legitimately end in whitespace.
+ci/fixtures/*.patch -whitespace

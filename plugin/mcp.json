@@ -1,0 +1,22 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+  "mcpServers": {
+    "s2docs": {
+      "type": "stdio",
+      "command": "uvx",
+      "args": [
+        "--exclude-newer",
+        "2026-10-10T00:00:00Z",
+        "--from",
+        "git+https://github.com/c-pompa/s2docs.git@b126b28ceeef18699a414c9b4e9cd0b30e2c5ddd",
+        "s2docs",
+        "mcp"
+      ],
+      "cwd": "${PLUGIN_DATA}",
+      "env": {
+        "S2DOCS_DATA_DIR": "${S2DOCS_DATA_DIR}",
+        "S2DOCS_PUBLIC_URL": "${S2DOCS_PUBLIC_URL}"
+      }
+    }
+  }
+}

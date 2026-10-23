@@ -26,7 +26,7 @@ TOKEN = "s3cr3t-token-please"
 @pytest.fixture
 def adb(tmp_path) -> Database:
     db = Database(tmp_path / "auth.db")
-    hosts.register_host(db, "desktop-pc", "pompa@100.64.130.72", shell="powershell")
+    hosts.register_host(db, "build-pc", "pompa@192.0.2.172", shell="powershell")
     return db
 
 
@@ -46,7 +46,7 @@ def client_factory(adb, monkeypatch):
     get_settings.cache_clear()
 
 
-LOCK = "/api/hosts/desktop-pc/lock"
+LOCK = "/api/hosts/build-pc/lock"
 LOCK_BODY = {"owner": "ws/tester"}
 
 
@@ -166,7 +166,7 @@ def _raw_request(app, method: str, path: str, headers: list[tuple[bytes, bytes]]
 )
 def test_non_ascii_header_is_401_not_500(client_factory, headers):
     with client_factory(TOKEN) as c:
-        assert _raw_request(c.app, "POST", "/api/hosts/desktop-pc/lock", headers) == 401
+        assert _raw_request(c.app, "POST", "/api/hosts/build-pc/lock", headers) == 401
 
 
 def test_non_ascii_header_via_mcp_is_401(client_factory):

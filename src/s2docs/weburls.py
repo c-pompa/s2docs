@@ -5,7 +5,7 @@ The web UI is a hash-route SPA, so a *page* URL is ``<base>/#/<route>`` (e.g. ``
 
 * ``S2DOCS_PUBLIC_URL`` (the ``Settings.public_url``) wins outright when set;
 * otherwise, for a REST call, it is derived from the incoming request (``scheme://host:port``) — so a
-  browser hitting ``http://10.88.15.208:8812`` gets URLs back on that same origin;
+  browser hitting ``http://127.0.0.1:8812`` gets URLs back on that same origin;
 * otherwise (MCP tools, the CLI, reporters with no request) it falls back to
   :data:`s2docs.config.DEFAULT_PUBLIC_URL` — the LAN address the user views the UI from.
 

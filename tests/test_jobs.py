@@ -56,7 +56,7 @@ def _png(w: int = 3, h: int = 2, color: tuple[int, int, int] = (255, 0, 0)) -> b
 def jdb(tmp_path) -> Database:
     # The same path the CLI and settings resolve (conftest points S2DOCS_DATA_DIR at tmp_path/data).
     db = Database(tmp_path / "data" / "s2docs.db")
-    hosts.register_host(db, "desktop-pc", "pompa@x", shell="powershell")
+    hosts.register_host(db, "build-pc", "pompa@x", shell="powershell")
     hosts.register_host(db, "mini", "mini.local", shell="cmd")
     return db
 
@@ -68,7 +68,7 @@ def client(jdb):
 
 
 def _enq(client, **over):
-    return client.post("/api/jobs", json={**INTAKE, "host_id": "desktop-pc", **over})
+    return client.post("/api/jobs", json={**INTAKE, "host_id": "build-pc", **over})
 
 
 def _lines() -> list[dict]:
@@ -81,7 +81,7 @@ def _lines() -> list[dict]:
 # --------------------------------------------------------------------- intake
 @pytest.mark.parametrize("field", ["kind", "title", "target", "purpose", "expected", "host_id"])
 def test_intake_422_per_missing_required_field(client, field):
-    body = {**INTAKE, "host_id": "desktop-pc"}
+    body = {**INTAKE, "host_id": "build-pc"}
     body.pop(field)
     r = client.post("/api/jobs", json=body)
     assert r.status_code == 422, r.text
@@ -94,15 +94,15 @@ def test_intake_rules_host_choice_cap_reason_and_unknown_host(client):
     asked = client.post("/api/jobs", json={**INTAKE, "host_choice": "ask"})
     assert asked.status_code == 201 and asked.json()["host_id"] is None
     # a >5 min test needs a reason
-    over = client.post("/api/jobs", json={**INTAKE, "host_id": "desktop-pc", "max_minutes": 30})
+    over = client.post("/api/jobs", json={**INTAKE, "host_id": "build-pc", "max_minutes": 30})
     assert over.status_code == 422 and "reason" in over.json()["fields"]
-    ok = client.post("/api/jobs", json={**INTAKE, "host_id": "desktop-pc", "max_minutes": 30, "reason": "full demo"})
+    ok = client.post("/api/jobs", json={**INTAKE, "host_id": "build-pc", "max_minutes": 30, "reason": "full demo"})
     assert ok.status_code == 201 and ok.json()["params"]["max_minutes"] == 30
     # bad enum values / unknown host are fields too
-    assert client.post("/api/jobs", json={**INTAKE, "host_id": "desktop-pc", "kind": "nope"}).status_code == 422
+    assert client.post("/api/jobs", json={**INTAKE, "host_id": "build-pc", "kind": "nope"}).status_code == 422
     assert client.post("/api/jobs", json={**INTAKE, "host_id": "ghost"}).status_code == 422
     assert (
-        client.post("/api/jobs", json={**INTAKE, "host_id": "desktop-pc", "screenshots": "always"}).status_code == 422
+        client.post("/api/jobs", json={**INTAKE, "host_id": "build-pc", "screenshots": "always"}).status_code == 422
     )
 
 
@@ -114,18 +114,18 @@ def test_queue_order_and_next_conflict_when_lease_held(jdb, client):
     # position is the queue order (ascending): put C first, then A, then B
     for job, pos in ((c, 10), (a, 20), (b, 30)):
         assert (
-            client.post(f"/api/jobs/{job['id']}/assign", json={"host_id": "desktop-pc", "position": pos}).status_code
+            client.post(f"/api/jobs/{job['id']}/assign", json={"host_id": "build-pc", "position": pos}).status_code
             == 200
         )
-    assert client.get("/api/jobs/next", params={"host_id": "desktop-pc"}).json()["id"] == c["id"]
+    assert client.get("/api/jobs/next", params={"host_id": "build-pc"}).json()["id"] == c["id"]
     # a fresh lock on the host makes next a 409 naming the holder
-    hosts.claim_host(jdb, "desktop-pc", "ws/other", phase="compile")
-    r = client.get("/api/jobs/next", params={"host_id": "desktop-pc"})
+    hosts.claim_host(jdb, "build-pc", "ws/other", phase="compile")
+    r = client.get("/api/jobs/next", params={"host_id": "build-pc"})
     assert r.status_code == 409 and "ws/other" in r.json()["detail"]
-    hosts.release_host(jdb, "desktop-pc", "ws/other")
+    hosts.release_host(jdb, "build-pc", "ws/other")
     # start moves the head out of the queue
     assert client.post(f"/api/jobs/{c['id']}/start", json={"worker": "ws/x"}).json()["status"] == "running"
-    assert client.get("/api/jobs/next", params={"host_id": "desktop-pc"}).json()["id"] == a["id"]
+    assert client.get("/api/jobs/next", params={"host_id": "build-pc"}).json()["id"] == a["id"]
     # an empty host queue is a 404 (host is known, queue is not)
     assert client.get("/api/jobs/next", params={"host_id": "mini"}).status_code == 404
     assert client.get("/api/jobs/next", params={"host_id": "ghost"}).status_code == 400  # unknown host -> HostError
@@ -139,7 +139,7 @@ def test_jobs_never_claim_the_host_lease(jdb, client):
     client.post(f"/api/jobs/{jid}/start", json={"worker": "ws/x"})
     client.post(f"/api/jobs/{jid}/event", json={"level": "milestone", "message": "running"})
     client.post(f"/api/jobs/{jid}/finish", json={"status": "passed", "summary": _summary()})
-    assert hosts.get_host(jdb, "desktop-pc").lock is None  # never taken by the job
+    assert hosts.get_host(jdb, "build-pc").lock is None  # never taken by the job
 
 
 def test_list_filters(client):
@@ -381,7 +381,7 @@ def test_job_events_push_jsonl_and_health_field(client):
 
 
 def test_publish_never_raises_on_write_failure(jdb, monkeypatch):
-    jid = jobs.enqueue(jdb, **INTAKE, host_id="desktop-pc").id
+    jid = jobs.enqueue(jdb, **INTAKE, host_id="build-pc").id
     event = jobs.event(jdb, jid, level="info", message="x")
 
     def boom(*a, **k):
@@ -406,7 +406,7 @@ def test_mcp_jobs_registration_and_round_trip(jdb):
     async def main():
         async with Client(server) as c:
             tools = {t.name for t in (await c.list_tools()).tools}
-            enq = await c.call_tool("job_enqueue", {**INTAKE, "host_id": "desktop-pc"})
+            enq = await c.call_tool("job_enqueue", {**INTAKE, "host_id": "build-pc"})
             jid = enq.structured_content["id"]
             listed = await c.call_tool("job_list", {})
             got = await c.call_tool("job_get", {"job_id": jid})
@@ -443,7 +443,7 @@ def test_mcp_job_attach_copies_a_local_file(jdb, tmp_path):
 
     async def main():
         async with Client(server) as c:
-            jid = (await c.call_tool("job_enqueue", {**INTAKE, "host_id": "desktop-pc"})).structured_content["id"]
+            jid = (await c.call_tool("job_enqueue", {**INTAKE, "host_id": "build-pc"})).structured_content["id"]
             return await c.call_tool("job_attach", {"job_id": jid, "path": str(png)})
 
     res = anyio.run(main)
@@ -463,7 +463,7 @@ def _run_cli(monkeypatch, tmp_path, argv):
 
 def test_cli_job_flow_and_exit_codes(tmp_path, monkeypatch, capsys):
     db = Database(tmp_path / "data" / "s2docs.db")
-    hosts.register_host(db, "desktop-pc", "pompa@x", shell="powershell")
+    hosts.register_host(db, "build-pc", "pompa@x", shell="powershell")
     hosts.register_host(db, "mini", "mini.local", shell="cmd")
     base = [
         "job",
@@ -479,7 +479,7 @@ def test_cli_job_flow_and_exit_codes(tmp_path, monkeypatch, capsys):
         "--expected",
         "e",
         "--host",
-        "desktop-pc",
+        "build-pc",
     ]
     assert _run_cli(monkeypatch, tmp_path, ["--json", *base]) == 0
     jid = json.loads(capsys.readouterr().out)["job"]["id"]
@@ -489,7 +489,7 @@ def test_cli_job_flow_and_exit_codes(tmp_path, monkeypatch, capsys):
     assert "error:" in capsys.readouterr().err
 
     # next finds the head; an empty host queue is not found (3, the global EXIT_NOT_FOUND)
-    assert _run_cli(monkeypatch, tmp_path, ["--json", "job", "next", "--host", "desktop-pc"]) == 0
+    assert _run_cli(monkeypatch, tmp_path, ["--json", "job", "next", "--host", "build-pc"]) == 0
     capsys.readouterr()
     assert _run_cli(monkeypatch, tmp_path, ["job", "next", "--host", "mini"]) == 3
 
@@ -796,7 +796,7 @@ def test_mcp_job_verdict_round_trip(jdb):
 
     async def main():
         async with Client(server) as c:
-            jid = (await c.call_tool("job_enqueue", {**INTAKE, "host_id": "desktop-pc"})).structured_content["id"]
+            jid = (await c.call_tool("job_enqueue", {**INTAKE, "host_id": "build-pc"})).structured_content["id"]
             await c.call_tool("job_start", {"job_id": jid, "worker": "ws/mcp"})
             run = test_runs.start(jdb, "iso_test")
             await c.call_tool("job_link", {"job_id": jid, "kind": "test_run", "ref_id": run.id})
@@ -813,11 +813,11 @@ def test_mcp_job_verdict_round_trip(jdb):
 
 def test_cli_job_verdict_exit_codes(tmp_path, monkeypatch, capsys):
     db = Database(tmp_path / "data" / "s2docs.db")
-    hosts.register_host(db, "desktop-pc", "pompa@x", shell="powershell")
+    hosts.register_host(db, "build-pc", "pompa@x", shell="powershell")
     run = test_runs.start(db, "iso_test")
     base = [
         "job", "enqueue", "--kind", "test", "--title", "t", "--target", "x@1",
-        "--purpose", "p", "--expected", "e", "--host", "desktop-pc",
+        "--purpose", "p", "--expected", "e", "--host", "build-pc",
     ]
     assert _run_cli(monkeypatch, tmp_path, ["--json", *base]) == 0
     jid = json.loads(capsys.readouterr().out)["job"]["id"]
@@ -874,7 +874,7 @@ def test_mcp_job_finish_inconclusive_and_restatus_round_trip(jdb):
 
     async def main():
         async with Client(server) as c:
-            jid = (await c.call_tool("job_enqueue", {**INTAKE, "host_id": "desktop-pc"})).structured_content["id"]
+            jid = (await c.call_tool("job_enqueue", {**INTAKE, "host_id": "build-pc"})).structured_content["id"]
             await c.call_tool("job_start", {"job_id": jid, "worker": "ws/mcp"})
             fin = await c.call_tool("job_finish", {"job_id": jid, "status": "inconclusive", "summary": _summary()})
             tools = {t.name for t in (await c.list_tools()).tools}
@@ -893,10 +893,10 @@ def test_mcp_job_finish_inconclusive_and_restatus_round_trip(jdb):
 
 def test_cli_job_inconclusive_finish_and_restatus(tmp_path, monkeypatch, capsys):
     db = Database(tmp_path / "data" / "s2docs.db")
-    hosts.register_host(db, "desktop-pc", "pompa@x", shell="powershell")
+    hosts.register_host(db, "build-pc", "pompa@x", shell="powershell")
     base = [
         "job", "enqueue", "--kind", "test", "--title", "t", "--target", "x@1",
-        "--purpose", "p", "--expected", "e", "--host", "desktop-pc",
+        "--purpose", "p", "--expected", "e", "--host", "build-pc",
     ]
     assert _run_cli(monkeypatch, tmp_path, ["--json", *base]) == 0
     jid = json.loads(capsys.readouterr().out)["job"]["id"]
@@ -972,12 +972,12 @@ def _v12_db_with_every_status(tmp_path):
         if version > 12:
             break
         conn.executescript(f"BEGIN;\n{sql}\nPRAGMA user_version = {version};\nCOMMIT;")
-    conn.execute("INSERT INTO hosts (id, ssh_target) VALUES ('desktop-pc', 'pompa@x')")
+    conn.execute("INSERT INTO hosts (id, ssh_target) VALUES ('build-pc', 'pompa@x')")
     summary = json.dumps({"what": "w", "why": "y", "learned": "l", "next": "n"})
     for i, status in enumerate(("queued", "running", "passed", "failed", "error", "cancelled")):
         conn.execute(
             "INSERT INTO jobs (id, kind, title, target, host_id, status, summary) "
-            "VALUES (?, 'test', ?, 'x@1', 'desktop-pc', ?, ?)",
+            "VALUES (?, 'test', ?, 'x@1', 'build-pc', ?, ?)",
             (f"j-{i}", f"t{i}", status, summary if status not in ("queued", "running") else None),
         )
         conn.execute(

@@ -18,7 +18,6 @@ from pathlib import Path
 from s2docs.learning import digest, harvest, learning_dir
 from tests.test_learning import _seed_job, db_for
 
-
 # ------------------------------------------------------------------- writes
 
 
@@ -70,7 +69,7 @@ def test_digest_proposes_one_lesson_per_class_only_at_two_signals(tmp_path: Path
     out = digest.digest(db, since_days=30)
 
     lessons = json.loads(Path(out["lessons"]).read_text())["lessons"]
-    failed = [l for l in lessons if l["class"] == "failed_verdict"]
+    failed = [lesson for lesson in lessons if lesson["class"] == "failed_verdict"]
     assert len(failed) == 1, "one lesson per class per run"
     assert failed[0]["count"] == 2
     assert failed[0]["refs"], "a lesson must name the evidence it came from"

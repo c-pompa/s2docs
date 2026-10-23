@@ -7,3 +7,6 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 node_modules/
+# CI outputs (scripts/ci/run.sh reports, the uv cache GitLab keeps between jobs)
+/ci-reports/
+/.cache/

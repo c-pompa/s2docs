@@ -66,6 +66,39 @@ def test_schema_inheritance(repo: Repository):
     assert enum.kind == "enum" and enum.fields[1].value == "1"
 
 
+def test_schema_bases_prefer_the_childs_module_then_the_first_module(db):
+    """A base name defined in several modules resolves to the child's own module, else to the first
+    module by name. The query must also run on SQLite 3.46 (the CI image's Debian trixie), which
+    rejects an outer column in a correlated subquery's ORDER BY ("no such column: c.module")."""
+    with db.writer() as conn, conn:
+        bid = conn.execute("SELECT id FROM builds WHERE game_id = 'cs2' AND is_current = 1").fetchone()[0]
+
+        def add(module, name, bases=(), fields=()):
+            cid = conn.execute(
+                "INSERT INTO schema_classes (build_id, module, name, kind) VALUES (?, ?, ?, 'class')",
+                (bid, module, name),
+            ).lastrowid
+            for n, base in enumerate(bases):
+                conn.execute("INSERT INTO schema_class_bases (class_id, ordinal, base_name) VALUES (?, ?, ?)",
+                             (cid, n, base))
+            for n, field in enumerate(fields):
+                conn.execute("INSERT INTO schema_fields (class_id, ordinal, name) VALUES (?, ?, ?)", (cid, n, field))
+
+        add("client", "CPlantedBase", fields=["m_fromClient"])
+        add("server", "CPlantedBase", fields=["m_fromServer"])
+        add("server", "CPlantedChild", bases=["CPlantedBase"], fields=["m_own"])  # its own module: server
+        add("engine", "CPlantedOrphan", bases=["CPlantedBase"], fields=["m_own"])  # no engine base: client < server
+    with db.reader() as conn:
+        repo = Repository(conn)
+        child = repo.get_schema_class("cs2", "CPlantedChild")
+        orphan = repo.get_schema_class("cs2", "CPlantedOrphan")
+    assert [(f.name, f.defined_in) for f in child.fields] == [("m_own", "CPlantedChild"),
+                                                               ("m_fromServer", "CPlantedBase")]
+    assert [(f.name, f.defined_in) for f in orphan.fields] == [("m_own", "CPlantedOrphan"),
+                                                                ("m_fromClient", "CPlantedBase")]
+    assert child.inheritance == orphan.inheritance == ["CPlantedBase"]
+
+
 def test_script_api(repo: Repository):
     pawn = repo.get_script_type("cs2", "CSPlayerPawn")
     assert pawn.inherited_from == ["Entity"]

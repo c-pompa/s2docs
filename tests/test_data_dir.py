@@ -72,3 +72,48 @@ def test_non_checkout_uses_a_fixed_per_user_dir(monkeypatch):
         assert get_settings().data_dir == expected
     finally:
         get_settings.cache_clear()
+
+
+def test_unexpanded_placeholder_is_not_a_path(tmp_path, monkeypatch, capsys):
+    """A portable plugin passes ``"S2DOCS_DATA_DIR": "${S2DOCS_DATA_DIR}"`` through mcp.json.
+
+    When the profile does not define the variable Hermes keeps the literal placeholder string. Read
+    as a path it resolves to a directory *named* ``${S2DOCS_DATA_DIR}``, and the server silently
+    serves an empty shadow store beside the launched process. It must fall back to the default and
+    say so on stderr instead.
+    """
+    monkeypatch.setenv("S2DOCS_DATA_DIR", "${S2DOCS_DATA_DIR}")
+    monkeypatch.chdir(tmp_path)
+    get_settings.cache_clear()
+    try:
+        settings = get_settings()
+        assert settings.data_dir == (REPO_ROOT / "data").resolve()
+        assert "${" not in str(settings.data_dir)
+        assert "${S2DOCS_DATA_DIR}" in capsys.readouterr().err
+    finally:
+        get_settings.cache_clear()
+
+
+def test_unexpanded_placeholders_never_reach_a_credential_or_a_url(monkeypatch):
+    """Same launcher bug on the other settings: a literal token would authenticate nothing, and a
+    literal public URL would be pasted into every link a tool returns."""
+    monkeypatch.setenv("S2DOCS_AUTH_TOKEN", "${S2DOCS_AUTH_TOKEN}")
+    monkeypatch.setenv("S2DOCS_PUBLIC_URL", "${S2DOCS_PUBLIC_URL}")
+    get_settings.cache_clear()
+    try:
+        settings = get_settings()
+        assert settings.auth_token is None
+        assert settings.auth_required is False
+        assert settings.public_url is None
+    finally:
+        get_settings.cache_clear()
+
+
+def test_a_partial_placeholder_is_also_rejected(monkeypatch):
+    """``${HOME}/s2docs`` is equally unexpanded — a real path never contains ``${``."""
+    monkeypatch.setenv("S2DOCS_DB", "${S2DOCS_DATA_DIR}/s2docs.db")
+    get_settings.cache_clear()
+    try:
+        assert "${" not in str(get_settings().db_path)
+    finally:
+        get_settings.cache_clear()
