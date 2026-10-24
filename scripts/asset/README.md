@@ -64,17 +64,31 @@ the material name came back verbatim; Blender 4.5.15 keeps the `/` (verified 202
 Run long bakes as a background job that writes a `.done` marker, and poll that marker. Never
 block a session on the bake.
 
-### Known caveat: the FBX is written in centimetres, Source reads inches
+### Units: the FBX numbers are Source inches
 
-Blender's unit is the metre and the exporter writes centimetres (`apply_unit_scale=True`,
-`apply_scale_options='FBX_SCALE_NONE'`), so a 0.84 m bbox lands in the file as 84. Blender's own
-importer divides by 100 on the way back — that is the uniform `0.01` in `verdict.reimport_scale`, which
-is why the round-trip check compares world extents rather than absolute scale. A Source importer reads
-those numbers as inches: the 2026-10-23 compile of the un-decimated asset measured 2.1 x 2.5 x 0.75 m
-for the bridge's 0.84 x 0.30 x 1.00 m bbox — the same box, axis-permuted, 2.5x bigger.
-`normalise.bbox_units` reports the honest inch size (32.98 x 11.67 x 39.45); the bridge deliberately
-does **not** rescale geometry, because that changes the in-game size and needs its own
-compile-and-render proof.
+Blender's unit is the metre, Source reads FBX numbers as inches, and the exporter's old setting
+(`apply_scale_options='FBX_SCALE_NONE'`) wrote **centimetres** with `UnitScaleFactor 1.0` — a 0.84 m
+bbox landed in the file as 84, and a compiled prop came out 2.53x too big (measured on the compiled
+artifact, not by eye). The export now sets `global_scale=--unit-scale`,
+`apply_scale_options='FBX_SCALE_UNITS'` and `scene.unit_settings.scale_length = 1/--unit-scale`, so a
+1 x 1 x 1 Blender-unit cube lands as 39.3701^3 with `UnitScaleFactor 2.54` (one file unit = 2.54 cm =
+one inch). The geometry's applied scale stays 1 and the axis conversion stays baked into the vertices,
+so no node in the file carries a scale; Blender's own importer then returns a uniform `0.0254` in
+`verdict.reimport_scale` (inch -> metre), which is why the round-trip check compares world extents
+rather than absolute scale.
+
+Proof on the real pipeline (job `eefa8331d9cf4056`, desktop-pc, 2026-10-24): the bridge reported
+`normalise.bbox_units` 32.98 x 11.67 x 39.45 in and read `exported_units` 32.8609 x 11.6758 x 39.3807
+in back out of the written FBX (0.36% under `bbox_units` — the decimated mesh against the high-poly
+body — and 0.02% against the mesh that was exported). The compiled `.vmdl_c` of that FBX (build
+`b-d1a37806`) reports `m_vMinBounds` `[-5.7987, -16.4322, -0.0053]` and `m_vMaxBounds`
+`[5.8770, 16.4286, 39.3755]`, an extent of 11.6758 x 32.8609 x 39.3807 in. Source's FBX importer maps
+the file's (X, Y, Z) onto (Source -Z, X, Y), so the horizontal axes arrive swapped relative to
+`bbox_units` — a convention of the importer, not of the export — while the three sizes and the z-up
+base (min z ~ 0) are the bridge's own. The pre-fix artifact compiled from the centimetre FBX measured
+29.64 x 83.77 x 100.20: the same box, 2.54x bigger. Reports:
+`docs/evidence/hammered/tsr_eefa8331_units_bridge.json` and
+`docs/evidence/hammered/b-d1a37806_compile.log`.
 
 ## Pinned Source2Viewer-CLI (reference decompiles only)
 

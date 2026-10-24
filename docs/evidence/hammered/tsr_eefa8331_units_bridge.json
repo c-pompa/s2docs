@@ -1,0 +1,544 @@
+{
+  "tool": "glb_to_fbx_uv",
+  "script_sha256": "126c5f4161298d15973941dd58a2159ea677b3c814771a3e340f8c9c1506dc9e",
+  "blender": "4.5.15 LTS",
+  "args": {
+    "glb": "D:\\Docker\\triposr\\triposr_data\\outputs\\eefa8331d9cf4056\\mesh.glb",
+    "out_dir": "D:\\Docker\\triposr\\triposr_data\\fbx\\eefa8331_units",
+    "name": "tsr_eefa8331",
+    "res": 2048,
+    "target_tris": 5000,
+    "angle_limit": 66.0,
+    "island_margin_px": 8.0,
+    "bake_margin": 16,
+    "samples": 4,
+    "ao_samples": 16,
+    "cage_pct": 2.0,
+    "ao_distance_pct": 50.0,
+    "unit_scale": 39.3700787,
+    "shade": "smooth",
+    "vertex_color_space": "srgb",
+    "export_vertex_colors": false,
+    "verify_source": true,
+    "material_path": "materials/hammered/tsr_eefa8331/tsr_eefa8331.vmat",
+    "force": true
+  },
+  "input": {
+    "glb": "D:\\Docker\\triposr\\triposr_data\\outputs\\eefa8331d9cf4056\\mesh.glb",
+    "bytes": 1175796,
+    "sha256": "a4445ebb85357362c2aebededbfae8b0ef81665b63013d89012f6dbb9eb79e16",
+    "generator": "https://github.com/mikedh/trimesh",
+    "primitives": 1,
+    "attributes": [
+      "COLOR_0",
+      "POSITION"
+    ],
+    "materials": 0,
+    "textures": 0,
+    "images": 0,
+    "vertices": 29401,
+    "mesh_names": [
+      "geometry_0"
+    ],
+    "node_names": [
+      "world",
+      "geometry_0"
+    ],
+    "objects": [
+      "geometry_0"
+    ],
+    "body_objects_joined": 1,
+    "collision_objects": []
+  },
+  "normalise": {
+    "unit": "Source unit (1 unit = 1 inch)",
+    "unit_scale": 39.3700787,
+    "unit_scale_basis": "1 Blender unit = 1 m = 39.3700787 in",
+    "bbox_bu": [
+      0.837701,
+      0.296423,
+      1.001963
+    ],
+    "bbox_units": [
+      32.98,
+      11.67,
+      39.45
+    ],
+    "pivot_bu": [
+      -0.013858,
+      0.05884,
+      0.502287
+    ],
+    "pivot_units": [
+      -0.55,
+      2.32,
+      19.78
+    ],
+    "pivot_rule": "bbox x/y centre and min z -> origin (0,0,0); object transform identity, no scale node",
+    "z_up": true,
+    "bbox_min_after_bu": [
+      -0.41885,
+      -0.148211,
+      0.0
+    ],
+    "object_scale": [
+      1.0,
+      1.0,
+      1.0
+    ],
+    "object_rotation_deg": [
+      0.0,
+      0.0,
+      0.0
+    ]
+  },
+  "collision": {
+    "present": false,
+    "name": "tsr_eefa8331_collision",
+    "exported": false,
+    "decimated": false,
+    "uv_unwrapped": false
+  },
+  "decimate": {
+    "enabled": true,
+    "target_tris": 5000,
+    "tris_in": 58696,
+    "tris_out": 4900,
+    "ratio": 0.083481,
+    "target_ratio": 0.085185,
+    "passes": [
+      {
+        "ratio": 0.083481,
+        "tris": 4900
+      }
+    ],
+    "within_budget": true
+  },
+  "uv": {
+    "layer": "UVMap",
+    "method": "smart_project",
+    "angle_limit_deg": 66.0,
+    "island_margin": 0.003906,
+    "islands": 432,
+    "uv_area_frac": 0.2899,
+    "zero_area_triangles": 0,
+    "in_unit_square": true,
+    "ok": true
+  },
+  "mesh": {
+    "vertices": 2488,
+    "faces": 4900,
+    "triangles": 4900,
+    "colour_source": "glb COLOR_0 bytes (vertex order verified against POSITION)",
+    "vertex_color_space": "srgb",
+    "colour_mean_255": [
+      106.51,
+      131.9,
+      142.25
+    ],
+    "world_extent_bu": [
+      0.8347,
+      0.2966,
+      1.0003
+    ],
+    "high_poly": {
+      "vertices": 29401,
+      "triangles": 58696
+    },
+    "colour_transfer": {
+      "method": "nearest point on the high-poly surface, barycentric over the hit triangle",
+      "vertices_sampled": 2488,
+      "vertices_unmatched": 0,
+      "distance_bu_mean": 0.000593,
+      "distance_bu_max": 0.003294,
+      "distance_frac_of_bbox_max": 0.00246
+    }
+  },
+  "bake": {
+    "texels_written_frac": 0.5597,
+    "triangles_checked": 4900,
+    "centroid_texel_unbaked": 2,
+    "unbaked_tri_uv_area_texels_max": 24.104,
+    "texel_mean_255": [
+      105.39,
+      136.18,
+      153.95
+    ],
+    "texel_std_255": [
+      35.6,
+      20.11,
+      44.03
+    ],
+    "baked_abs_err_mean_255": 0.463,
+    "baked_abs_err_p95_255": 1.471,
+    "baked_abs_err_p999_255": 4.947,
+    "baked_abs_err_max_255": 5.303,
+    "baked_frac_err_gt_8": 0.0,
+    "final_abs_err_mean_255": 0.486,
+    "final_abs_err_p95_255": 1.476,
+    "final_abs_err_p999_255": 5.029,
+    "final_abs_err_max_255": 153.426,
+    "final_frac_err_gt_8": 0.00041,
+    "ok": true,
+    "type": "EMIT",
+    "engine": "CYCLES/CPU",
+    "res": 2048,
+    "samples": 4,
+    "margin_px": 16,
+    "margin_type": "ADJACENT_FACES"
+  },
+  "normal_bake": {
+    "unbaked_frac": 0.4474,
+    "texels_baked": 2317770,
+    "triangles_checked": 4900,
+    "centroid_texel_unbaked": 2,
+    "centroid_texel_unbaked_frac": 0.00041,
+    "encoded_mean_255": [
+      126.62,
+      126.72,
+      247.27
+    ],
+    "encoded_std_255": [
+      33.02,
+      27.51,
+      15.89
+    ],
+    "mean_angle_deg": 17.255,
+    "p95_angle_deg": 41.015,
+    "max_angle_deg": 179.289,
+    "frac_within_2deg": 0.02418,
+    "frac_off_sphere": 0.0,
+    "ok": true,
+    "type": "NORMAL",
+    "space": "TANGENT",
+    "engine": "CYCLES/CPU",
+    "res": 2048,
+    "samples": 1,
+    "source": "high-poly",
+    "cage_extrusion_bu": 0.026785,
+    "margin_px": 16,
+    "control": {
+      "kind": "self-bake of the decimated mesh (no high-poly)",
+      "diff_mean_255": 12.743,
+      "diff_p95_255": 70.0,
+      "diff_frac_gt4": 0.9805
+    }
+  },
+  "ao_bake": {
+    "unbaked_frac": 0.44031,
+    "texels_baked": 2347527,
+    "triangles_checked": 4900,
+    "centroid_texel_unbaked": 2,
+    "centroid_texel_unbaked_frac": 0.00041,
+    "mean": 0.8941,
+    "min": 0.0,
+    "p1": 0.4179,
+    "p5": 0.624,
+    "p50": 0.9387,
+    "frac_below_0_8": 0.1631,
+    "mean_encoded_255": 241.92,
+    "ok": true,
+    "type": "AO",
+    "engine": "CYCLES/CPU",
+    "res": 2048,
+    "samples": 16,
+    "source": "high-poly",
+    "distance_bu": 0.669615,
+    "distance_pct_of_bbox": 50.0,
+    "control": {
+      "kind": "high-poly moved 10 bbox diagonals away",
+      "diff_mean_255": 48.571,
+      "diff_p95_255": 152.262,
+      "diff_frac_gt4": 0.997
+    }
+  },
+  "material": {
+    "name": "materials/hammered/tsr_eefa8331/tsr_eefa8331.vmat",
+    "kind": "Principled BSDF, Base Color <- colour PNG, Normal <- normal PNG",
+    "textures": {
+      "color": "tsr_eefa8331_color.png",
+      "normal": "tsr_eefa8331_normal.png"
+    },
+    "unwired": {
+      "ao": "Principled BSDF has no AO input; the .vmat key TextureAmbientOcclusion points at tsr_eefa8331_ao.png"
+    }
+  },
+  "textures": {
+    "color": {
+      "path": "D:\\Docker\\triposr\\triposr_data\\fbx\\eefa8331_units\\tsr_eefa8331.fbm\\tsr_eefa8331_color.png",
+      "relpath": "tsr_eefa8331.fbm/tsr_eefa8331_color.png",
+      "bytes": 2526746,
+      "sha256": "9caab2d41333556c6ac214f112abc9d7b0584cf6f226448c78a2788f50a49673",
+      "copied_by_exporter": true
+    },
+    "normal": {
+      "path": "D:\\Docker\\triposr\\triposr_data\\fbx\\eefa8331_units\\tsr_eefa8331.fbm\\tsr_eefa8331_normal.png",
+      "relpath": "tsr_eefa8331.fbm/tsr_eefa8331_normal.png",
+      "bytes": 3110940,
+      "sha256": "75e0e66d42e8693c8466efb462a2d213c9313c9681a2bc66f9228030481f34a5",
+      "copied_by_exporter": true
+    },
+    "ao": {
+      "path": "D:\\Docker\\triposr\\triposr_data\\fbx\\eefa8331_units\\tsr_eefa8331.fbm\\tsr_eefa8331_ao.png",
+      "relpath": "tsr_eefa8331.fbm/tsr_eefa8331_ao.png",
+      "bytes": 2731642,
+      "sha256": "8fafa604fd5b037c6b95b0f2c1e5b38769ab6da6496c80f5b3726fc757c39ee9",
+      "copied_by_exporter": false
+    }
+  },
+  "texture": {
+    "path": "D:\\Docker\\triposr\\triposr_data\\fbx\\eefa8331_units\\tsr_eefa8331.fbm\\tsr_eefa8331_color.png",
+    "relpath": "tsr_eefa8331.fbm/tsr_eefa8331_color.png",
+    "bytes": 2526746,
+    "sha256": "9caab2d41333556c6ac214f112abc9d7b0584cf6f226448c78a2788f50a49673",
+    "copied_by_exporter": true
+  },
+  "vmat": {
+    "path": "materials/hammered/tsr_eefa8331/tsr_eefa8331.vmat",
+    "dir": "materials/hammered/tsr_eefa8331",
+    "layer0": [
+      [
+        "shader",
+        "csgo_vertexlitgeneric.vfx"
+      ],
+      [
+        "TextureMetalness",
+        "[0.000000 0.000000 0.000000 0.000000]"
+      ],
+      [
+        "TextureAmbientOcclusion",
+        "materials/hammered/tsr_eefa8331/tsr_eefa8331_ao.png"
+      ],
+      [
+        "TextureColor",
+        "materials/hammered/tsr_eefa8331/tsr_eefa8331_color.png"
+      ],
+      [
+        "TextureNormal",
+        "materials/hammered/tsr_eefa8331/tsr_eefa8331_normal.png"
+      ],
+      [
+        "TextureRoughness",
+        "materials/default/default_rough.tga"
+      ]
+    ],
+    "textures": {
+      "TextureColor": "materials/hammered/tsr_eefa8331/tsr_eefa8331_color.png",
+      "TextureNormal": "materials/hammered/tsr_eefa8331/tsr_eefa8331_normal.png",
+      "TextureAmbientOcclusion": "materials/hammered/tsr_eefa8331/tsr_eefa8331_ao.png"
+    }
+  },
+  "fbx": {
+    "path": "D:\\Docker\\triposr\\triposr_data\\fbx\\eefa8331_units\\tsr_eefa8331.fbx",
+    "bytes": 202284,
+    "sha256": "d7fe62791c0f4d7ab6531e7e089ca7102e98c55dc47f05a55b81ad0b4894d64e",
+    "scan": {
+      "binary": true,
+      "LayerElementUV": 2,
+      "LayerElementNormal": 2,
+      "LayerElementMaterial": 2,
+      "LayerElementColor": 0,
+      "texture_refs": {
+        "tsr_eefa8331_color.png": 7,
+        "tsr_eefa8331_normal.png": 7,
+        "tsr_eefa8331_ao.png": 0
+      }
+    }
+  },
+  "export_units": {
+    "unit": "Source unit (1 unit = 1 inch)",
+    "unit_scale": 39.3700787,
+    "exporter": {
+      "global_scale": 39.3700787,
+      "apply_unit_scale": true,
+      "apply_scale_options": "FBX_SCALE_UNITS",
+      "scene_scale_length": 0.0254,
+      "expected_unit_scale_factor": 2.54
+    },
+    "file": {
+      "path": "D:\\Docker\\triposr\\triposr_data\\fbx\\eefa8331_units\\tsr_eefa8331.fbx",
+      "version": 7400,
+      "unit_scale_factor": 2.54,
+      "unit_scale_factor_declared": true,
+      "unit_inches": 1.0,
+      "unit_note": "FBX UnitScaleFactor is cm per file unit: 1.0 = centimetre, 2.54 = inch",
+      "axis_order": "extent is raw (X, Y, Z); extent_z_up is (X, Z, Y), the frame bbox_units uses",
+      "objects": [
+        {
+          "uid": 612819758,
+          "name": "tsr_eefa8331",
+          "vertices": 2488,
+          "extent": [
+            32.8609,
+            39.3807,
+            11.6758
+          ],
+          "extent_z_up": [
+            32.8609,
+            11.6758,
+            39.3807
+          ]
+        }
+      ]
+    },
+    "body_name": "tsr_eefa8331",
+    "intended_units": [
+      32.98,
+      11.67,
+      39.45
+    ],
+    "mesh_units": [
+      32.8622,
+      11.6772,
+      39.3819
+    ],
+    "exported_units": [
+      32.8609,
+      11.6758,
+      39.3807
+    ],
+    "check_vs_mesh": {
+      "expected": [
+        32.8622,
+        11.6772,
+        39.3819
+      ],
+      "measured": [
+        32.8609,
+        11.6758,
+        39.3807
+      ],
+      "ratio": [
+        0.99996,
+        0.99988,
+        0.99997
+      ],
+      "max_rel_err": 0.00012,
+      "tolerance": 0.005,
+      "ok": true
+    },
+    "check_vs_intended": {
+      "expected": [
+        32.98,
+        11.67,
+        39.45
+      ],
+      "measured": [
+        32.8609,
+        11.6758,
+        39.3807
+      ],
+      "ratio": [
+        0.99639,
+        1.0005,
+        0.99824
+      ],
+      "max_rel_err": 0.00361,
+      "tolerance": 0.05,
+      "ok": true
+    },
+    "unit_scale_factor_matches": true,
+    "ok": true
+  },
+  "reimport": [
+    {
+      "name": "tsr_eefa8331",
+      "type": "MESH",
+      "vertices": 2488,
+      "faces": 4900,
+      "triangles": 4900,
+      "uv_layers": [
+        "UVMap"
+      ],
+      "materials": [
+        {
+          "name": "materials/hammered/tsr_eefa8331/tsr_eefa8331.vmat",
+          "images": [
+            {
+              "file": "tsr_eefa8331_color.png",
+              "exists": true,
+              "size": [
+                2048,
+                2048
+              ]
+            },
+            {
+              "file": "tsr_eefa8331_normal.png",
+              "exists": true,
+              "size": [
+                2048,
+                2048
+              ]
+            }
+          ]
+        }
+      ],
+      "color_attributes": [],
+      "smooth_face_frac": 1.0,
+      "world_extent_bu": [
+        0.8347,
+        0.2966,
+        1.0003
+      ],
+      "world_bbox_min_bu": [
+        -0.417378,
+        -0.149277,
+        -0.000134
+      ],
+      "rotation_deg": [
+        90.0,
+        -0.0,
+        0.0
+      ],
+      "scale": [
+        0.0254,
+        0.0254,
+        0.0254
+      ]
+    }
+  ],
+  "timings": {
+    "import_s": 0.1,
+    "decimate_s": 0.57,
+    "transfer_s": 0.26,
+    "uv_s": 0.03,
+    "bake_s": 3.39,
+    "normal_bake_s": 3.42,
+    "ao_bake_s": 6.47,
+    "normal_control_s": 2.67,
+    "ao_control_s": 2.48,
+    "export_s": 0.02,
+    "reimport_s": 0.12,
+    "total_s": 19.62
+  },
+  "material_path_check": {
+    "expected": "materials/hammered/tsr_eefa8331/tsr_eefa8331.vmat",
+    "reimported": [
+      "materials/hammered/tsr_eefa8331/tsr_eefa8331.vmat"
+    ],
+    "body_materials": [
+      "materials/hammered/tsr_eefa8331/tsr_eefa8331.vmat"
+    ],
+    "survived": true
+  },
+  "verdict": {
+    "fbx_has_uv": true,
+    "fbx_has_material": true,
+    "fbx_texture_resolves": true,
+    "baked_texture": true,
+    "normal_map_baked": true,
+    "ao_map_baked": true,
+    "within_triangle_budget": true,
+    "no_scale_node": true,
+    "extent_preserved": true,
+    "uv_usable": true,
+    "collision_exported": true,
+    "material_path_survived": true,
+    "export_units_ok": true,
+    "reimport_scale": [
+      0.0254,
+      0.0254,
+      0.0254
+    ]
+  }
+}

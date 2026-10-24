@@ -1,0 +1,36 @@
+=== compile C:\Program Files (x86)\Steam\steamapps\common\Counter-Strike Global Offensive\content\csgo_addons\hammered_units_probe\models\tsr_eefa8331\tsr_eefa8331.vmdl
+No display adapters found. Falling back to software rasterizer. (nAdapterCount=0, nAdapter=0)
+- csgo_addons\hammered_units_probe\models\tsr_eefa8331\tsr_eefa8331.vmdl
+- csgo_addons\hammered_units_probe\materials\hammered\tsr_eefa8331\tsr_eefa8331.vmat
+  +- csgo_addons\hammered_units_probe\materials\hammered\tsr_eefa8331\tsr_eefa8331_ao_png_43e04446.vtex
+       Read 1 Input(s): 64ms
+       Generated Mips and Output: 23ms
+       Encoding 2048x2048x1 texture to ATI1N (Q=3): 97ms
+       Compressed lz4 2688kb -> on disk 1511kb (56%): 61ms
+  +- csgo_addons\hammered_units_probe\materials\hammered\tsr_eefa8331\tsr_eefa8331_vmat_g_tmetalness_ee87d4b4.vtex
+       Read 1 Input(s): 0ms
+       Generated Mips and Output: 0ms
+       Encoding 4x4x1 texture to DXT1 (Q=3): 0ms
+  +- csgo_addons\hammered_units_probe\materials\hammered\tsr_eefa8331\tsr_eefa8331_color_png_c39ecddf.vtex
+       Read 1 Input(s): 54ms
+       Generated Mips and Output: 22ms
+       Encoding 2048x2048x1 texture to DXT1 (Q=3): 378ms
+       Compressed lz4 2730kb -> on disk 1314kb (48%): 69ms
+  +- csgo_addons\hammered_units_probe\materials\hammered\tsr_eefa8331\tsr_eefa8331_normal_png_57f19f4d.vtex
+       Read 2 Input(s): 58ms
+       Ran Texture Processors: 4ms
+       Generated Mips and Output: 74ms
+       Encoding 2048x2048x1 texture to BC7 (Q=3): 2712ms
+       Compressed lz4 5461kb -> on disk 2951kb (54%): 137ms
+
+-----------------------------------------------------------------
+ OK: 1 compiled, 0 failed, 0 skipped, 0m:04s
+-----------------------------------------------------------------
+=== artifacts
+ART game\csgo_addons\hammered_units_probe\materials\hammered\tsr_eefa8331\tsr_eefa8331.vmat_c 3716
+ART game\csgo_addons\hammered_units_probe\materials\hammered\tsr_eefa8331\tsr_eefa8331_ao_png_43e04446.vtex_c 1549549
+ART game\csgo_addons\hammered_units_probe\materials\hammered\tsr_eefa8331\tsr_eefa8331_color_png_c39ecddf.vtex_c 1348722
+ART game\csgo_addons\hammered_units_probe\materials\hammered\tsr_eefa8331\tsr_eefa8331_normal_png_57f19f4d.vtex_c 3024255
+ART game\csgo_addons\hammered_units_probe\materials\hammered\tsr_eefa8331\tsr_eefa8331_vmat_g_tmetalness_ee87d4b4.vtex_c 1992
+ART game\csgo_addons\hammered_units_probe\models\tsr_eefa8331\tsr_eefa8331.vmdl_c 82487
+=== exit 0
