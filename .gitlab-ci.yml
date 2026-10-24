@@ -12,6 +12,10 @@
 workflow:
   name: "s2docs: hermes-pr-feedback-ci + cpompa-hermes-ci"
   rules:
+    # a manual run (web/API) must always be possible: after a runner or CI change it is the
+    # only way to re-verify without inventing a commit, and the "open MR" rule below
+    # would otherwise skip it in favour of an MR pipeline that may not exist yet.
+    - if: $CI_PIPELINE_SOURCE == "web" || $CI_PIPELINE_SOURCE == "api"
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
     - if: $CI_COMMIT_BRANCH && $CI_OPEN_MERGE_REQUESTS
       when: never # the merge-request pipeline covers this push
