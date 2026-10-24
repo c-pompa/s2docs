@@ -61,11 +61,12 @@ git -C "$TREE" rev-parse --git-dir >/dev/null 2>&1 || ci_die 2 "unreadable input
 [ "$(git -C "$TREE" rev-parse --is-shallow-repository)" = "false" ] ||
     ci_die 2 "$TREE is a shallow clone; the pinned commit may be cut off (CI needs GIT_DEPTH: 0)"
 if ! git -C "$TREE" cat-file -e "${sha}^{commit}" 2>/dev/null; then
-    echo "FAIL HPF-008: the pinned commit $sha is not in this repository's history"
+    echo "FAIL HPF-008: the pinned commit $sha is not in this repository's history; pin a commit already on the integration branch (dev/main); feature branches are squash-merged, so their commits never reach main."
     exit 1
 fi
 if ! git -C "$TREE" merge-base --is-ancestor "$sha" HEAD; then
     echo "FAIL HPF-008: the pinned commit $sha is not an ancestor of HEAD; the plugin would launch code this branch does not contain"
+    echo "FAIL HPF-008: pin a commit already on the integration branch (dev/main); feature branches are squash-merged, so their commits never reach main."
     exit 1
 fi
 

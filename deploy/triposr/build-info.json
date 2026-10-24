@@ -1,0 +1,9 @@
+{
+  "base_image": "python:3.12-slim-bookworm@sha256:6a0e06f5ba0b373d051aabd3fffb9b873f27f9a2a3a14bcbe37dee6f0e3bbc70",
+  "python": "3.12.15",
+  "torch": "2.5.1+cu124",
+  "torch_cuda": "12.4",
+  "triposr_sha": "107cefdc244c39106fa830359024f6a2f1c78871",
+  "triposr_commit": "107cefdc244c39106fa830359024f6a2f1c78871 2026-06-04T15:11:09+08:00 Update README.md",
+  "torchmcubes_sha": "a9ac95aa329957ba646e7bb057f825f5dfa77f38"
+}

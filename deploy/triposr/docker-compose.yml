@@ -1,0 +1,59 @@
+# TripoSR image -> mesh worker (Hammered `route: "local"` mesh stage) on build-pc / RTX 3080.
+# See README.md next to this file for the API, pins, measured VRAM and the proof commands.
+#
+# Exposure (do not relax):
+#   * Docker publishes on Windows LOOPBACK only (127.0.0.1:18191). This Docker Desktop
+#     (gvisor networking) silently drops a publish on a specific LAN IP, so LAN reach is a
+#     Windows portproxy bound to the LAN IP alone, plus a firewall rule that admits the mini only:
+#       netsh interface portproxy add v4tov4 listenaddress=192.0.2.10 listenport=8191 connectaddress=127.0.0.1 connectport=18191
+#       New-NetFirewallRule -DisplayName "TripoSR worker 8191 (mini only)" -Direction Inbound -Action Allow `
+#         -Protocol TCP -LocalAddress 192.0.2.10 -LocalPort 8191 -RemoteAddress 192.0.2.20 -Profile Private
+#     Never publish "8191:8000" / 0.0.0.0 here. No tailnet listener, no cloudflared, no quick tunnels.
+#   * Auth is required: /v1/* needs `Authorization: Bearer <TSR_API_TOKEN>`; the token lives only in
+#     .env next to this file (never commit it). `docker compose up` refuses to start without it.
+#   * The worker never fetches URLs itself: upload / image_b64 only; `image_url` -> 422 (no SSRF).
+#     There is no setting to turn URL fetch on: the code path does not exist.
+#   * One uvicorn process -- no supervisor, no UI. TSR_IDLE_EXIT=1: after the idle unload the process
+#     exits and `restart: unless-stopped` brings up a fresh one, so an idle worker holds 0 MiB VRAM.
+#
+#   cd D:\Docker\triposr
+#   docker compose up -d --no-build      # image triposr-worker:local is already built (build-2-pinned.log)
+#   docker compose build                 # only if Dockerfile/requirements/constraints/app change
+#   docker compose run --rm -e HF_HUB_OFFLINE=0 triposr python /app/fetch_weights.py   # once, weights
+name: triposr
+services:
+  triposr:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: triposr-worker:local
+    container_name: triposr-worker
+    restart: unless-stopped
+    runtime: nvidia
+    ports:
+      - "127.0.0.1:18191:8000"
+    volumes:
+      - ./triposr_data/models:/models
+      - ./triposr_data/outputs:/outputs
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+      - HF_HOME=/models/hf
+      - HF_HUB_OFFLINE=1
+      - HF_HUB_DISABLE_TELEMETRY=1
+      - U2NET_HOME=/models/u2net
+      - TSR_OUTPUT_DIR=/outputs
+      - TSR_HOST_OUTPUT_DIR=D:\Docker\triposr\triposr_data\outputs
+      - TSR_API_TOKEN=${TSR_API_TOKEN:?TSR_API_TOKEN must be set in .env next to docker-compose.yml}
+      - TSR_REQUIRE_CUDA=1
+      - TSR_IDLE_UNLOAD_S=600
+      - TSR_IDLE_EXIT=1
+      - TSR_CHUNK_SIZE=8192
+      - TSR_MAX_QUEUE=8
+      - OMP_NUM_THREADS=4
+    mem_limit: 6g
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

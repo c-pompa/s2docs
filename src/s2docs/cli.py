@@ -256,18 +256,85 @@ def _cmd_asset(args: argparse.Namespace) -> int:
             f"run `s2docs scaffold {args.addon}` first",
             3,
         )
+    if args.kind == "material":
+        return _asset_material(args, root)
+    if not args.mesh:
+        return _fail("--mesh is required for a model (s2docs asset [model] --mesh models/<n>/<n>.fbx)", 2)
     target = root / "models" / args.name / f"{args.name}.vmdl"
     try:
-        doc = render_model_doc(args.name, args.mesh, translation=tuple(args.translate) if args.translate else None)
+        doc = render_model_doc(
+            args.name,
+            args.mesh,
+            translation=tuple(args.translate) if args.translate else None,
+            collision=args.collision_surface,
+            collision_mesh=args.collision_mesh,
+        )
         write_model_doc(target, doc, overwrite=args.force)
     except ModelDocError as exc:
         return _fail(str(exc), 2)
     rel = target.relative_to(root).as_posix()
-    payload = {"path": str(target), "addon": args.addon, "mesh": args.mesh, "bytes": len(doc.encode())}
-    _emit(args, payload, [
+    payload = {
+        "path": str(target),
+        "addon": args.addon,
+        "mesh": args.mesh,
+        "collision_surface": args.collision_surface,
+        "collision_mesh": args.collision_mesh or (args.mesh if args.collision_surface else None),
+        "bytes": len(doc.encode()),
+    }
+    lines = [
         f"wrote {rel} ({payload['bytes']} B)",
         f"  mesh reference: {args.mesh} (addon-relative)",
-        f"  compile it on a host: resourcecompiler -i <addon content>/{rel} -nop4",
+    ]
+    if args.collision_surface:
+        # The hull is selected by name inside the mesh file: PhysicsHullFile.name = <name>_collision.
+        lines.append(
+            f"  physics: PhysicsHullFile on {payload['collision_mesh']}, surface_prop "
+            f"{args.collision_surface!r}, mesh name {args.name}_collision"
+        )
+    else:
+        lines.append("  no physics node (pass --collision-surface <surfaceproperties name> to add one)")
+    lines.append(f"  compile it on a host: resourcecompiler -i <addon content>/{rel} -nop4")
+    _emit(args, payload, lines)
+    return 0
+
+
+def _asset_material(args: argparse.Namespace, root) -> int:
+    """`s2docs asset material`: write materials/hammered/<name>/<name>.vmat + the PNGs beside it.
+
+    The colour PNG's baked ``<name>_normal.png`` / ``<name>_ao.png`` siblings are picked up from the
+    same folder automatically: the bridge writes all three into one ``.fbm`` dir, so the one command a
+    user runs after a bake is this one, with ``--color`` pointing at the colour map.
+    """
+    from pathlib import Path
+
+    from s2docs.asset.material import (
+        BAKED_MAP_VMAT_KEY,
+        DEFAULT_SHADER,
+        MaterialError,
+        baked_texture_path,
+        color_texture_path,
+        find_baked_maps,
+        material_path,
+        write_vmat,
+    )
+
+    if not args.color:
+        return _fail("--color <baked colour .png> is required for a material", 2)
+    shader = args.shader or DEFAULT_SHADER
+    try:
+        target = write_vmat(root, args.name, Path(args.color), shader=shader, force=args.force)
+    except MaterialError as exc:
+        return _fail(str(exc), 2)
+    rel = material_path(args.name)
+    baked = {kind: baked_texture_path(args.name, kind) for kind in find_baked_maps(Path(args.color))}
+    textures = {"TextureColor": color_texture_path(args.name),
+                **{BAKED_MAP_VMAT_KEY[kind]: path for kind, path in baked.items()}}
+    payload = {"path": str(target), "addon": args.addon, "material": rel, "shader": shader,
+               "textures": textures, "bytes": target.stat().st_size}
+    _emit(args, payload, [
+        f"wrote {rel} ({payload['bytes']} B, shader {shader})",
+        *(f"  {key}: {path}" for key, path in textures.items()),
+        f"  the FBX material must be named exactly {rel!r} (glb_to_fbx_uv.py --material-path)",
     ])
     return 0
 
@@ -1001,13 +1068,25 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--game", default="cs2", choices=["cs2"])
     p.set_defaults(fn=_cmd_scaffold)
 
-    p = sub.add_parser("asset", help="Author Source 2 asset documents (model .vmdl) in an addon")
+    p = sub.add_parser("asset", help="Author Source 2 asset documents (model .vmdl, material .vmat) in an addon")
+    p.add_argument("kind", nargs="?", choices=["model", "material"], default="model",
+                   help="What to write (default: model)")
     p.add_argument("--addon", required=True, help="Addon name in the local workspace")
-    p.add_argument("--name", required=True, help="Model name (addon-safe: [a-z][a-z0-9_]+)")
-    p.add_argument("--mesh", required=True, help="Addon-relative mesh path, e.g. models/probe/probe.dmx")
+    p.add_argument("--name", required=True, help="Model/material name (addon-safe: [a-z][a-z0-9_]+)")
+    p.add_argument("--mesh", help="model: addon-relative mesh path, e.g. models/probe/probe.dmx")
     p.add_argument("--translate", nargs=3, type=float, metavar=("X", "Y", "Z"),
-                   help="Optional ModelModifier_Translate for the whole model")
-    p.add_argument("--force", action="store_true", help="Replace an existing .vmdl")
+                   help="model: optional ModelModifier_Translate for the whole model")
+    p.add_argument("--collision-surface", metavar="SURFACEPROP",
+                   help="model: a surfaceproperties name (rock, metal, metal_barrel) — adds the "
+                        "PhysicsHullFile node with that surface_prop; omit for no physics node")
+    p.add_argument("--collision-mesh", metavar="PATH",
+                   help="model: addon-relative mesh holding the collision (default: the render mesh). "
+                        "The hull is selected inside it by the name <name>_collision; requires "
+                        "--collision-surface")
+    p.add_argument("--color", help="material: the baked colour .png to copy beside the .vmat "
+                                   "(its _normal.png/_ao.png siblings are wired automatically)")
+    p.add_argument("--shader", help="material: an evidenced shader (default csgo_vertexlitgeneric.vfx)")
+    p.add_argument("--force", action="store_true", help="Replace an existing .vmdl / .vmat + texture")
     p.add_argument("--game", default="cs2", choices=["cs2"])
     p.set_defaults(fn=_cmd_asset)
 

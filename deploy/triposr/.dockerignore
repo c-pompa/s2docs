@@ -1,0 +1,10 @@
+triposr_data/
+proof/
+tools/
+*.log
+*.md
+*.csv
+.env
+*.bak*
+**/*.bak*
+__pycache__/

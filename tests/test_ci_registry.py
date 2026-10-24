@@ -84,7 +84,7 @@ def test_reviewer_rules_trace_to_their_review_and_house_rules_do_not(real):
         assert rule.source.startswith("https://github.com/NousResearch/hermes-agent/"), rule.id
         assert rule.feedback_id and rule.reviewer and rule.quote and rule.quote.strip(), rule.id
     for rule in real.for_pipeline("cpompa-hermes-ci"):
-        assert rule.source == "house rule", rule.id
+        assert rule.source == "house rule" or registry.HOUSE_FINDING_RE.fullmatch(rule.source), rule.id
         assert (rule.feedback_id, rule.reviewer, rule.quote, rule.pinned_server) == (None, None, None, False), rule.id
 
 
@@ -177,6 +177,21 @@ def test_planted_minimal_registry_is_valid(tmp_path):
     assert [r.id for r in reg.rules] == ["HPF-901", "CHC-PLANTED"]
 
 
+def test_a_house_rule_may_name_the_security_finding_it_answers(tmp_path):
+    finding = "coordinator security finding 2026-10-23: a runner mounted /var/run/docker.sock into job containers"
+    house = _house(tmp_path, source=finding)
+    _check(tmp_path, "cpompa-hermes-ci", "CHC-PLANTED", source=finding)
+    reg = registry.validate(_doc(_reviewer(tmp_path), house), tmp_path)
+    assert reg.get("CHC-PLANTED").source == finding
+
+
+def test_the_docker_socket_rule_answers_the_2026_10_23_finding(real):
+    rule = real.get("CHC-RUNNER-NO-DOCKER-SOCK")
+    assert rule.pipeline == "cpompa-hermes-ci"
+    assert rule.source.startswith("coordinator security finding 2026-10-23: ")
+    assert "/var/run/docker.sock" in rule.source
+
+
 def test_the_same_rule_id_in_both_pipelines_is_refused(tmp_path):
     reviewer = _reviewer(tmp_path)
     copy = _house(tmp_path, rid="HPF-901", concern="another-concern")  # the reviewer rule's id, claimed by the house
@@ -214,6 +229,10 @@ def test_two_pipelines_cannot_share_an_id_prefix(tmp_path):
                      id="house-rule-marked-pinned-server"),
         pytest.param(lambda r: _house(r, source=REVIEW), "a house rule's source must be exactly 'house rule'",
                      id="house-rule-claiming-a-review"),
+        pytest.param(lambda r: _house(r, source="coordinator security finding: socket mounted"),
+                     "a house rule's source must be exactly 'house rule'", id="house-finding-without-date"),
+        pytest.param(lambda r: _house(r, source="coordinator security finding 2026-10-23:"),
+                     "a house rule's source must be exactly 'house rule'", id="house-finding-without-text"),
         pytest.param(lambda r: _reviewer(r, source="house rule"), "source must link the upstream review",
                      id="reviewer-rule-without-review-url"),
         pytest.param(lambda r: _reviewer(r, quote=" "), "a reviewer rule needs quote",

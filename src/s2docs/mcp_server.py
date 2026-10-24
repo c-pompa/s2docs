@@ -16,7 +16,7 @@ from mcp.server.mcpserver.prompts.base import Prompt, PromptArgument
 from mcp_types import ToolAnnotations
 from pydantic import Field
 
-from s2docs import builds, deploys, evidence, hosts, jobs, test_runs
+from s2docs import assets, builds, deploys, evidence, hosts, jobs, test_runs
 from s2docs import models as m
 from s2docs.build import workspace as ws
 from s2docs.build.validate_cfg import validate_cfg as _validate_cfg
@@ -356,13 +356,34 @@ def create_mcp_server(db: Database, workspace: Path | None = None) -> MCPServer:
         mesh: str,
         game: GameId = "cs2",
         translate: list[float] | None = None,
+        collision_surface: Annotated[
+            str | None,
+            Field(
+                description="surfaceproperties entry the prop is given (rock, metal, metal_barrel). "
+                "When absent no physics node is written at all and the document is byte-identical to "
+                "one built without collision. When present the PhysicsHullFile points at the render "
+                "mesh and selects the mesh named <name>_collision inside it."
+            ),
+        ] = None,
+        collision_mesh: Annotated[
+            str | None,
+            Field(
+                description="addon-relative mesh file holding the collision (default: the render mesh, "
+                "which is the pipeline's one-FBX shape). When absent the hull comes from `mesh`. "
+                "Rejected when `collision_surface` is absent."
+            ),
+        ] = None,
         overwrite: bool = False,
     ) -> str:
         """Write a Source 2 model document (.vmdl) for a mesh that is already inside the addon.
 
         `mesh` is addon-relative (e.g. models/probe/probe.dmx). The document copies the shape the
         game's own compiler accepts — compile it on a host with resourcecompiler afterwards
-        (build_start). Returns the written path. Use overwrite=true to replace an existing .vmdl."""
+        (build_start). Returns the written path. Use overwrite=true to replace an existing .vmdl.
+
+        Pass `collision_surface` to give the prop physics: the Blender bridge puts the collision mesh
+        in the same FBX under the name `<name>_collision`, and the document selects it by that name.
+        Omit it (the default) and no physics block is written."""
         from s2docs.asset.model import render_model_doc, write_model_doc
         from s2docs.build.workspace import addon_root
 
@@ -376,7 +397,13 @@ def create_mcp_server(db: Database, workspace: Path | None = None) -> MCPServer:
             if translate is not None and len(translate) != 3:
                 raise ValueError("translate must be exactly 3 numbers (x, y, z)")
             shift = (translate[0], translate[1], translate[2]) if translate else None
-            doc = render_model_doc(name, mesh, translation=shift)
+            doc = render_model_doc(
+                name,
+                mesh,
+                translation=shift,
+                collision=collision_surface,
+                collision_mesh=collision_mesh,
+            )
             return str(write_model_doc(target, doc, overwrite=overwrite))
 
         return _ws(_write)
@@ -1060,6 +1087,100 @@ def create_mcp_server(db: Database, workspace: Path | None = None) -> MCPServer:
     ) -> m.Job:
         """queued/running -> cancelled; the reason is recorded as a timeline event."""
         return _jobs(lambda: jobs.cancel(db, job_id, reason=reason))
+
+    # ------------------------------------------------------------ asset catalog
+    # A promotion is a *claim* about existing records, so every write here goes through
+    # `s2docs.assets.promote` — the same gate the REST route calls; MCP is not a second implementation.
+    ASSETS_WRITE = ToolAnnotations(read_only_hint=False, destructive_hint=False, idempotent_hint=False)
+
+    def _assets(fn: Callable[[], T]) -> T:
+        try:
+            return fn()
+        except (assets.AssetError, NotFound) as exc:
+            raise ToolError(str(exc)) from exc
+
+    @server.tool(annotations=ASSETS_WRITE)
+    def asset_promote(
+        kind: Annotated[m.AssetKind, Field(description="model (Hammered prop chain) | action (cs_script)")],
+        name: Annotated[str, Field(description="Human name, shown on the catalog card")],
+        build_id: Annotated[
+            str | None,
+            Field(description="Build run id that compiled it (required); must have reached 'succeeded'"),
+        ] = None,
+        licence: Annotated[
+            str | None,
+            Field(description="Licence recorded at promotion (required) — never a Valve-derived asset"),
+        ] = None,
+        slug: Annotated[
+            str | None, Field(description="Stable lowercase kebab-case handle; derived from name when omitted")
+        ] = None,
+        prompt: Annotated[str | None, Field(description="The prompt the asset came from")] = None,
+        concept_artifact: Annotated[str | None, Field(description="Concept image artifact (path or URL)")] = None,
+        mesh_sha256: Annotated[str | None, Field(description="GLB content hash, 64 hex characters")] = None,
+        tris: Annotated[int | None, Field(ge=0, description="Triangle count of the source mesh")] = None,
+        vmdl_path: Annotated[str | None, Field(description="Compiled .vmdl path (linked, not copied)")] = None,
+        vmat_path: Annotated[str | None, Field(description="Compiled .vmat path (linked, not copied)")] = None,
+        deploy_id: Annotated[str | None, Field(description="Deployment id that shipped these bytes")] = None,
+        frame_job_id: Annotated[
+            str | None,
+            Field(description="Job id whose in-game frame proves it renders (required for kind=model)"),
+        ] = None,
+        frame_artifact: Annotated[
+            str | None,
+            Field(description="Frame artifact name (or its /api/artifacts URL) the job stored (required for model)"),
+        ] = None,
+        tags: Annotated[list[str] | None, Field(description="Lowercase tags for the catalog filters")] = None,
+        created_by: Annotated[str | None, Field(description="Session/subagent that promoted it")] = None,
+    ) -> m.Asset:
+        """Promote a finished chain into the asset catalog (what the user made, and the proof it works).
+
+        The server enforces the gates, so a rejected call means the evidence is not there yet:
+        the build must be 'succeeded'; a `model` must name a job and a frame artifact that job actually
+        stored, and that job's verdict must not be fail (a job with no verdict is not a pass either);
+        `licence` is required. A duplicate slug is a conflict. Provenance is append-only — retiring an
+        asset later keeps every link.
+        """
+        return _assets(
+            lambda: assets.promote(
+                db,
+                kind=kind,
+                name=name,
+                build_id=build_id,
+                licence=licence,
+                slug=slug,
+                prompt=prompt,
+                concept_artifact=concept_artifact,
+                mesh_sha256=mesh_sha256,
+                tris=tris,
+                vmdl_path=vmdl_path,
+                vmat_path=vmat_path,
+                deploy_id=deploy_id,
+                frame_job_id=frame_job_id,
+                frame_artifact=frame_artifact,
+                tags=tags,
+                created_by=created_by,
+            )
+        )
+
+    @server.tool(annotations=READ_ONLY)
+    def asset_list(
+        kind: Annotated[m.AssetKind | None, Field(description="model | action")] = None,
+        tag: Annotated[str | None, Field(description="One tag (lowercased on write)")] = None,
+        include_retired: Annotated[bool, Field(description="Include soft-retired assets")] = False,
+    ) -> list[m.Asset]:
+        """The catalog, newest first, optionally filtered by kind and/or one tag.
+
+        Retired assets are hidden by default; `include_retired=true` brings them back. Each row's
+        `build_id` / `deploy_id` / `frame_job_id` feed asset_get and the existing job/build tools.
+        """
+        return _assets(lambda: assets.list_assets(db, kind=kind, tag=tag, include_retired=include_retired))
+
+    @server.tool(annotations=READ_ONLY)
+    def asset_get(
+        asset_id: Annotated[str, Field(description="Asset id ('a-1a2b3c4d') or its slug")],
+    ) -> m.Asset:
+        """One catalog entry by id or slug, with its build/deploy/frame-job ids and retirement state."""
+        return _assets(lambda: assets.resolve(db, asset_id))
 
     # -------------------------------------------------------------- resources
     @server.resource(

@@ -63,7 +63,7 @@ def test_migration_0014_adds_jobs_origin_and_defaults_existing_rows_to_agent(tmp
     conn.execute("INSERT INTO jobs (id, kind, title, target, status) VALUES ('j-old', 'test', 't', 'x@a', 'passed')")
     conn.commit()
 
-    assert connection.migrate(conn) == 14
+    assert connection.migrate(conn) == 15
     cols = {r["name"]: r for r in conn.execute("PRAGMA table_info(jobs)")}
     assert "origin" in cols, "jobs.origin is missing"
     assert cols["origin"]["dflt_value"] == "'agent'", cols["origin"]
@@ -81,7 +81,7 @@ def test_migration_0014_keeps_the_timeline_and_the_queue_indexes(tmp_path: Path)
     conn.execute("INSERT INTO job_links (job_id, kind, ref_id) VALUES ('j-1', 'build', 'b-1')")
     conn.commit()
 
-    assert connection.migrate(conn) == 14
+    assert connection.migrate(conn) == 15
     assert conn.execute("SELECT count(*) FROM job_events").fetchone()[0] == 1
     assert conn.execute("SELECT count(*) FROM job_links").fetchone()[0] == 1
     assert {r["name"] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='index'")} >= {
