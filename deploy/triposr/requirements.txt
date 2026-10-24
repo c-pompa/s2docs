@@ -1,0 +1,20 @@
+# TripoSR runtime deps (upstream requirements.txt pins kept where they shape the model:
+# omegaconf/einops/transformers/trimesh/Pillow). gradio/imageio-ffmpeg/xatlas/moderngl are
+# UI/video/texture-bake extras the worker does not use. numpy stays 1.x for
+# transformers 4.35 + trimesh 4.0.5; rembg 2.0.69 is the last release that allows it.
+numpy==1.26.4
+omegaconf==2.3.0
+Pillow==10.1.0
+einops==0.7.0
+transformers==4.35.0
+tokenizers==0.14.1
+huggingface-hub==0.17.3
+trimesh==4.0.5
+imageio==2.36.1
+rembg==2.0.69
+onnxruntime==1.20.1
+opencv-python-headless==4.11.0.86
+fast-simplification==0.1.11
+fastapi==0.115.6
+uvicorn==0.32.1
+python-multipart==0.0.20
