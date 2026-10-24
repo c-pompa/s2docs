@@ -10,8 +10,8 @@ from fastapi import APIRouter, Body, Depends, HTTPException, Path, Query, Reques
 from fastapi.responses import PlainTextResponse, Response
 from pydantic import BaseModel, Field
 
+from s2docs import assets, deploys, evidence, hosts, jobs, test_runs, weburls
 from s2docs import builds as build_svc
-from s2docs import deploys, evidence, hosts, jobs, test_runs, weburls
 from s2docs import models as m
 from s2docs.build.validate_cfg import validate_cfg
 from s2docs.build.validate_script import validate_cs_script
@@ -818,6 +818,89 @@ def restatus_job(job_id: str, body: JobRestatusIn, db: Db):
 @router.post("/jobs/{job_id}/cancel", response_model=m.Job)
 def cancel_job(job_id: str, body: JobCancelIn, db: Db):
     return jobs.cancel(db, job_id, reason=body.reason)
+
+
+# -------------------------------------------------------------- asset catalog
+class AssetIn(BaseModel):
+    """A promotion request: the chain's ids, not its files (the catalog links, never copies)."""
+
+    kind: m.AssetKind
+    name: str = Field(min_length=1, max_length=assets.NAME_MAX)
+    slug: str | None = Field(
+        default=None, description="Stable lowercase kebab-case handle; derived from name when omitted"
+    )
+    prompt: str | None = None
+    concept_artifact: str | None = None
+    mesh_sha256: str | None = Field(default=None, description="GLB content hash, 64 hex characters")
+    tris: int | None = Field(default=None, ge=0, description="Triangle count of the source mesh")
+    vmdl_path: str | None = None
+    vmat_path: str | None = None
+    build_id: str | None = Field(
+        default=None, description="Build run that compiled it (required); it must have reached 'succeeded'"
+    )
+    deploy_id: str | None = Field(default=None, description="Deployment that shipped those bytes")
+    frame_job_id: str | None = Field(
+        default=None, description="Job whose in-game frame proves it renders (required for kind=model)"
+    )
+    frame_artifact: str | None = Field(
+        default=None, description="Frame artifact name (or its /api/artifacts URL) stored on that job"
+    )
+    licence: str | None = Field(
+        default=None, description="Licence recorded at promotion (required; never inferred later)"
+    )
+    tags: list[str] = Field(default_factory=list)
+    created_by: str | None = None
+
+
+class AssetRetireIn(BaseModel):
+    reason: str | None = Field(default=None, description="Why it is being retired (kept with the row)")
+
+
+@router.post("/assets", response_model=m.Asset, status_code=201)
+def promote_asset(body: AssetIn, db: Db):
+    """Promote a chain into the catalog. Rejected (409/422) when a promotion rule is violated:
+
+    the build did not succeed, a model has no in-game frame from a job that did not fail, the licence
+    is missing, or the slug is already taken. The gates live in `s2docs.assets`, so MCP enforces the
+    same ones.
+    """
+    return assets.promote(db, **body.model_dump())
+
+
+@router.get("/assets", response_model=list[m.Asset])
+def list_assets(
+    db: Db,
+    kind: Annotated[m.AssetKind | None, Query(description="model | action")] = None,
+    tag: Annotated[str | None, Query(description="One tag (lowercased on write)")] = None,
+    include_retired: Annotated[bool, Query(description="Include soft-retired assets")] = False,
+):
+    """Assets newest first. Retired assets are hidden unless `include_retired` is set."""
+    return assets.list_assets(db, kind=kind, tag=tag, include_retired=include_retired)
+
+
+@router.get("/assets/{asset_id}", response_model=m.Asset)
+def get_asset(asset_id: str, db: Db):
+    """One asset by id, or by slug (the handle a page links to)."""
+    return assets.resolve(db, asset_id)
+
+
+@router.get("/assets/{asset_id}/provenance", response_model=m.AssetProvenance)
+def asset_provenance(asset_id: str, db: Db, base: Base):
+    """The asset with its build, deploy and job records — the links, read from their own tables."""
+    prov = assets.provenance(db, asset_id)
+    if prov.build is not None:
+        prov.build.web_url = weburls.build_url(base, prov.build.id)
+    if prov.deploy is not None:
+        prov.deploy.web_url = weburls.deploy_url(base, prov.deploy.id)
+    if prov.job is not None:
+        prov.job.web_url = weburls.job_url(base, prov.job.id)
+    return prov
+
+
+@router.post("/assets/{asset_id}/retire", response_model=m.Asset)
+def retire_asset(asset_id: str, db: Db, body: AssetRetireIn | None = None):
+    """Soft-retire: hide it from the default list, keep the row and its provenance (append-only)."""
+    return assets.retire(db, asset_id, reason=body.reason if body else None)
 
 
 # ------------------------------------------------------------- prompts

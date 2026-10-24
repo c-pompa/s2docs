@@ -53,6 +53,7 @@ def test_tools_are_listed_read_only(server):
         "job_finish",
         "job_restatus",
         "job_cancel",
+        "asset_promote",
     }
     assert all(t.annotations and t.annotations.read_only_hint for t in tools if t.name not in writers)
     # Non-idempotent writers must NOT advertise idempotency: a retry would launch a second compile,
