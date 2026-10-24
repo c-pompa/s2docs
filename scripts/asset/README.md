@@ -64,6 +64,18 @@ the material name came back verbatim; Blender 4.5.15 keeps the `/` (verified 202
 Run long bakes as a background job that writes a `.done` marker, and poll that marker. Never
 block a session on the bake.
 
+### Known caveat: the FBX is written in centimetres, Source reads inches
+
+Blender's unit is the metre and the exporter writes centimetres (`apply_unit_scale=True`,
+`apply_scale_options='FBX_SCALE_NONE'`), so a 0.84 m bbox lands in the file as 84. Blender's own
+importer divides by 100 on the way back — that is the uniform `0.01` in `verdict.reimport_scale`, which
+is why the round-trip check compares world extents rather than absolute scale. A Source importer reads
+those numbers as inches: the 2026-10-23 compile of the un-decimated asset measured 2.1 x 2.5 x 0.75 m
+for the bridge's 0.84 x 0.30 x 1.00 m bbox — the same box, axis-permuted, 2.5x bigger.
+`normalise.bbox_units` reports the honest inch size (32.98 x 11.67 x 39.45); the bridge deliberately
+does **not** rescale geometry, because that changes the in-game size and needs its own
+compile-and-render proof.
+
 ## Pinned Source2Viewer-CLI (reference decompiles only)
 
 Used to read shipped CS2 materials/models for parameter names (e.g. the prop shader and its texture
