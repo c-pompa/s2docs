@@ -12,6 +12,7 @@ docs/evidence/hammered/tsr_eefa8331_meshq_bridge.json.
 from __future__ import annotations
 
 import importlib.util
+import struct
 import sys
 import types
 from pathlib import Path
@@ -231,6 +232,173 @@ def test_collision_is_picked_up_only_on_an_exact_name(bridge):
 def test_collision_name_follows_the_model_name(bridge):
     assert bridge.pick_collision(["crate_collision"], "crate") == "crate_collision"
     assert bridge.pick_collision(["crate_collision"], "crate_2") is None
+
+
+# ------------------------------------------------------------------ FBX units: the numbers are inches
+#
+# The measured bug: the bridge normalised the mesh to inches (bbox_units 32.98 x 11.67 x 39.45) but the
+# FBX wrote centimetres (83.467 x 29.656 x 100.027) and declared no UnitScaleFactor, so Source read them
+# as inches and a compiled prop came out 2.53x too big. These tests pin the factor and the reader that
+# proves it in the report without a compile.
+
+
+def _fbx_header(version: int = 7500) -> bytes:
+    return b"Kaydara FBX Binary  \x00" + b"\x1a\x00" + struct.pack("<I", version)
+
+
+def _fbx_scalar(kind: str, fmt: str, value):
+    return kind.encode() + struct.pack(fmt, value)
+
+
+def _fbx_string(value: str) -> bytes:
+    raw = value.encode("utf-8")
+    return b"S" + struct.pack("<I", len(raw)) + raw
+
+
+def _fbx_double_array(values: list[float]) -> bytes:
+    raw = struct.pack(f"<{len(values)}d", *values)
+    return b"d" + struct.pack("<III", len(values), 0, len(raw)) + raw
+
+
+def _fbx_record(name: str, props: tuple = (), children: tuple = (), *, start: int = 0,
+                wide: bool = True) -> bytes:
+    """One FBX binary record (64-bit headers at version 7500), children laid out after the props."""
+    header = 24 if wide else 12
+    name_raw = name.encode("utf-8")
+    props_raw = b"".join(props)
+    child_raw = b""
+    offset = start + header + 1 + len(name_raw) + len(props_raw)
+    for child in children:
+        chunk = _fbx_record(*child, start=offset, wide=wide)
+        child_raw += chunk
+        offset += len(chunk)
+    terminator = b"\x00" * (13 if wide else 9)
+    end = start + header + 1 + len(name_raw) + len(props_raw) + len(child_raw) + len(terminator)
+    head = struct.pack("<QQQ" if wide else "<III", end, len(props), len(props_raw))
+    return head + bytes([len(name_raw)]) + name_raw + props_raw + child_raw + terminator
+
+
+def _write_probe_fbx(path: Path, *, unit_scale_factor: float = 2.54, extent_bu=(1.0, 2.0, 3.0),
+                     unit_scale: float = 39.3700787, name: str = "probe") -> Path:
+    """A minimal binary FBX shaped like Blender's: GlobalSettings/USF, Model, Geometry, Connections.
+
+    ``extent_bu`` is in Blender's Z-up axes; the file carries ``(x, z, -y)`` because the exporter bakes
+    ``axis_forward='-Z'``/``axis_up='Y'`` into the vertices (measured on 4.5.15).
+    """
+    x, y, z = (v * unit_scale for v in extent_bu)
+    vertices = [0.0, 0.0, 0.0, x, 0.0, 0.0, 0.0, z, 0.0, 0.0, 0.0, -y]
+    settings = ("GlobalSettings", (), (
+        ("Properties70", (), (
+            ("P", (_fbx_string("UnitScaleFactor"), _fbx_string("Number"), _fbx_string(""),
+                   _fbx_string("A"), _fbx_scalar("D", "<d", unit_scale_factor)), ()),
+        )),
+    ))
+    model = ("Model", (_fbx_scalar("L", "<q", 1), _fbx_string(f"{name}\x00\x01Model"),
+                       _fbx_string("Mesh")), ())
+    geometry = ("Geometry", (_fbx_scalar("L", "<q", 2), _fbx_string(f"{name}\x00\x01Geometry")),
+                (("Vertices", (_fbx_double_array(vertices),), ()),))
+    objects = ("Objects", (), (model, geometry))
+    connections = ("Connections", (), (
+        ("C", (_fbx_string("OO"), _fbx_scalar("L", "<q", 2), _fbx_scalar("L", "<q", 1)), ()),
+    ))
+    start = len(_fbx_header())
+    body = b""
+    for node in (settings, objects, connections):
+        body += _fbx_record(*node, start=start + len(body))
+    path.write_bytes(_fbx_header() + body + b"\x00" * 13)
+    return path
+
+
+def test_export_scale_settings_write_source_units(bridge):
+    """The 4.5.15 recipe: global_scale = Source units per BU, and USF = 100/units (2.54 = one inch)."""
+    s = bridge.export_scale_settings(bridge.SOURCE_UNITS_PER_BU)
+    assert s["global_scale"] == pytest.approx(39.3700787)
+    assert s["apply_unit_scale"] is True
+    assert s["apply_scale_options"] == "FBX_SCALE_UNITS"
+    assert s["scene_scale_length"] == pytest.approx(0.0254)
+    assert s["expected_unit_scale_factor"] == pytest.approx(2.54)
+    # --unit-scale counts Source units per Blender unit, so a centimetre run declares USF 1.0 instead
+    cm = bridge.export_scale_settings(100.0)
+    assert cm["global_scale"] == 100.0
+    assert cm["scene_scale_length"] == pytest.approx(0.01)
+    assert cm["expected_unit_scale_factor"] == pytest.approx(1.0)
+    for bad in (0.0, -39.37):
+        with pytest.raises(bridge.BridgeError):
+            bridge.export_scale_settings(bad)
+
+
+def test_unit_check_catches_the_centimetre_error(bridge):
+    intended = [32.98, 11.67, 39.45]
+    ok = bridge.unit_check(intended, [32.86, 11.68, 39.40], bridge.EXPORT_UNIT_TOL_INTENDED)
+    assert ok["ok"] is True
+    assert ok["ratio"] == [0.99636, 1.00086, 0.99873]
+    assert ok["max_rel_err"] == 0.00364
+    # the same box written in centimetres and read as inches is 2.53x on x — nowhere near the tolerance
+    bad = bridge.unit_check(intended, [83.47, 29.66, 100.03], bridge.EXPORT_UNIT_TOL_INTENDED)
+    assert bad["ok"] is False and bad["ratio"][0] > 2.5
+    # the mesh tolerance is tighter than the body one, on purpose: 0.6 % off fails the mesh check while
+    # the same numbers pass the body check (which allows decimation's shrink)
+    off = bridge.unit_check(intended, [32.9, 11.6, 39.2], bridge.EXPORT_UNIT_TOL_MESH)
+    assert off["ok"] is False and off["max_rel_err"] == 0.00634
+    assert bridge.unit_check(intended, [32.9, 11.6, 39.2], bridge.EXPORT_UNIT_TOL_INTENDED)["ok"] is True
+    with pytest.raises(bridge.BridgeError, match="axes"):
+        bridge.unit_check([1.0, 2.0, 3.0], [1.0, 2.0], 0.05)
+
+
+def test_fbx_measure_reads_the_unit_factor_and_the_extent(bridge, tmp_path):
+    m = bridge.fbx_measure(str(_write_probe_fbx(tmp_path / "probe.fbx")))
+    assert m["unit_scale_factor"] == pytest.approx(2.54)
+    assert m["unit_scale_factor_declared"] is True
+    assert m["unit_inches"] == pytest.approx(1.0)
+    obj = m["objects"][0]
+    assert obj["name"] == "probe" and obj["vertices"] == 4
+    # the file's own axes: (x, z, -y) of a 1 x 2 x 3 BU box, times 39.3700787
+    assert obj["extent"] == [39.3701, 118.1102, 78.7402]
+    # and mapped back to the Z-up frame bbox_units is measured in: (X, Z, Y)
+    assert obj["extent_z_up"] == [39.3701, 78.7402, 118.1102]
+
+
+def test_fbx_measure_does_not_raise_on_a_file_it_cannot_read(bridge, tmp_path):
+    bad = tmp_path / "bad.fbx"
+    bad.write_bytes(b"not an FBX at all")
+    m = bridge.fbx_measure(str(bad))
+    assert "error" in m and m["objects"] == []
+
+
+def test_export_units_report_passes_when_the_file_carries_inches(bridge, tmp_path):
+    settings = bridge.export_scale_settings(bridge.SOURCE_UNITS_PER_BU)
+    measured = bridge.fbx_measure(str(_write_probe_fbx(tmp_path / "probe.fbx")))
+    mesh_units = [39.3701, 78.7402, 118.1102]  # a 1 x 2 x 3 BU mesh in Source units, Z-up
+    report = bridge.export_units_report(39.3700787, settings, measured, mesh_units, mesh_units, "probe")
+    assert report["exported_units"] == [39.3701, 78.7402, 118.1102]
+    assert report["check_vs_mesh"]["ok"] is True and report["check_vs_mesh"]["ratio"] == [1.0, 1.0, 1.0]
+    assert report["check_vs_intended"]["ok"] is True
+    assert report["unit_scale_factor_matches"] is True
+    assert report["ok"] is True
+    assert report["intended_units"] == mesh_units and report["mesh_units"] == mesh_units
+
+
+def test_export_units_report_fails_a_centimetre_file(bridge, tmp_path):
+    """USF 1.0 + centimetre numbers is the shipped bug: the report must say so without a compile."""
+    settings = bridge.export_scale_settings(bridge.SOURCE_UNITS_PER_BU)
+    measured = bridge.fbx_measure(str(_write_probe_fbx(
+        tmp_path / "cm.fbx", unit_scale_factor=1.0, extent_bu=(2.12, 0.753, 2.54), unit_scale=39.3700787)))
+    report = bridge.export_units_report(39.3700787, settings, measured, [32.98, 11.67, 39.45],
+                                        [32.98, 11.67, 39.45], "probe")
+    assert report["unit_scale_factor_matches"] is False
+    assert report["check_vs_mesh"]["ok"] is False and report["check_vs_intended"]["ok"] is False
+    assert report["ok"] is False
+
+
+def test_export_units_report_says_why_when_the_body_is_missing(bridge, tmp_path):
+    settings = bridge.export_scale_settings(bridge.SOURCE_UNITS_PER_BU)
+    measured = bridge.fbx_measure(str(_write_probe_fbx(tmp_path / "probe.fbx", name="other")))
+    report = bridge.export_units_report(39.3700787, settings, measured, [32.98], [32.98], "probe")
+    assert report["ok"] is False and "no geometry named" in report["why"]
+    # an unreadable file reports the reader's error instead of a traceback
+    broken = bridge.export_units_report(39.3700787, settings, {"error": "ValueError: nope", "objects": []},
+                                        [32.98], [32.98], "probe")
+    assert broken["ok"] is False and "no geometry named" in broken["why"]
 
 
 # ------------------------------------------------------------------ report hygiene

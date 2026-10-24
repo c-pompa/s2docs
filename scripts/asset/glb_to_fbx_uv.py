@@ -22,7 +22,8 @@ is 10-50x a prop's triangle budget. This script turns that into a shippable prop
    ``.vmat`` path (``GetFbxMaterialPath Failed!`` otherwise), so the name must survive export
    verbatim;
 6. export ``<out-dir>/<name>.fbx`` with ``path_mode='COPY'``, ``embed_textures=False``,
-   ``bake_space_transform=True`` (after ``transform_apply``), ``use_selection=False``, MESH only;
+   ``bake_space_transform=True`` (after ``transform_apply``), ``use_selection=False``, MESH only, and
+   the unit settings that make the written numbers Source units (see **Units**);
 7. re-import the FBX into an empty scene, report what is really in it, and require the re-imported
    material name to equal ``--material-path`` (Blender truncates ID names over 63 characters, and an
    exporter may sanitize ``/``).
@@ -42,10 +43,26 @@ fallback is a UV map + plain base-colour material); 2 = bad input, or the re-imp
 name is not ``--material-path`` (``verdict.material_path_survived`` false; the FBX is still written
 for inspection); 1 = uncaught error. ``--target-tris 0`` turns decimation off.
 
-Units. Blender's unit is the metre (glTF's), Source's is the inch: ``--unit-scale`` (default
-``39.3700787``, i.e. 1 Blender unit = 1 m = 39.3700787 in) converts. The geometry is *not* rescaled —
-the reported ``normalise.bbox_units`` is the body's bounding box in Source units, and the applied
-transform is a translation only, so the FBX node scale is 1.
+Units. Blender's unit is the metre (glTF's), Source's is the inch, and **the numbers in the FBX are
+Source units**. ``--unit-scale`` (default ``39.3700787``, i.e. 1 Blender unit = 1 m = 39.3700787 in)
+says how many Source units one Blender unit is, and the export is driven so the written vertices are
+exactly that: ``global_scale=--unit-scale``, ``apply_scale_options='FBX_SCALE_UNITS'`` and
+``scene.unit_settings.scale_length = 1/--unit-scale`` (probed on Blender 4.5.15, see
+``export_scale_settings``). A 1 x 1 x 1 Blender-unit cube therefore lands in the file as
+39.3701 x 39.3701 x 39.3701 with ``UnitScaleFactor 2.54`` — "1 unit = 2.54 cm = 1 inch", numbers in
+inches. Source reads those numbers as inches, so a prop compiles at the size the bridge measured; a
+metric importer divides by 2.54 x 100 and lands on the same metres. The old setting,
+``apply_scale_options='FBX_SCALE_NONE'``, wrote *centimetres* with ``UnitScaleFactor 1.0``: Source
+read them as inches and the compiled prop came out **2.53x** too big (measured 2026-10-23 on the
+compiled artifact). The geometry's applied scale stays 1 (``normalise.object_scale``) and the axis
+conversion is baked into the vertices, so no node in the export carries a scale; the ``export_units``
+report block carries ``normalise.bbox_units`` (the intended size), the extent read back out of the
+written FBX, and a per-axis check that they agree.
+
+Axis note. ``axis_forward='-Z'``/``axis_up='Y'`` with ``bake_space_transform=True`` writes the
+vertices as ``(x, z, -y)`` of Blender's Z-up frame (measured on 4.5.15 with a 1 x 2 x 3 cube), so
+``export_units.exported_units`` maps the raw FBX extent back to ``(X, Z, Y)`` — the frame
+``bbox_units`` is in.
 
 COLLISION CONTRACT (shared with the task that writes the ``.vmdl``). The ``.vmdl`` emits its
 ``collision`` block from a mesh named ``<name>_collision`` in this FBX. Rules here:
@@ -123,6 +140,7 @@ import shutil
 import struct
 import sys
 import time
+import zlib
 
 import bpy
 
@@ -146,6 +164,17 @@ VMAT_TEXTURE_KEYS = {"color": "TextureColor", "normal": "TextureNormal", "ao": "
 TEXTURE_KINDS = ("color", "normal", "ao")
 UNBAKED_RGB = (1.0, 0.0, 1.0)  # magenta: no unit-colour and no unit-normal can encode to it
 DECIMATE_SAFETY = 0.98  # aim just under the budget: Decimate's ratio is a face-count estimate
+# An FBX UnitScaleFactor of 2.54 means "one file unit is 2.54 cm" = one inch.
+CM_PER_INCH = 2.54
+# The exported numbers are the proof the single unit factor was right. Against the render mesh that was
+# actually exported, 0.5 % (float32 vertices, a baked axis conversion); against ``bbox_units`` — the
+# HIGH-POLY body — 5 %, because decimation may shrink the box a little while a units mistake is 2.5x.
+EXPORT_UNIT_TOL_MESH = 0.005
+EXPORT_UNIT_TOL_INTENDED = 0.05
+# The re-import measures the file in a metre scene, so the only conversion left is the file's own unit
+# declaration: an honest file comes back at the bridge's extent, a centimetre file declared as inches
+# comes back 2.54x too big.
+REIMPORT_SCENE_SCALE_LENGTH = 1.0
 _GLB_MAGIC, _CHUNK_JSON, _CHUNK_BIN = 0x46546C67, 0x4E4F534A, 0x004E4942
 _DTYPES = {5120: "int8", 5121: "uint8", 5122: "int16", 5123: "uint16", 5125: "uint32", 5126: "float32"}
 _NCOMP = {"SCALAR": 1, "VEC2": 2, "VEC3": 3, "VEC4": 4}
@@ -315,6 +344,95 @@ def normalise_report(bbox_bu: list[float], pivot_bu: list[float], unit_scale: fl
         "z_up": True,
         "bbox_min_after_bu": [round(float(v), 6) for v in bbox_min_after_bu] if bbox_min_after_bu else None,
     }
+
+
+def export_scale_settings(unit_scale: float) -> dict:
+    """The exporter settings that make the written FBX numbers equal Source units.
+
+    Measured on Blender 4.5.15 (1 x 1 x 1 Blender-unit cube, ``bake_space_transform=True``):
+
+    ==============================  ===========================================  ==========================
+    ``apply_scale_options``         written vertex extent                        ``UnitScaleFactor``
+    ==============================  ===========================================  ==========================
+    ``FBX_SCALE_NONE`` (old)        100 x 100 x 100  (centimetres)               1.0  (reads as cm)
+    ``FBX_SCALE_UNITS`` + sl 0.0254 39.3701 x 39.3701 x 39.3701  (inches)        2.54 (= one inch)
+    ==============================  ===========================================  ==========================
+
+    so ``FBX_SCALE_UNITS`` with ``scene.unit_settings.scale_length = 1/unit_scale`` is what makes a
+    Source importer — which reads the numbers as inches — get the authored size. The scene's unit
+    scale is only what the exporter reads to compute the declared factor (``USF = 100 /
+    unit_scale``); the geometry keeps applied scale 1, and ``bake_space_transform`` puts the axis
+    conversion (and this scale) into the vertices, so no node carries a scale.
+    """
+    unit_scale = float(unit_scale)
+    if not unit_scale > 0.0:
+        raise BridgeError(f"unit scale {unit_scale!r} must be positive")
+    return {
+        "global_scale": round(unit_scale, 7),
+        "apply_unit_scale": True,
+        "apply_scale_options": "FBX_SCALE_UNITS",
+        "scene_scale_length": round(1.0 / unit_scale, 9),
+        "expected_unit_scale_factor": round(100.0 / unit_scale, 6),
+    }
+
+
+def unit_check(expected: list[float], measured: list[float], tolerance: float) -> dict:
+    """Per-axis ``measured / expected`` and the worst relative error, against ``tolerance``."""
+    if len(expected) != len(measured):
+        raise BridgeError(f"cannot compare {len(expected)} expected axes against {len(measured)} measured")
+    ratios = [round(float(m) / float(e), 5) if e else None for e, m in zip(expected, measured, strict=True)]
+    errors = [abs(r - 1.0) for r in ratios if r is not None]
+    return {
+        "expected": [round(float(v), 4) for v in expected],
+        "measured": [round(float(v), 4) for v in measured],
+        "ratio": ratios,
+        "max_rel_err": round(max(errors), 5) if errors else None,
+        "tolerance": tolerance,
+        "ok": bool(errors) and max(errors) <= tolerance,
+    }
+
+
+def export_units_report(unit_scale: float, settings: dict, measured: dict,
+                        intended_units: list[float], mesh_units: list[float], body_name: str,
+                        tol_mesh: float = EXPORT_UNIT_TOL_MESH,
+                        tol_intended: float = EXPORT_UNIT_TOL_INTENDED) -> dict:
+    """The ``export_units`` block: what the FBX really contains, next to what the bridge intended.
+
+    ``intended_units`` is ``normalise.bbox_units`` (the high-poly body, inches) and ``mesh_units`` is
+    the render mesh that went into the file (also inches). Both are compared per axis against the
+    extent read back out of the written FBX, so a units error is visible in the report without a
+    compile: centimetres read as inches shows up as a ratio of ~2.54, not as a plausible number.
+    """
+    exported = None
+    if isinstance(measured.get("objects"), list):
+        body = next((o for o in measured["objects"] if o.get("name") == body_name), None)
+        exported = body.get("extent_z_up") if body else None
+    declared = measured.get("unit_scale_factor")
+    expected_declared = settings.get("expected_unit_scale_factor")
+    report: dict = {
+        "unit": "Source unit (1 unit = 1 inch)",
+        "unit_scale": round(float(unit_scale), 7),
+        "exporter": settings,
+        "file": measured,
+        "body_name": body_name,
+        "intended_units": [round(float(v), 4) for v in intended_units],
+        "mesh_units": [round(float(v), 4) for v in mesh_units],
+        "exported_units": exported,
+    }
+    if exported is None:
+        report["ok"] = False
+        report["why"] = (f"the written FBX has no geometry named {body_name!r}, so its numeric extent "
+                         f"cannot be checked against bbox_units")
+        return report
+    report["check_vs_mesh"] = unit_check(mesh_units, exported, tol_mesh)
+    report["check_vs_intended"] = unit_check(intended_units, exported, tol_intended)
+    report["unit_scale_factor_matches"] = bool(
+        declared is not None and expected_declared
+        and abs(float(declared) - float(expected_declared)) <= 1e-4 * float(expected_declared)
+    )
+    report["ok"] = bool(report["check_vs_mesh"]["ok"] and report["check_vs_intended"]["ok"]
+                        and report["unit_scale_factor_matches"])
+    return report
 
 
 # --- GLB reading (only what the colour bake needs) ----------------------------------------------
@@ -494,6 +612,163 @@ def fbx_scan(path: str, png_names: list[str]) -> dict:
         "LayerElementColor": raw.count(b"LayerElementColor"),
         "texture_refs": {n: raw.count(n.encode()) for n in png_names},
     }
+
+
+# --- what the written FBX says (pure: a binary reader, no bpy) -----------------------------------
+#
+# The only honest measure of the unit factor is the file itself: Blender's importer applies its own
+# cm/inch conversion, so a re-import cannot tell "inches in the file" from "centimetres declared as
+# inches". Reading the bytes reports the numbers Source will read. The format is the FBX binary
+# record tree; only what is needed here is decoded (GlobalSettings/UnitScaleFactor, Objects/Geometry/
+# Vertices, Connections for the geometry -> model names).
+
+_FBX_MAGIC = b"Kaydara FBX Binary  \x00"
+_FBX_SCALARS = {"Y": ("<h", 2), "C": ("<B", 1), "I": ("<i", 4), "F": ("<f", 4), "D": ("<d", 8),
+                "L": ("<q", 8)}
+_FBX_ARRAYS = {"f": "f", "d": "d", "l": "q", "i": "i", "b": "b"}
+
+
+def _fbx_properties(raw: bytes, offset: int, count: int) -> tuple[list, int]:
+    """Decode ``count`` FBX property records; returns them and the offset just after them."""
+    props: list = []
+    for _ in range(count):
+        kind = chr(raw[offset])
+        offset += 1
+        if kind in _FBX_SCALARS:
+            fmt, size = _FBX_SCALARS[kind]
+            props.append(struct.unpack_from(fmt, raw, offset)[0])
+            offset += size
+        elif kind in _FBX_ARRAYS:
+            n, encoding, length = struct.unpack_from("<III", raw, offset)
+            offset += 12
+            data = raw[offset:offset + length]
+            offset += length
+            if encoding == 1:  # zlib-deflated array (what Blender writes for vertices)
+                data = zlib.decompress(data)
+            props.append(list(struct.unpack_from(f"<{n}{_FBX_ARRAYS[kind]}", data, 0)))
+        elif kind in ("S", "R"):
+            length = struct.unpack_from("<I", raw, offset)[0]
+            offset += 4
+            data = raw[offset:offset + length]
+            offset += length
+            props.append(data.decode("utf-8", "replace") if kind == "S" else data)
+        else:
+            raise ValueError(f"FBX property type {kind!r} at offset {offset - 1} is not one this "
+                             f"reader handles")
+    return props, offset
+
+
+def _fbx_node(raw: bytes, offset: int, wide: bool) -> tuple[dict | None, int]:
+    """One record. A null record (end offset 0) ends a record list and comes back as ``None``."""
+    fmt = "<QQQ" if wide else "<III"
+    end, count, _props_len = struct.unpack_from(fmt, raw, offset)
+    offset += struct.calcsize(fmt)
+    if end == 0:
+        return None, offset
+    name_len = raw[offset]
+    offset += 1
+    name = raw[offset:offset + name_len].decode("utf-8", "replace")
+    offset += name_len
+    props, offset = _fbx_properties(raw, offset, count)
+    children = []
+    while offset < end:
+        child, offset = _fbx_node(raw, offset, wide)
+        if child is None:
+            offset = end
+            break
+        children.append(child)
+    return {"name": name, "props": props, "children": children}, end
+
+
+def _fbx_tree(path: str) -> tuple[int, list[dict]]:
+    """``(version, top-level records)`` of a binary FBX."""
+    with open(path, "rb") as fh:
+        raw = fh.read()
+    if len(raw) < 27 or not raw.startswith(_FBX_MAGIC):
+        raise ValueError(f"{path} is not a binary FBX")
+    version = struct.unpack_from("<I", raw, 23)[0]
+    wide = version >= 7500
+    header = struct.calcsize("<QQQ" if wide else "<III")
+    offset, nodes = 27, []
+    while offset + header <= len(raw):
+        node, offset = _fbx_node(raw, offset, wide)
+        if node is None:
+            break
+        nodes.append(node)
+    return version, nodes
+
+
+def _fbx_props70(node: dict) -> dict:
+    """``{property name: last value}`` of a record's ``Properties70`` block."""
+    out: dict = {}
+    for block in node["children"]:
+        if block["name"] != "Properties70":
+            continue
+        for rec in block["children"]:
+            if rec["name"] == "P" and rec["props"] and isinstance(rec["props"][0], str):
+                out[rec["props"][0]] = rec["props"][-1]
+    return out
+
+
+def fbx_measure(path: str) -> dict:
+    """The unit factor and the raw vertex extent of every mesh object in a binary FBX.
+
+    ``extent`` is in the file's own axes and ``extent_z_up`` is the same box mapped back to Blender's
+    Z-up frame — ``(X, Z, Y)`` for this exporter's ``axis_forward='-Z'``/``axis_up='Y'`` with
+    ``bake_space_transform=True`` (measured on 4.5.15 with a 1 x 2 x 3 cube) — which is the frame
+    ``normalise.bbox_units`` is in. Never raises: a file this reader cannot decode comes back as
+    ``{"error": ...}`` so the run still ships the FBX and reports a failed gate instead of dying.
+    """
+    try:
+        version, nodes = _fbx_tree(path)
+        unit_scale, declared = 1.0, False
+        model_names: dict[int, str] = {}
+        links: dict[int, int] = {}
+        objects: list[dict] = []
+        for node in nodes:
+            if node["name"] == "GlobalSettings":
+                props = _fbx_props70(node)
+                if "UnitScaleFactor" in props:
+                    unit_scale, declared = float(props["UnitScaleFactor"]), True
+            elif node["name"] == "Objects":
+                for obj in node["children"]:
+                    uid = int(obj["props"][0]) if obj["props"] else 0
+                    if obj["name"] == "Model":
+                        # The exporter appends "\x00\x01<kind>" to a Model's name (Blender's importer
+                        # splits it off again), so the object name is the part before the NUL.
+                        raw_name = str(obj["props"][1]) if len(obj["props"]) > 1 else ""
+                        model_names[uid] = raw_name.split("\x00", 1)[0] or f"uid:{uid}"
+                    elif obj["name"] == "Geometry":
+                        verts = next((c["props"][0] for c in obj["children"]
+                                      if c["name"] == "Vertices" and c["props"]), None)
+                        if not verts:
+                            continue
+                        xs, ys, zs = verts[0::3], verts[1::3], verts[2::3]
+                        extent = [max(xs) - min(xs), max(ys) - min(ys), max(zs) - min(zs)]
+                        objects.append({
+                            "uid": uid, "name": None, "vertices": len(verts) // 3,
+                            "extent": [round(v, 4) for v in extent],
+                            "extent_z_up": [round(extent[0], 4), round(extent[2], 4), round(extent[1], 4)],
+                        })
+            elif node["name"] == "Connections":
+                for conn in node["children"]:
+                    if conn["name"] == "C" and len(conn["props"]) >= 3 and conn["props"][0] == "OO":
+                        links[int(conn["props"][1])] = int(conn["props"][2])
+        for obj in objects:  # a Geometry is connected to the Model that owns it
+            parent = links.get(obj["uid"])
+            obj["name"] = (model_names.get(parent) if parent is not None else None) or f"uid:{obj['uid']}"
+        return {
+            "path": path,
+            "version": version,
+            "unit_scale_factor": round(unit_scale, 6),
+            "unit_scale_factor_declared": declared,
+            "unit_inches": round(unit_scale / CM_PER_INCH, 6),
+            "unit_note": "FBX UnitScaleFactor is cm per file unit: 1.0 = centimetre, 2.54 = inch",
+            "axis_order": "extent is raw (X, Y, Z); extent_z_up is (X, Z, Y), the frame bbox_units uses",
+            "objects": objects,
+        }
+    except (OSError, ValueError, struct.error, zlib.error) as exc:
+        return {"path": path, "error": f"{type(exc).__name__}: {exc}", "objects": []}
 
 
 # --- pipeline stages -----------------------------------------------------------------------------
@@ -1020,6 +1295,14 @@ def final_material(mat, colour_image, normal_image):
 
 
 def reimport_report(fbx_path: str) -> list[dict]:
+    """Re-import the written FBX and report what is really in it.
+
+    Measured in a **metre** scene (``unit_settings.scale_length = 1.0``) on purpose: the importer then
+    converts by the file's own unit declaration and nothing else, so an FBX that writes centimetres and
+    calls them inches comes back 2.54x too big instead of looking plausible.
+    """
+    bpy.context.scene.unit_settings.system = "METRIC"
+    bpy.context.scene.unit_settings.scale_length = REIMPORT_SCENE_SCALE_LENGTH
     empty_scene()
     bpy.ops.import_scene.fbx(filepath=fbx_path)
     report = []
@@ -1327,17 +1610,28 @@ def run(args: argparse.Namespace) -> tuple[dict, int]:
 
     # 6. export. The high-poly leaves the scene first: only the render mesh and any collision mesh go out.
     bpy.data.objects.remove(body, do_unlink=True)
+    units = export_scale_settings(args.unit_scale)
     t = time.perf_counter()
     # Vertex colours (opt-in) hold the COLOR_0 values untouched: LINEAR = write them as stored.
     colors_type = ("LINEAR" if args.vertex_color_space == "srgb" else "SRGB") if args.export_vertex_colors else "NONE"
-    bpy.ops.export_scene.fbx(
-        filepath=fbx_path, check_existing=False, use_selection=False, object_types={"MESH"},
-        global_scale=1.0, apply_unit_scale=True, apply_scale_options="FBX_SCALE_NONE",
-        use_space_transform=True, bake_space_transform=True, axis_forward="-Z", axis_up="Y",
-        use_mesh_modifiers=True, mesh_smooth_type="OFF", colors_type=colors_type, use_tspace=False,
-        use_triangles=False, use_custom_props=False, add_leaf_bones=False, bake_anim=False,
-        path_mode="COPY", embed_textures=False, batch_mode="OFF",
-    )
+    # The scene's unit scale is the one knob the exporter reads to decide what a file unit means (it
+    # becomes UnitScaleFactor = 100 * scale_length); the geometry itself keeps applied scale 1.
+    scene_units = bpy.context.scene.unit_settings
+    previous_units = (scene_units.system, scene_units.scale_length)
+    scene_units.system = "METRIC"
+    scene_units.scale_length = units["scene_scale_length"]
+    try:
+        bpy.ops.export_scene.fbx(
+            filepath=fbx_path, check_existing=False, use_selection=False, object_types={"MESH"},
+            global_scale=units["global_scale"], apply_unit_scale=units["apply_unit_scale"],
+            apply_scale_options=units["apply_scale_options"],
+            use_space_transform=True, bake_space_transform=True, axis_forward="-Z", axis_up="Y",
+            use_mesh_modifiers=True, mesh_smooth_type="OFF", colors_type=colors_type, use_tspace=False,
+            use_triangles=False, use_custom_props=False, add_leaf_bones=False, bake_anim=False,
+            path_mode="COPY", embed_textures=False, batch_mode="OFF",
+        )
+    finally:
+        scene_units.system, scene_units.scale_length = previous_units
     timings["export_s"] = round(time.perf_counter() - t, 2)
     result["textures"] = place_textures(out_dir, tmp_dir, args.name)
     result["texture"] = result["textures"]["color"]  # the colour map, as the earlier reports named it
@@ -1347,6 +1641,14 @@ def run(args: argparse.Namespace) -> tuple[dict, int]:
     pngs = [texture_name(args.name, kind) for kind in TEXTURE_KINDS]
     result["fbx"] = {"path": fbx_path, "bytes": os.path.getsize(fbx_path), "sha256": sha256(fbx_path),
                      "scan": fbx_scan(fbx_path, pngs)}
+    # What the file really contains vs the size the bridge measured: a units mistake (centimetres read
+    # as inches) is a per-axis ratio of ~2.54 here, visible without compiling anything.
+    result["export_units"] = export_units_report(
+        args.unit_scale, units, fbx_measure(fbx_path),
+        result["normalise"]["bbox_units"],
+        [float(v) * args.unit_scale for v in result["mesh"]["world_extent_bu"]],
+        body_name=args.name,
+    )
     shutil.rmtree(tmp_dir, ignore_errors=True)
 
     # 7. prove it by re-importing what was written.
@@ -1364,8 +1666,9 @@ def run(args: argparse.Namespace) -> tuple[dict, int]:
     # The budget and the pivot must survive the round trip, and no scale factor may ride along.
     tris_ok = bool(body_r) and body_r["triangles"] == result["decimate"]["tris_out"]
     # The exported objects had scale 1 (normalise.object_scale, checked before export). Blender's own
-    # FBX importer then hands them back with its uniform cm -> m conversion factor, so what is checked
-    # here is that the factor is uniform (no squeezed or mirrored axis) and that the extent survived.
+    # FBX importer then hands them back with its uniform file-unit -> metre factor (0.0254 for the inch
+    # file this writes), so what is checked here is that the factor is uniform (no squeezed or mirrored
+    # axis) and that the extent survived; the unit factor itself is checked in ``export_units``.
     reimport_scale = body_r["scale"] if body_r else None
     scale_ok = bool(body_r) and len({round(s, 6) for s in body_r["scale"]}) == 1
     extent_ok = bool(body_r) and max(abs(x - y) for x, y in zip(body_r["world_extent_bu"],
@@ -1394,12 +1697,14 @@ def run(args: argparse.Namespace) -> tuple[dict, int]:
         "within_triangle_budget": tris_ok, "no_scale_node": scale_ok, "extent_preserved": extent_ok,
         "uv_usable": bool(uv_ok), "collision_exported": coll_ok,
         "material_path_survived": survived,
+        # The numbers in the FBX are Source units and match what the bridge measured (``export_units``).
+        "export_units_ok": bool(result["export_units"]["ok"]),
     }
     result["verdict"]["reimport_scale"] = reimport_scale
     verdict = result["verdict"]
     maps_ok = verdict["normal_map_baked"] and verdict["ao_map_baked"]
     code = 0 if (verdict["baked_texture"] and maps_ok and has_uv and has_mat and tris_ok and scale_ok
-                 and extent_ok and coll_ok and uv_ok) else 3
+                 and extent_ok and coll_ok and uv_ok and verdict["export_units_ok"]) else 3
     if not survived:
         code = 2
         result["error"] = (f"re-imported FBX material is {reimported[:1]!r}, not {args.material_path!r}: "
