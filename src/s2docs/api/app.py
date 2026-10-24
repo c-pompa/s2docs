@@ -15,7 +15,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from s2docs import builds, test_runs
+from s2docs import assets, builds, test_runs
 from s2docs.api.routes import router
 from s2docs.build.validate_script import ToolchainMissing
 from s2docs.builds import BuildTimeout
@@ -131,6 +131,18 @@ def create_app(db_path: Path | None = None, *, mount_mcp: bool = True, workspace
         # A human-confirm row with a bad verdict/source is validation (422), not the generic 400 a bare
         # EvidenceError (e.g. an unknown test run) gets.
         return JSONResponse({"detail": str(exc), "fields": exc.fields}, status_code=422)
+
+    @app.exception_handler(assets.AssetValidationError)
+    async def _asset_invalid(_: Request, exc: assets.AssetValidationError) -> JSONResponse:
+        # A promotion payload problem (missing licence, a model with no frame, a frame the job never
+        # stored) reports every offending field in one 422, so an agent fixes them in one pass.
+        return JSONResponse({"detail": str(exc), "fields": exc.fields}, status_code=422)
+
+    @app.exception_handler(assets.AssetConflict)
+    async def _asset_conflict(_: Request, exc: assets.AssetConflict) -> JSONResponse:
+        # A well-formed promotion that the linked records (or the slug) forbid: not-succeeded build,
+        # a fail verdict, a taken slug.
+        return JSONResponse({"detail": str(exc), "conflict": True}, status_code=409)
 
     @app.exception_handler(BuildTimeout)
     async def _build_timeout(_: Request, exc: BuildTimeout) -> JSONResponse:

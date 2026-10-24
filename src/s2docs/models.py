@@ -806,3 +806,51 @@ class JobScreenshot(BaseModel):
     width: int | None = None
     height: int | None = None
     created_at: str
+
+
+# -------------------------------------------------------------- asset catalog
+# The catalog is a *view with a promotion step* over builds, deployments and jobs (migration 0015):
+# every column that names another record is a link, not a copy, so the bytes and the evidence stay
+# owned by the service that made them. `retired_at` is a soft delete: the row and its links survive,
+# and the default list hides it.
+AssetKind = Literal["model", "action"]
+ASSET_KINDS: tuple[str, ...] = AssetKind.__args__  # type: ignore[attr-defined]
+
+
+class Asset(BaseModel):
+    id: str
+    kind: AssetKind
+    name: str
+    slug: str = Field(description="Stable lowercase kebab-case handle, unique across the catalog")
+    prompt: str | None = Field(default=None, description="The prompt this asset came from")
+    concept_artifact: str | None = Field(default=None, description="Concept image artifact (path or URL)")
+    mesh_sha256: str | None = Field(default=None, description="GLB content hash (64 hex)")
+    tris: int | None = Field(default=None, description="Triangle count of the source mesh")
+    vmdl_path: str | None = None
+    vmat_path: str | None = None
+    build_id: str = Field(description="The build run that compiled it (promotion requires 'succeeded')")
+    deploy_id: str | None = Field(default=None, description="The deployment that shipped these bytes")
+    frame_job_id: str | None = Field(default=None, description="The job whose in-game frame proves it renders")
+    frame_artifact: str | None = Field(default=None, description="Frame artifact name inside that job")
+    licence: str = Field(description="Licence recorded at promotion; never inferred later")
+    tags: list[str] = []
+    created_by: str | None = None
+    created_at: str
+    retired_at: str | None = Field(default=None, description="Soft retire: set once, never cleared")
+    retired_reason: str | None = None
+
+
+class AssetProvenance(BaseModel):
+    """The records an asset points at, read from their own tables at request time.
+
+    Nothing here is a copy of the asset row: `build` / `deploy` / `job` are the canonical records, so
+    a stale catalog cannot invent a compile, a push or a verdict that did not happen.
+    """
+
+    asset: Asset
+    build: BuildRun | None = None
+    deploy: Deployment | None = None
+    job: Job | None = None
+    frame_url: str | None = Field(
+        default=None, description="REST path serving the frame bytes ('/api/artifacts/<job>/<name>')"
+    )
