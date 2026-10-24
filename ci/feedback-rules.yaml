@@ -10,7 +10,8 @@
 #   title         one line, shown in the CI report
 #   concern       what the rule is about, as a slug; unique across BOTH pipelines, so a second rule
 #                 (in either pipeline) about the same thing is refused instead of duplicating it
-#   source        reviewer rules: the URL of the review/comment; house rules: exactly "house rule"
+#   source        reviewer rules: the URL of the review/comment; house rules: exactly "house rule", or
+#                 "coordinator security finding <YYYY-MM-DD>: <finding>" for a rule a finding produced
 #   feedback_id   reviewer rules: hermes-agent#<pr>/review-<id>/<item>
 #   reviewer      reviewer rules: who asked
 #   quote         reviewer rules: the reviewer's words the rule enforces (verbatim)
@@ -330,3 +331,17 @@ rules:
       from the wheel.
     script: scripts/ci/checks/cpompa-hermes-ci/CHC-PACKAGING-wheel.sh
     fixtures: ci/fixtures/CHC-PACKAGING
+
+  - id: CHC-RUNNER-NO-DOCKER-SOCK
+    pipeline: cpompa-hermes-ci
+    title: CI job containers get no Docker daemon socket and no DOCKER_HOST
+    concern: job-docker-daemon-access
+    source: "coordinator security finding 2026-10-23: a runner mounted /var/run/docker.sock into job containers"
+    enforces: >-
+      The job the check runs in has nothing at /var/run/docker.sock (file, socket or symlink, dangling
+      or not) and no DOCKER_HOST in its environment, so code under test cannot drive the runner
+      host's Docker daemon. CHC_DOCKER_SOCKETS redirects the inspected paths for the fixtures only:
+      inside a GitLab job (GITLAB_CI=true) a redirect is itself a failure.
+    script: scripts/ci/checks/cpompa-hermes-ci/CHC-RUNNER-NO-DOCKER-SOCK-job-env.sh
+    fixtures: ci/fixtures/CHC-RUNNER-NO-DOCKER-SOCK
+    clean: fixture  # the machine running falsify may have a Docker socket of its own; accept-clean plants none

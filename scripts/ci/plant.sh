@@ -33,5 +33,23 @@ plant_as_reviewed() {
         { echo "plant: ci/fixtures/as-reviewed-531a24c7.patch no longer applies (docs/FEEDBACK_CI.md)" >&2; exit 3; }
 }
 
+# plant_env KEY VALUE: run this case's check with KEY=VALUE in its environment (run.sh reads
+# .git/ci-case.env; for rules about the job environment, which the hermetic harness otherwise strips).
+plant_env() {
+    case "$2" in
+        *$'\n'*) echo "plant: plant_env $1: a value cannot contain a newline" >&2; exit 2 ;;
+    esac
+    printf '%s=%s\n' "$1" "$2" >>"$(git rev-parse --absolute-git-dir)/ci-case.env"
+}
+
+# plant_scratch: print a scratch directory inside the clone's .git (outside the tree, removed with the
+# clone), for files a case plants outside the repository (a fake socket, a fake config).
+plant_scratch() {
+    local dir
+    dir="$(git rev-parse --absolute-git-dir)/ci-case-scratch"
+    mkdir -p "$dir"
+    printf '%s\n' "$dir"
+}
+
 # plant_commit MESSAGE: commit everything in the fixture clone.
 plant_commit() { git add -A && git commit -q --no-verify -m "$1"; }

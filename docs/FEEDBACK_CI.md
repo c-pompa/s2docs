@@ -5,7 +5,7 @@ s2docs runs two CI pipelines that never check the same thing:
 | Pipeline | Ids | Holds | Sources |
 |---|---|---|---|
 | `hermes-pr-feedback-ci` | `HPF-*` | every rule an upstream hermes-agent reviewer asked for | a review or comment URL, one rule per request |
-| `cpompa-hermes-ci` | `CHC-*` | our house standards: lint, tests, security and secret scans, lockfile integrity, commit hygiene, packaging | `house rule` |
+| `cpompa-hermes-ci` | `CHC-*` | our house standards: lint, tests, security and secret scans, lockfile integrity, commit hygiene, packaging, the job environment | `house rule`, or the dated coordinator security finding the rule answers |
 
 One registry, [`ci/feedback-rules.yaml`](../ci/feedback-rules.yaml), decides which rule belongs to
 which pipeline, where it came from, and which script enforces it. One runner,
@@ -36,7 +36,16 @@ shells and unverified TLS), CHC-TESTS (the full suite passes with no skips), CHC
 the shipped files and the reviewed commit range), CHC-IOC (the compromised-npm indicators from the
 workspace security note), CHC-LOCKFILE (`uv lock --check`, PyPI-only sources, a sha256 on every
 artifact), CHC-COMMITS (subject, body, no fixup or WIP commits, `git diff --check`, no file over
-5 MiB), and CHC-PACKAGING (sdist and wheel build; the installed wheel runs).
+5 MiB), CHC-PACKAGING (sdist and wheel build; the installed wheel runs), and
+CHC-RUNNER-NO-DOCKER-SOCK (the CI job has nothing at `/var/run/docker.sock` and no `DOCKER_HOST`).
+
+CHC-RUNNER-NO-DOCKER-SOCK answers the coordinator security finding of 2026-10-23: a runner mounted
+`/var/run/docker.sock` into job containers, which gives code under test the runner host's Docker
+daemon, and with it root on that host. It inspects the environment it runs in, not the tree, so it runs
+in `enforce` and fails the job on any runner that still mounts the socket. On a workstation with
+Docker Desktop it fails as well; that is the same finding, about the machine. `CHC_DOCKER_SOCKETS`
+(`:`-separated, default `/var/run/docker.sock`) redirects the inspected paths for its fixtures. Inside
+a GitLab job (`GITLAB_CI=true`), a redirect counts as a failure, because it would hide a real socket.
 
 ## Why the pipelines cannot overlap
 
@@ -50,7 +59,8 @@ when any of these is true:
   `scripts/ci/checks/<its pipeline>/`;
 - a reviewer rule has no review URL, `feedback_id`, reviewer or quote, or its `feedback_id` names a
   different review than its URL;
-- a house rule carries reviewer keys, or its source is anything other than exactly `house rule`;
+- a house rule carries reviewer keys, or its source is anything other than exactly `house rule` or
+  `coordinator security finding <YYYY-MM-DD>: <finding>`;
 - a script's header (`# rule:`, `# pipeline:`, `# source:`, `# feedback:`) contradicts its row;
 - a check script or fixture set on disk is not registered, or a script is not executable;
 - a rule has no `reject-*` fixture, or uses `clean: fixture` with no `accept-*` fixture.
@@ -96,6 +106,11 @@ Every rule has a fixture set in `ci/fixtures/<RULE>/`:
 - `accept-<slug>.sh` plants a legitimate variation. The check must exit **0**, so a rule cannot
   "work" by refusing everything.
 - With `clean: tree` (the default), the unmodified checkout is also an accept case.
+- A rule about the job environment instead of the tree (CHC-RUNNER-NO-DOCKER-SOCK) cannot be planted
+  as a file change, because the harness strips the environment. Its fixtures call `plant_env KEY VALUE`,
+  which appends to the clone's `.git/ci-case.env`, and `run.sh` adds those variables to that one
+  case's check run. Files the case needs outside the repository (a fake socket) go in `plant_scratch`,
+  also under `.git`. Because neither lives in the tree, a commit cannot carry them into `enforce`.
 
 `run.sh falsify <pipeline> [RULE...]` exports the checkout's shippable files into a one-commit git
 repo, clones it per case, runs the fixture in the clone, then runs the check against the clone. It
@@ -214,8 +229,28 @@ What the checks need:
    feedback into the existing rule's row instead (step 2).
 
 A house rule follows the same steps with `pipeline: cpompa-hermes-ci`, a `CHC-<NAME>` id,
-`source: house rule`, and no reviewer keys. It must not restate a reviewer rule. The shared `concern`
+`source: house rule` (or `coordinator security finding <YYYY-MM-DD>: <finding>` when a security
+finding produced it), and no reviewer keys. It must not restate a reviewer rule. The shared `concern`
 check enforces that.
+
+## Commenting the delta on the upstream PR
+
+After the fix is pushed and re-pinned, the PR gets a comment that says what changed. That comment
+pastes the output of [`scripts/ci/pr_delta.py`](../scripts/ci/pr_delta.py) verbatim. Nobody types it
+from memory, and nobody edits the values in it:
+
+```sh
+.venv/bin/python scripts/ci/pr_delta.py --from-sha <commit the reviewer read> --to-sha <commit pinned>
+```
+
+It reads every runtime range in `pyproject.toml` `[project].dependencies` exactly as written, the
+`--from git+...@<sha>` ref and the `--exclude-newer` value from `plugin/mcp.json`, `version` from
+`plugin/plugin.json`, and the commits of the range from `git log --oneline A..B`. It refuses (exit 2,
+nothing on stdout) when a value is missing, the pin is not a full sha, or those files in the working
+tree differ from `--to-sha`. A range or a sha retyped by hand is how a wrong number reaches a
+reviewer, and once a reviewer has read it, it cannot be taken back. If the comment needs a value the
+script does not print, extend the script; do not add the value by hand. `tests/test_pr_delta.py`
+checks that the ranges come out byte-for-byte as they are written in the file.
 
 ## GitLab layout
 
@@ -228,6 +263,22 @@ parallel, because each job only `needs:` the registry:
 
 Each job runs `scripts/ci/bootstrap.sh <components>`, then one `run.sh` command, and uploads
 `ci-reports/*.xml` as JUnit.
+
+Every job carries `tags: [s2docs]` through the `default:` block, so only a runner with that tag
+(`mini-docker`) takes it and no verdict depends on which shared runner was free.
+
+The `enforce` jobs run in every merge request and branch pipeline. The `falsify` jobs prove the
+checks themselves, which takes minutes, so `.falsify-rules` runs them only:
+
+- in scheduled pipelines;
+- on `dev` and `main`, as a branch pipeline or as the source branch of an MR (an open dev→main MR
+  replaces dev's branch pipelines, see `workflow:rules`);
+- in merge requests whose `changes:` touch `ci/**/*`, `scripts/ci/**/*` or `.gitlab-ci.yml`.
+
+Manual (web/API) runs stay allowed by `workflow:rules`; on a feature branch they get `enforce` only.
+`tests/test_gitlab_ci.py` evaluates these rules for a push to dev, dev as an MR source, and a nightly
+run, and fails if any registry rule is left without a `falsify` job in one of them. A check can
+therefore not lose its falsification silently.
 
 The image is `ghcr.io/astral-sh/uv:0.13.5-python3.11-trixie`, pinned by digest. `bootstrap.sh`
 installs `uv sync --frozen`, node and npm plus `npm ci --ignore-scripts` for `tools/tsc`, and gitleaks

@@ -8,6 +8,10 @@
 #   scripts/ci/run.sh enforce <pipeline>   every rule against this commit
 #   scripts/ci/run.sh falsify <pipeline>   every rule rejects its planted violations and accepts its clean cases
 # Both pipelines start as soon as the registry validates (needs:), so neither waits for the other.
+#
+# enforce runs on every merge request and branch pipeline. falsify (minutes: it plants every fixture)
+# runs where it pays for itself, see .falsify-rules; tests/test_gitlab_ci.py proves that every rule in
+# the registry still has a falsify job that runs on dev, so no check can lose its falsification.
 
 workflow:
   name: "s2docs: hermes-pr-feedback-ci + cpompa-hermes-ci"
@@ -39,6 +43,9 @@ default:
   # uv 0.13.5 (the version uv.lock is written with) on Debian trixie with CPython 3.11, pinned by digest.
   image: ghcr.io/astral-sh/uv:0.13.5-python3.11-trixie@sha256:d1df4f51a3351691af7b1a887c287070cd387d32c08cdfc46a448ba08a2c0cc2
   interruptible: true
+  # Deterministic placement: only runners carrying the s2docs tag (mini-docker) take these jobs, so
+  # a verdict never depends on which shared runner happened to be free.
+  tags: [s2docs]
   cache:
     key:
       files: [uv.lock]
@@ -51,6 +58,19 @@ default:
     paths: [ci-reports/]
     reports:
       junit: ci-reports/*.xml
+
+# falsify proves the checks themselves, so it runs when the checks can have changed or a release is
+# cut: nightly (schedule), on the integration branches (dev, main - also as the source of an MR, since
+# an open dev->main MR replaces dev's branch pipelines), and on MRs that touch the CI code. enforce
+# stays on every pipeline.
+.falsify-rules:
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "schedule"
+    - if: $CI_COMMIT_BRANCH == "dev" || $CI_COMMIT_BRANCH == "main"
+    - if: $CI_MERGE_REQUEST_SOURCE_BRANCH_NAME == "dev" || $CI_MERGE_REQUEST_SOURCE_BRANCH_NAME == "main"
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+      changes:
+        paths: [ci/**/*, scripts/ci/**/*, .gitlab-ci.yml]
 
 registry:validate:
   stage: registry
@@ -69,7 +89,7 @@ hermes-pr-feedback-ci:enforce:
     - scripts/ci/run.sh enforce hermes-pr-feedback-ci
 
 hermes-pr-feedback-ci:falsify:
-  extends: .reports
+  extends: [.reports, .falsify-rules]
   stage: hermes-pr-feedback-ci
   needs: [registry:validate]
   timeout: 90m
@@ -88,7 +108,7 @@ cpompa-hermes-ci:enforce:
     - scripts/ci/run.sh enforce cpompa-hermes-ci
 
 cpompa-hermes-ci:falsify:
-  extends: .reports
+  extends: [.reports, .falsify-rules]
   stage: cpompa-hermes-ci
   needs: [registry:validate]
   timeout: 90m
