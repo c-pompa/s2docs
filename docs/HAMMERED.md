@@ -245,18 +245,24 @@ the game, not a file.
   chain proof", `csgo_customweapon.vfx`, the earlier tsr_eefa8331 FBX/PNG; no `game\` copy) was the
   previous attempt's probe and was deleted; readback False. Remaining addons: `addon_template`,
   `cs_script_demo`, `iso_spectate`, `workshop_items`. Lease released.
-- **2026-10-24 — in-game visual PASS on the units-correct build with baked maps (pomps-pc, retail, netcon).**
-  Build `b-11204ece` (desktop-pc, build service): ` OK: 1 compiled, 0 failed`, and the compiled model is
-  82,487 B carrying 4,900 triangles — against 2,410,679 B for the 176k-vertex v0. The compiled material
-  pulls the prop's own baked AO (`tsr_eefa8331_ao_png_43e04446.vtex_c`, 1,549,549 B) instead of
-  `materials/default/default_ao`, so the P0 material wiring is proven by a real compile and not by a
-  document diff. Six compiled files were pushed loose into `game\csgo\` (md5 verified on both ends) and the
-  prop was created with `ent_create prop_dynamic {"model" "models/tsr_eefa8331/tsr_eefa8331.vmdl"}`; the
-  user confirmed on screen a **textured prop that reads as a real model, standing at waist/hip height**.
-  That is the units fix confirmed in engine: authored bbox 32.98 × 11.67 × 39.45 in (1.00 m tall) against
-  the pre-fix 2.53× oversize, which read as chest/head height. Model-load proof: a deliberately bogus path
-  logs `Failed loading resource … ERROR_FILEOPEN` while ours is silent, so silence is a real success here.
-  The operational lessons went into the `source2-modding` skill (setang pitch inverted — positive looks
-  down; `ent_create` spawns the prop inside the player hull; `PrintWindow` freezes CS2's swapchain; Steam
-  F12 is dead under `-insecure`; a launch must be an `/it` scheduled task with `-insecure` or netcon never
-  opens). Everything copied to pomps-pc was removed afterwards (`Test-Path` False for both dirs).
+- **2026-10-24 — in-game visual PASS WITHDRAWN (retracted the same day, after a controlled retest).**
+  The compile half stands: build `b-11204ece` (desktop-pc, build service) reported
+  ` OK: 1 compiled, 0 failed`, the model is 82,487 B / 4,900 triangles (v0: 2,410,679 B / 176k verts), and
+  the compiled material pulls the prop's own baked AO (`tsr_eefa8331_ao_png_43e04446.vtex_c`,
+  1,549,549 B) instead of `materials/default/default_ao` — the P0 wiring is proven by a real compile.
+  What does NOT stand is the visual claim: **`ent_create` in this client validates a model path and then
+  spawns nothing renderable.** A deliberately bogus path reports
+  `Failed loading resource … ERROR_FILEOPEN`, while our model and two stock models confirmed present in
+  `pak01_dir.vpk` (`models/weapons/w_eq_armor.vmdl`,
+  `models/breakable_props/break_wooden_door_01/break_wooden_door_01.vmdl`, listed with Source2Viewer)
+  all return silence — and **none of the three ever appears on screen**, neither at the player's feet
+  (`ent_create` spawns at the player's own origin) nor after stepping back, in retail *or* in `-tools -dev`
+  mode. The earlier "textured prop, waist/hip height" answers were responses to leading questions about
+  map geometry, not observations of our asset, so **the units fix is not verified in engine**; only the FBX
+  readback stands (exported 32.86 × 11.68 × 39.38 in vs authored 32.98 × 11.67 × 39.45, max error 0.36%).
+  Two further measurements: `-insecure` is required for netcon but leaves the client stuck on the
+  "equipping loadouts" screen because the GC is unreachable, and `PrintWindow` freezes the swapchain
+  (the picture stops while the process still reports `Responding: True`). Next route to test: **a compiled
+  map/addon that references the model**, so the mount precaches it, instead of `ent_create` of a loose
+  file — see the `source2-modding` skill for the launch/control caveats collected here. Everything copied
+  to pomps-pc was removed afterwards (`Test-Path` False for both dirs).
