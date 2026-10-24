@@ -10,7 +10,10 @@
 #
 # enforce runs with the caller's environment (CI variables decide commit ranges). falsify builds each
 # case in a throwaway git clone of this checkout and runs the check under `env -i` with a short
-# allowlist, so a fixture verdict cannot depend on the machine or the CI job it runs in.
+# allowlist, so a fixture verdict cannot depend on the machine or the CI job it runs in. A fixture
+# that must control the check's environment (a rule about the job environment itself) writes
+# KEY=VALUE lines to <clone>/.git/ci-case.env (plant_env); they are added to that one case's check
+# run only. The file lives in .git, so it is never part of a tree and enforce never reads it.
 # Reports: $CI_REPORT_DIR (default ./ci-reports)/<pipeline>-<mode>.xml (JUnit) + .tsv.
 # Exit: 0 everything held; 1 a rule failed or a falsification did not hold; 2 usage/environment.
 set -euo pipefail
@@ -121,7 +124,8 @@ make_base() {
 
 run_case() {
     # run_case RULE SCRIPT CASE_PATH|accept-unmodified-tree -> appends one row to results.tsv
-    local id="$1" script="$2" case_path="$3" name expect tree log rc start verdict note
+    local id="$1" script="$2" case_path="$3" name expect tree log rc start verdict note line
+    local case_env=()
     name="$(basename "$case_path")"
     case "$name" in
         accept-*) expect=0 ;;
@@ -149,12 +153,24 @@ run_case() {
                 fi
                 ;;
         esac
+        if [ "${rc:-}" != "3" ] && [ -f "$tree/.git/ci-case.env" ]; then
+            while IFS= read -r line || [ -n "$line" ]; do
+                if [[ "$line" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]]; then
+                    case_env+=("$line")
+                else
+                    printf 'fixture %s wrote an invalid .git/ci-case.env line: %s\n' "$name" "$line"
+                    rc=3
+                fi
+            done <"$tree/.git/ci-case.env"
+            printf 'case environment: %s\n' "${case_env[*]-}"
+        fi
     } >"$log" 2>&1
     if [ "${rc:-}" = "3" ]; then
         verdict="ERROR"
         note="fixture could not be planted"
     else
-        if (cd "$tree" && hermetic bash "$CI_REPO_ROOT/$script" "$tree") </dev/null >>"$log" 2>&1; then rc=0; else rc=$?; fi
+        if (cd "$tree" && hermetic env ${case_env[@]+"${case_env[@]}"} bash "$CI_REPO_ROOT/$script" "$tree") \
+            </dev/null >>"$log" 2>&1; then rc=0; else rc=$?; fi
         if [ "$rc" -eq "$expect" ]; then
             verdict="HOLDS"
             note="exit $rc as expected"

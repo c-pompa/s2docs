@@ -28,6 +28,9 @@ REGISTRY = REPO_ROOT / "ci" / "feedback-rules.yaml"
 
 ORIGINS = {"reviewer", "house"}
 HOUSE_SOURCE = "house rule"
+# A house rule that answers a coordinator security finding names the finding instead, dated, so the
+# rule can be traced back to what was found (e.g. a runner exposing the Docker socket to jobs).
+HOUSE_FINDING_RE = re.compile(r"coordinator security finding (?P<date>\d{4}-\d{2}-\d{2}): \S.*")
 RULE_ID_RE = re.compile(r"[A-Z]{3}-[A-Z0-9]+(?:-[A-Z0-9]+)*")
 CONCERN_RE = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
 REVIEW_URL_RE = re.compile(
@@ -132,8 +135,9 @@ def _check_rule(raw: dict, pipelines: dict[str, dict], root: Path, problems: lis
 
     source = str(raw["source"])
     if origin == "house":
-        if source != HOUSE_SOURCE:
-            problems.append(f"{where}: a house rule's source must be exactly {HOUSE_SOURCE!r}, not {source!r}")
+        if source != HOUSE_SOURCE and not HOUSE_FINDING_RE.fullmatch(source):
+            problems.append(f"{where}: a house rule's source must be exactly {HOUSE_SOURCE!r} or "
+                            f"'coordinator security finding <YYYY-MM-DD>: <finding>', not {source!r}")
     else:
         for key in ("feedback_id", "reviewer", "quote"):
             if not str(raw.get(key) or "").strip():
