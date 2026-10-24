@@ -356,13 +356,34 @@ def create_mcp_server(db: Database, workspace: Path | None = None) -> MCPServer:
         mesh: str,
         game: GameId = "cs2",
         translate: list[float] | None = None,
+        collision_surface: Annotated[
+            str | None,
+            Field(
+                description="surfaceproperties entry the prop is given (rock, metal, metal_barrel). "
+                "When absent no physics node is written at all and the document is byte-identical to "
+                "one built without collision. When present the PhysicsHullFile points at the render "
+                "mesh and selects the mesh named <name>_collision inside it."
+            ),
+        ] = None,
+        collision_mesh: Annotated[
+            str | None,
+            Field(
+                description="addon-relative mesh file holding the collision (default: the render mesh, "
+                "which is the pipeline's one-FBX shape). When absent the hull comes from `mesh`. "
+                "Rejected when `collision_surface` is absent."
+            ),
+        ] = None,
         overwrite: bool = False,
     ) -> str:
         """Write a Source 2 model document (.vmdl) for a mesh that is already inside the addon.
 
         `mesh` is addon-relative (e.g. models/probe/probe.dmx). The document copies the shape the
         game's own compiler accepts — compile it on a host with resourcecompiler afterwards
-        (build_start). Returns the written path. Use overwrite=true to replace an existing .vmdl."""
+        (build_start). Returns the written path. Use overwrite=true to replace an existing .vmdl.
+
+        Pass `collision_surface` to give the prop physics: the Blender bridge puts the collision mesh
+        in the same FBX under the name `<name>_collision`, and the document selects it by that name.
+        Omit it (the default) and no physics block is written."""
         from s2docs.asset.model import render_model_doc, write_model_doc
         from s2docs.build.workspace import addon_root
 
@@ -376,7 +397,13 @@ def create_mcp_server(db: Database, workspace: Path | None = None) -> MCPServer:
             if translate is not None and len(translate) != 3:
                 raise ValueError("translate must be exactly 3 numbers (x, y, z)")
             shift = (translate[0], translate[1], translate[2]) if translate else None
-            doc = render_model_doc(name, mesh, translation=shift)
+            doc = render_model_doc(
+                name,
+                mesh,
+                translation=shift,
+                collision=collision_surface,
+                collision_mesh=collision_mesh,
+            )
             return str(write_model_doc(target, doc, overwrite=overwrite))
 
         return _ws(_write)

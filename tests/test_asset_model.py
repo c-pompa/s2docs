@@ -250,3 +250,80 @@ def test_writing_refuses_to_clobber(tmp_path):
         write_model_doc(target, "different")
     write_model_doc(target, "replaced", overwrite=True)
     assert target.read_text(encoding="utf-8") == "replaced"
+
+
+# ------------------------------------------------------------------ CLI: the collision flags
+
+
+def _addon(tmp_path, monkeypatch, name="probe_addon"):
+    from s2docs.build.workspace import addon_root
+    from s2docs.config import get_settings
+
+    monkeypatch.setenv("S2DOCS_WORKSPACE", str(tmp_path / "ws"))
+    get_settings.cache_clear()
+    root = addon_root(get_settings().workspace_dir, "cs2", name)
+    root.mkdir(parents=True)
+    return root
+
+
+def test_cli_collision_surface_emits_the_physics_node(tmp_path, monkeypatch):
+    from s2docs import cli
+
+    root = _addon(tmp_path, monkeypatch)
+    code = cli.main(["--json", "asset", "--addon", "probe_addon", "--name", "probe",
+                     "--mesh", "models/probe/probe.fbx", "--collision-surface", "rock"])
+    assert code == 0
+    doc = (root / "models" / "probe" / "probe.vmdl").read_bytes().decode("utf-8")
+    # the flag reaches the pinned emitter unchanged: same bytes as the library call
+    assert doc == render_model_doc("probe", "models/probe/probe.fbx", collision="rock")
+    assert '_class = "PhysicsShapeList"' in doc
+    assert 'surface_prop = "rock"' in doc
+    assert f'name = "probe{COLLISION_MESH_SUFFIX}"' in doc
+
+
+def test_cli_collision_mesh_points_the_hull_at_another_file(tmp_path, monkeypatch):
+    from s2docs import cli
+
+    root = _addon(tmp_path, monkeypatch)
+    code = cli.main(["--json", "asset", "model", "--addon", "probe_addon", "--name", "probe",
+                     "--mesh", "models/probe/probe.fbx", "--collision-surface", "metal_barrel",
+                     "--collision-mesh", "models/probe/probe_hull.fbx"])
+    assert code == 0
+    doc = (root / "models" / "probe" / "probe.vmdl").read_bytes().decode("utf-8")
+    assert doc == render_model_doc("probe", "models/probe/probe.fbx", collision="metal_barrel",
+                                   collision_mesh="models/probe/probe_hull.fbx")
+    assert 'filename = "models/probe/probe_hull.fbx"' in doc
+    assert 'filename = "models/probe/probe.fbx"' in doc      # render mesh still the render mesh
+    assert 'surface_prop = "metal_barrel"' in doc
+
+
+def test_cli_without_collision_flags_keeps_todays_document(tmp_path, monkeypatch):
+    from s2docs import cli
+
+    root = _addon(tmp_path, monkeypatch)
+    assert cli.main(["--json", "asset", "--addon", "probe_addon", "--name", "probe",
+                     "--mesh", "models/probe/probe.fbx"]) == 0
+    doc = (root / "models" / "probe" / "probe.vmdl").read_bytes().decode("utf-8")
+    assert doc == render_model_doc("probe", "models/probe/probe.fbx")
+    assert "Physics" not in doc
+
+
+def test_cli_collision_mesh_without_a_surface_is_refused(tmp_path, monkeypatch, capsys):
+    from s2docs import cli
+
+    root = _addon(tmp_path, monkeypatch)
+    code = cli.main(["--json", "asset", "--addon", "probe_addon", "--name", "probe",
+                     "--mesh", "models/probe/probe.fbx", "--collision-mesh", "models/probe/hull.fbx"])
+    assert code == 2
+    assert not (root / "models" / "probe" / "probe.vmdl").exists()
+
+
+@pytest.mark.parametrize("bad", ["Rock", "rock/../metal", "materials/rock", "rock prop"])
+def test_cli_rejects_a_surface_that_is_not_a_surfaceproperties_name(tmp_path, monkeypatch, bad):
+    from s2docs import cli
+
+    root = _addon(tmp_path, monkeypatch)
+    code = cli.main(["--json", "asset", "--addon", "probe_addon", "--name", "probe",
+                     "--mesh", "models/probe/probe.fbx", "--collision-surface", bad])
+    assert code == 2
+    assert not (root / "models" / "probe" / "probe.vmdl").exists()

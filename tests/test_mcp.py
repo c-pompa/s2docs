@@ -124,3 +124,49 @@ def test_prompts_and_resources(server):
     }
     assert "open a door" in rendered.messages[0].content.text
     assert "declare module" in resource.contents[0].text
+
+
+def test_build_model_exposes_the_collision_parameters(server):
+    """The one tool that writes a model must reach the merged collision emitter, documented as optional."""
+
+    async def main():
+        async with Client(server) as c:
+            return {t.name: t for t in (await c.list_tools()).tools}
+
+    tool = run(main)["build_model"]
+    schema = tool.input_schema
+    props = schema["properties"]
+    assert {"collision_surface", "collision_mesh"} <= set(props)
+    required = schema.get("required", [])
+    assert "collision_surface" not in required and "collision_mesh" not in required
+    # each parameter says what its absence does, which is the whole contract for a CLI/MCP caller
+    for name in ("collision_surface", "collision_mesh"):
+        description = (props[name].get("description") or "").lower()
+        assert "absent" in description or "omit" in description, f"{name} does not say what absence does"
+
+
+def test_mcp_build_model_writes_the_physics_node_on_request(db, tmp_path):
+    server = create_mcp_server(db, workspace=tmp_path)
+
+    async def main():
+        async with Client(server) as c:
+            await c.call_tool("scaffold_addon", {"name": "mcp_phys"})
+            with_collision = await c.call_tool("build_model", {
+                "addon": "mcp_phys", "name": "probe", "mesh": "models/probe/probe.fbx",
+                "collision_surface": "metal"})
+            without = await c.call_tool("build_model", {
+                "addon": "mcp_phys", "name": "probe2", "mesh": "models/probe2/probe2.fbx"})
+            hull_only = await c.call_tool("build_model", {
+                "addon": "mcp_phys", "name": "probe3", "mesh": "models/probe3/probe3.fbx",
+                "collision_mesh": "models/probe3/probe3_hull.fbx"})
+            return with_collision, without, hull_only
+
+    with_collision, without, hull_only = anyio.run(main)
+    root = tmp_path / "cs2" / "content" / "csgo_addons" / "mcp_phys"
+    phys = (root / "models" / "probe" / "probe.vmdl").read_text(encoding="utf-8")
+    assert '_class = "PhysicsShapeList"' in phys
+    assert 'surface_prop = "metal"' in phys
+    assert 'name = "probe_collision"' in phys
+    plain = (root / "models" / "probe2" / "probe2.vmdl").read_text(encoding="utf-8")
+    assert "Physics" not in plain
+    assert hull_only.is_error
