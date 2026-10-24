@@ -1,2 +1,8 @@
+# Normalise text to LF in the repository: evidence reports and other artifacts are generated on
+# Windows hosts, where text-mode writes turn every "\n" into "\r\n". A CR at the end of a line is
+# trailing whitespace to `git diff --check`, which is what CHC-COMMITS enforces over the whole
+# commit range, so an artifact produced on Windows failed the gate after passing every unit test.
+* text=auto
+
 # Falsification fixtures are diffs: their context lines legitimately end in whitespace.
 ci/fixtures/*.patch -whitespace
