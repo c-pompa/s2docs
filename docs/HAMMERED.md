@@ -172,3 +172,76 @@ the game, not a file.
 - Run tenant jobs on the live 5080, or a compile on a host the user is using.
 - Copy that vendor's models; we are not in the model-training business this quarter — the moat is the
   Source 2 half, where they have nothing.
+
+## 10. Ledger
+
+- **2026-10-23 — prop shader grounded in shipped materials.** Source2Viewer-CLI **20.1**
+  (`20.1.7467+9e2e6c7f`, `cli-windows-x64.zip` from the ValveResourceFormat GitHub release 20.1,
+  sha256 `67AAF8A67A85CA60FD09FF343E62103A4CDF3A2D177FC656231D7D734C5B3AA3`, 52,773,073 B), installed
+  on desktop-pc at `D:\Tools\s2v\cli-20.1\` (outside the game install). `pak01_dir.vpk` lists 2,365
+  `.vmat_c` under `materials/models/props*`. Decompiled for reference only (`D:\Tools\s2v\ref\`,
+  never shipped): `dizzy_cinderblock_color`, `coop_military_crate_color`, `coop_wooden_table_color`.
+  **All three: `shader "csgo_vertexlitgeneric.vfx"`, base colour key `TextureColor`**, and every one
+  sets `TextureMetalness` (`[0.000000 0.000000 0.000000 0.000000]`), `TextureAmbientOcclusion`,
+  `TextureNormal`, `TextureRoughness`. The defaults they reference exist as sources in
+  `content/core/materials/default/` (`default_ao.tga`, `default_normal.tga`, `default_rough.tga`).
+- **2026-10-23 — `.vmat` generator.** `s2docs.asset.material` (`material_path`, `render_vmat`,
+  `write_vmat`; CLI `s2docs asset material --addon A --name N --color <png>`): writes
+  `materials/hammered/<name>/<name>.vmat` + `<name>_color.png`, shader allow-list
+  `("csgo_vertexlitgeneric.vfx",)`, ≤63-char path (Blender ID-name limit), no clobber without force,
+  shares `model.py`'s addon-relative path guard.
+- **2026-10-23 — FBX material named by its `.vmat` path.** `glb_to_fbx_uv.py --material-path`
+  (default `materials/hammered/<name>/<name>.vmat`, ≤63 chars) names the Blender material, then
+  re-imports the FBX and exits 2 unless the material name came back verbatim. Re-bake of TripoSR
+  job eefa8331d9cf4056 into `fbx\eefa8331d9cf4056_v2\` (script sha256 `be5f343e…fa62`, 5.56 s):
+  re-imported material `materials/hammered/tsr_eefa8331/tsr_eefa8331.vmat` — **`/` survives the
+  Blender 4.5.15 FBX exporter and importer**, so no ModelDoc material remap is needed. FBX
+  2,212,140 B (sha256 `f66ce385…de77`), texture 4,066,379 B. Report:
+  `docs/evidence/hammered/tsr_eefa8331_v2_bridge.json`.
+- **2026-10-23 — textured model compiled (build `b-8176b59e`, desktop-pc, build service).** Addon
+  `hammered_probe` assembled with `s2docs scaffold` + `s2docs asset` (.vmdl → the v2 FBX) +
+  `s2docs asset material` (.vmat + colour PNG), pushed by deploy `d-370e90db` (4 files, MD5
+  verified) to `content\csgo_addons\hammered_probe`. `resourcecompiler -i …\tsr_eefa8331.vmdl -nop4`:
+  **` OK: 1 compiled, 0 failed, 0 skipped, 0m:01s`**, exit 0, material guard clean. The .vmdl pulled
+  its .vmat and textures in as children. Artifacts under `game\csgo_addons\hammered_probe\`:
+  `models/tsr_eefa8331/tsr_eefa8331.vmdl_c` 2,410,679 B;
+  `materials/hammered/tsr_eefa8331/tsr_eefa8331.vmat_c` 3,700 B;
+  `materials/hammered/tsr_eefa8331/tsr_eefa8331_color_png_c39ecddf.vtex_c` 1,965,330 B (2048², DXT1);
+  plus `…_vmat_g_tmetalness_ee87d4b4.vtex_c` 1,992 B and `materials/default/default_ao_tga_559f1ac6`
+  (2,232 B) / `default_normal_tga_7be61377` (2,368 B) `.vtex_c`. Log:
+  `docs/evidence/hammered/b-8176b59e_compile.log`.
+- **2026-10-23 — in-game visual check SKIPPED (display gate).** desktop-pc's only session was
+  disconnected (`query user` → `Disc`) and `nvidia-smi display_active` read `Disabled`. After
+  `tscon 2 /dest:console` the session was `console Active` but `display_active` stayed `Disabled`
+  (15 s later too) — the measured precondition under which CS2 crashes in `D3D10Warp.dll` seconds
+  into boot. Steam was also not running. No CS2 or tools were launched; the session was put back with
+  `tsdiscon 2` (`Disc` again). Static evidence instead: the compiled `tsr_eefa8331.vmdl_c` references
+  `materials/hammered/tsr_eefa8331/tsr_eefa8331.vmat`, and a reference glTF export of it has 176,088
+  vertices spanning ~2.1 × 2.5 × 0.75 m (~84 × 100 × 30 units) — a visible prop size. The
+  "textured, not checkerboard" frame still needs a session with the display on.
+- **2026-10-23 — CI: the committed evidence report failed CHC-COMMITS on line endings.**
+  `glb_to_fbx_uv.py` wrote `<name>_bridge.json` in text mode, and that script runs inside Blender on a
+  **Windows** host, so every line came back CRLF; `git diff --check` reads the trailing CR as whitespace
+  over the whole commit range (`FAIL CHC-COMMITS`), which no unit test had covered. Fixed at the source
+  (`open(..., newline="\n")` plus a final newline) and repo-wide (`* text=auto` in `.gitattributes`, so a
+  Windows-side text write is normalised on commit), and the already-committed report was converted to LF
+  (4823 -> 4644 B, 179 CRs removed, JSON re-parsed).
+- **2026-10-24 — in-game visual check PASSED (pomps-pc, retail client), closing the 2026-10-23 skip.**
+  Run on the user's own PC because desktop-pc still reports `display_active=Disabled` on an empty console
+  session (the documented D3D10Warp-crash precondition). Deploy set was the six compiled files of
+  `game\csgo_addons\hammered_probe` zipped on desktop-pc (MD5 `4AD886C3D06FF7E0E212A84FADF1A781`) and
+  checked identical on the control Mac and on pomps-pc. **A loose addon directory does not serve
+  resources to the retail client:** `map de_dust2 customgamemode=hammered_probe` logged
+  `Mounting addon 'hammered_probe'` *and* `SV: addon='hammered_probe'`, yet `ent_create prop_dynamic`
+  answered `Failed loading resource "models/tsr_eefa8331/tsr_eefa8331.vmdl_c" (ERROR_FILEOPEN: File not
+  found)` — `RestrictFlatFileAddonsToTools 1`. The route that works is to copy the compiled `models/` and
+  `materials/` files **loose into `game\csgo\`** and load stock `de_dust2` with no addon mounted; the prop
+  then creates with no resource error and renders its baked 2048² DXT1 diffuse, confirmed on screen by
+  the user as a textured prop rather than the red/black missing-material checkerboard. Every copied file
+  and the deployed addon were removed from pomps-pc afterwards.
+- **2026-10-23 — cleanup.** `hammered_probe` deleted from `content\csgo_addons` (4 files) and
+  `game\csgo_addons` (6 files); readback `Test-Path` False for both. `content\csgo_addons\probe_addon`
+  (created 2026-10-23 20:27, its `.vmat` headed "probe material — generated for the s2docs/Hammered
+  chain proof", `csgo_customweapon.vfx`, the earlier tsr_eefa8331 FBX/PNG; no `game\` copy) was the
+  previous attempt's probe and was deleted; readback False. Remaining addons: `addon_template`,
+  `cs_script_demo`, `iso_spectate`, `workshop_items`. Lease released.

@@ -1,0 +1,33 @@
+=== compile C:\Program Files (x86)\Steam\steamapps\common\Counter-Strike Global Offensive\content\csgo_addons\hammered_probe\models\tsr_eefa8331\tsr_eefa8331.vmdl
+No display adapters found. Falling back to software rasterizer. (nAdapterCount=0, nAdapter=0)
+- csgo_addons\hammered_probe\models\tsr_eefa8331\tsr_eefa8331.vmdl
+- csgo_addons\hammered_probe\materials\hammered\tsr_eefa8331\tsr_eefa8331.vmat
+  +- csgo_addons\hammered_probe\materials\default\default_ao_tga_559f1ac6.vtex
+       Read 1 Input(s): 9ms
+       Generated Mips and Output: 0ms
+       Encoding 4x4x1 texture to ATI1N (Q=3): 0ms
+  +- csgo_addons\hammered_probe\materials\hammered\tsr_eefa8331\tsr_eefa8331_vmat_g_tmetalness_ee87d4b4.vtex
+       Read 1 Input(s): 0ms
+       Generated Mips and Output: 0ms
+       Encoding 4x4x1 texture to DXT1 (Q=3): 0ms
+  +- csgo_addons\hammered_probe\materials\hammered\tsr_eefa8331\tsr_eefa8331_color_png_c39ecddf.vtex
+       Read 1 Input(s): 101ms
+       Generated Mips and Output: 48ms
+       Encoding 2048x2048x1 texture to DXT1 (Q=3): 481ms
+       Compressed lz4 2730kb -> on disk 1917kb (70%): 85ms
+  +- csgo_addons\hammered_probe\materials\default\default_normal_tga_7be61377.vtex
+       Read 2 Input(s): 22ms
+       Generated Mips and Output: 0ms
+       Encoding 4x4x1 texture to BC7 (Q=3): 104ms
+
+-----------------------------------------------------------------
+ OK: 1 compiled, 0 failed, 0 skipped, 0m:01s
+-----------------------------------------------------------------
+=== artifacts
+ART game\csgo_addons\hammered_probe\materials\default\default_ao_tga_559f1ac6.vtex_c 2232
+ART game\csgo_addons\hammered_probe\materials\default\default_normal_tga_7be61377.vtex_c 2368
+ART game\csgo_addons\hammered_probe\materials\hammered\tsr_eefa8331\tsr_eefa8331.vmat_c 3700
+ART game\csgo_addons\hammered_probe\materials\hammered\tsr_eefa8331\tsr_eefa8331_color_png_c39ecddf.vtex_c 1965330
+ART game\csgo_addons\hammered_probe\materials\hammered\tsr_eefa8331\tsr_eefa8331_vmat_g_tmetalness_ee87d4b4.vtex_c 1992
+ART game\csgo_addons\hammered_probe\models\tsr_eefa8331\tsr_eefa8331.vmdl_c 2410679
+=== exit 0

@@ -1,0 +1,180 @@
+{
+  "tool": "glb_to_fbx_uv",
+  "script_sha256": "be5f343e221ba8c73034ead60ff09fddb86d167633cc0ae6e69395969b83fa62",
+  "blender": "4.5.15 LTS",
+  "args": {
+    "glb": "D:\\Docker\\triposr\\triposr_data\\outputs\\eefa8331d9cf4056\\mesh.glb",
+    "out_dir": "D:\\Docker\\triposr\\triposr_data\\fbx\\eefa8331d9cf4056_v2",
+    "name": "tsr_eefa8331",
+    "res": 2048,
+    "angle_limit": 66.0,
+    "island_margin_px": 8.0,
+    "bake_margin": 16,
+    "samples": 4,
+    "shade": "smooth",
+    "vertex_color_space": "srgb",
+    "export_vertex_colors": false,
+    "material_path": "materials/hammered/tsr_eefa8331/tsr_eefa8331.vmat",
+    "force": false
+  },
+  "input": {
+    "glb": "D:\\Docker\\triposr\\triposr_data\\outputs\\eefa8331d9cf4056\\mesh.glb",
+    "bytes": 1175796,
+    "sha256": "a4445ebb85357362c2aebededbfae8b0ef81665b63013d89012f6dbb9eb79e16",
+    "generator": "https://github.com/mikedh/trimesh",
+    "primitives": 1,
+    "attributes": [
+      "COLOR_0",
+      "POSITION"
+    ],
+    "materials": 0,
+    "textures": 0,
+    "images": 0,
+    "vertices": 29401
+  },
+  "mesh": {
+    "vertices": 29401,
+    "faces": 58696,
+    "triangles": 58696,
+    "colour_source": "glb COLOR_0 bytes (vertex order verified against POSITION)",
+    "vertex_color_space": "srgb",
+    "colour_mean_255": [
+      113.66,
+      133.94,
+      140.56
+    ],
+    "world_extent_bu": [
+      0.8377,
+      0.2964,
+      1.002
+    ]
+  },
+  "uv": {
+    "layer": "UVMap",
+    "method": "smart_project",
+    "angle_limit_deg": 66.0,
+    "island_margin": 0.003906,
+    "islands": 2197,
+    "uv_area_frac": 0.209,
+    "zero_area_triangles": 1,
+    "in_unit_square": true
+  },
+  "bake": {
+    "ok": true,
+    "type": "EMIT",
+    "engine": "CYCLES/CPU",
+    "res": 2048,
+    "samples": 4,
+    "margin_px": 16,
+    "margin_type": "ADJACENT_FACES",
+    "texels_written_frac": 0.7173,
+    "triangles_checked": 58695,
+    "centroid_texel_unbaked": 114,
+    "unbaked_tri_uv_area_texels_max": 3.793,
+    "texel_mean_255": [
+      107.04,
+      131.02,
+      145.33
+    ],
+    "texel_std_255": [
+      37.59,
+      24.47,
+      46.73
+    ],
+    "baked_abs_err_mean_255": 0.523,
+    "baked_abs_err_p95_255": 2.0,
+    "baked_abs_err_p999_255": 9.0,
+    "baked_abs_err_max_255": 164.0,
+    "baked_frac_err_gt_8": 0.00162,
+    "final_abs_err_mean_255": 0.635,
+    "final_abs_err_p95_255": 2.0,
+    "final_abs_err_p999_255": 77.805,
+    "final_abs_err_max_255": 203.667,
+    "final_frac_err_gt_8": 0.00356
+  },
+  "material": {
+    "name": "materials/hammered/tsr_eefa8331/tsr_eefa8331.vmat",
+    "kind": "Principled BSDF, Base Color <- baked texture",
+    "texture": "tsr_eefa8331_color.png"
+  },
+  "fbx": {
+    "path": "D:\\Docker\\triposr\\triposr_data\\fbx\\eefa8331d9cf4056_v2\\tsr_eefa8331.fbx",
+    "bytes": 2212140,
+    "sha256": "f66ce385cfef2609d64f5c4b9329b867542c38a7dfda3dfce182f0470311de77",
+    "scan": {
+      "binary": true,
+      "LayerElementUV": 2,
+      "LayerElementNormal": 2,
+      "LayerElementMaterial": 2,
+      "LayerElementColor": 0,
+      "texture_refs": 7
+    }
+  },
+  "texture": {
+    "path": "D:\\Docker\\triposr\\triposr_data\\fbx\\eefa8331d9cf4056_v2\\tsr_eefa8331.fbm\\tsr_eefa8331_color.png",
+    "relpath": "tsr_eefa8331.fbm/tsr_eefa8331_color.png",
+    "copied_by_exporter": true,
+    "bytes": 4066379,
+    "sha256": "9dcedad0166f90cf85cff81493a059ad56d6010deabc87f548b23e8e248729b9"
+  },
+  "reimport": [
+    {
+      "name": "tsr_eefa8331",
+      "type": "MESH",
+      "vertices": 29401,
+      "faces": 58696,
+      "uv_layers": [
+        "UVMap"
+      ],
+      "materials": [
+        {
+          "name": "materials/hammered/tsr_eefa8331/tsr_eefa8331.vmat",
+          "images": [
+            {
+              "file": "tsr_eefa8331_color.png",
+              "exists": true,
+              "size": [
+                2048,
+                2048
+              ]
+            }
+          ]
+        }
+      ],
+      "color_attributes": [],
+      "smooth_face_frac": 1.0,
+      "world_extent_bu": [
+        0.8377,
+        0.2964,
+        1.002
+      ],
+      "rotation_deg": [
+        90.0,
+        -0.0,
+        0.0
+      ]
+    }
+  ],
+  "timings": {
+    "import_s": 0.19,
+    "uv_s": 0.29,
+    "bake_s": 4.72,
+    "export_s": 0.12,
+    "reimport_s": 0.19,
+    "total_s": 5.56
+  },
+  "material_path_check": {
+    "expected": "materials/hammered/tsr_eefa8331/tsr_eefa8331.vmat",
+    "reimported": [
+      "materials/hammered/tsr_eefa8331/tsr_eefa8331.vmat"
+    ],
+    "survived": true
+  },
+  "verdict": {
+    "fbx_has_uv": true,
+    "fbx_has_material": true,
+    "fbx_texture_resolves": true,
+    "baked_texture": true,
+    "material_path_survived": true
+  }
+}

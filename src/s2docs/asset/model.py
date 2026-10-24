@@ -38,24 +38,33 @@ def check_name(name: str) -> str:
     return name
 
 
-def mesh_reference(mesh_rel: str) -> str:
-    """Normalize an addon-relative mesh path: forward slashes, inside the addon, a known suffix.
+def addon_relative(rel: str, suffixes: tuple[str, ...], *, what: str = "reference") -> str:
+    """Normalize an addon-relative asset path: forward slashes, inside the addon, a known suffix.
 
-    Model docs resolve ``filename`` relative to the addon's content root (the observed document
-    references ``maps/de_dust2_iso/worldnodes/<mesh>.dmx``). An absolute path, a ``..`` segment or a
-    drive letter is rejected rather than passed to the compiler to fail on.
+    The one path guard every generated document uses (mesh ``filename``, material and texture
+    paths). An absolute path, a ``..`` segment or a drive letter is rejected rather than passed to
+    the compiler to fail on.
     """
-    raw = (mesh_rel or "").strip().replace("\\", "/")
+    raw = (rel or "").strip().replace("\\", "/")
     if not raw:
-        raise ModelDocError("mesh reference is empty")
+        raise ModelDocError(f"{what} is empty")
     if raw.startswith("/") or re.match(r"^[A-Za-z]:", raw):
-        raise ModelDocError(f"mesh reference must be addon-relative, got {mesh_rel!r}")
+        raise ModelDocError(f"{what} must be addon-relative, got {rel!r}")
     parts = [p for p in raw.split("/") if p not in ("", ".")]
     if ".." in parts:
-        raise ModelDocError(f"mesh reference may not escape the addon: {mesh_rel!r}")
-    if not parts[-1].lower().endswith(MESH_SUFFIXES):
-        raise ModelDocError(f"mesh reference must end in {' or '.join(MESH_SUFFIXES)}: {mesh_rel!r}")
+        raise ModelDocError(f"{what} may not escape the addon: {rel!r}")
+    if not parts or not parts[-1].lower().endswith(suffixes):
+        raise ModelDocError(f"{what} must end in {' or '.join(suffixes)}: {rel!r}")
     return "/".join(parts)
+
+
+def mesh_reference(mesh_rel: str) -> str:
+    """Normalize an addon-relative mesh path (see ``addon_relative``).
+
+    Model docs resolve ``filename`` relative to the addon's content root (the observed document
+    references ``maps/de_dust2_iso/worldnodes/<mesh>.dmx``).
+    """
+    return addon_relative(mesh_rel, MESH_SUFFIXES, what="mesh reference")
 
 
 def render_model_doc(
