@@ -206,3 +206,131 @@ def test_cli_asset_model_form_still_works(tmp_path, monkeypatch):
                      "--mesh", "models/probe2/probe2.fbx"]) == 0
     # the model form still needs --mesh
     assert cli.main(["asset", "--addon", "probe_addon", "--name", "probe3"]) == 2
+
+
+# ------------------------------------------------ baked normal/AO (the Blender bridge's output)
+# glb_to_fbx_uv.py bakes <name>_normal.png and <name>_ao.png beside <name>_color.png; material.py
+# consumes them when they are there and keeps the engine defaults when they are not.
+NORMAL_PNG = b"\x89PNG\r\n\x1a\n" + b"tangent-space normal" * 2
+AO_PNG = b"\x89PNG\r\n\x1a\n" + b"occlusion" * 2
+
+
+@pytest.fixture
+def baked(tmp_path):
+    """A bridge output dir: colour + normal + AO, exactly as the .fbm folder looks after a bake."""
+    d = tmp_path / "baked" / "probe.fbm"
+    d.mkdir(parents=True)
+    (d / "probe_color.png").write_bytes(PNG)
+    (d / "probe_normal.png").write_bytes(NORMAL_PNG)
+    (d / "probe_ao.png").write_bytes(AO_PNG)
+    return d
+
+
+def test_find_baked_maps_reports_only_the_maps_that_exist(baked):
+    from s2docs.asset.material import find_baked_maps
+
+    assert find_baked_maps(baked / "probe_color.png") == {
+        "normal": baked / "probe_normal.png",
+        "ao": baked / "probe_ao.png",
+    }
+    (baked / "probe_ao.png").unlink()
+    assert set(find_baked_maps(baked / "probe_color.png")) == {"normal"}
+
+
+def test_baked_maps_beside_the_colour_texture_are_wired_and_copied(tmp_path, baked):
+    addon = tmp_path / "addon"
+    addon.mkdir()
+    out = write_vmat(addon, "probe", baked / "probe_color.png")
+    doc = out.read_text(encoding="utf-8")
+    assert '\t"TextureNormal"\t"materials/hammered/probe/probe_normal.png"\n' in doc
+    assert '\t"TextureAmbientOcclusion"\t"materials/hammered/probe/probe_ao.png"\n' in doc
+    # the keys point at files that really landed beside the .vmat, byte for byte
+    assert (out.parent / "probe_normal.png").read_bytes() == NORMAL_PNG
+    assert (out.parent / "probe_ao.png").read_bytes() == AO_PNG
+    # the engine defaults are gone for the two wired keys and kept for the one that was not baked
+    assert "materials/default/default_normal.tga" not in doc
+    assert "materials/default/default_ao.tga" not in doc
+    assert '\t"TextureRoughness"\t"materials/default/default_rough.tga"\n' in doc
+    # LF endings and one KV block, as before
+    assert "\r" not in doc
+    assert doc.count("{") == doc.count("}") == 1
+
+
+def test_colour_only_is_still_the_document_it_always_was(tmp_path, png):
+    addon = tmp_path / "addon"
+    addon.mkdir()
+    out = write_vmat(addon, "probe", png)
+    assert out.read_text(encoding="utf-8") == render_vmat("probe")
+    doc = out.read_text(encoding="utf-8")
+    assert '\t"TextureNormal"\t"materials/default/default_normal.tga"\n' in doc
+    assert '\t"TextureAmbientOcclusion"\t"materials/default/default_ao.tga"\n' in doc
+    assert not (out.parent / "probe_normal.png").exists()
+    assert not (out.parent / "probe_ao.png").exists()
+
+
+def test_one_map_alone_leaves_the_other_key_on_its_default(tmp_path, baked):
+    (baked / "probe_ao.png").unlink()
+    addon = tmp_path / "addon"
+    addon.mkdir()
+    out = write_vmat(addon, "probe", baked / "probe_color.png")
+    doc = out.read_text(encoding="utf-8")
+    assert '\t"TextureNormal"\t"materials/hammered/probe/probe_normal.png"\n' in doc
+    assert '\t"TextureAmbientOcclusion"\t"materials/default/default_ao.tga"\n' in doc
+    assert not (out.parent / "probe_ao.png").exists()
+
+
+def test_a_map_belonging_to_another_base_name_is_not_picked_up(tmp_path, png):
+    # probe_color.png with someone else's normal map beside it: wiring that would be a guess
+    (png.parent / "other_normal.png").write_bytes(NORMAL_PNG)
+    addon = tmp_path / "addon"
+    addon.mkdir()
+    out = write_vmat(addon, "probe", png)
+    assert out.read_text(encoding="utf-8") == render_vmat("probe")
+
+
+def test_a_baked_map_that_is_not_a_png_is_refused(tmp_path, baked):
+    (baked / "probe_normal.png").write_bytes(b"GIF89a....")
+    addon = tmp_path / "addon"
+    addon.mkdir()
+    with pytest.raises(MaterialError, match="PNG"):
+        write_vmat(addon, "probe", baked / "probe_color.png")
+    assert not (addon / "materials" / "hammered" / "probe" / "probe.vmat").exists()
+
+
+def test_a_baked_map_is_not_clobbered_without_force(tmp_path, baked):
+    addon = tmp_path / "addon"
+    dest = addon / "materials" / "hammered" / "probe" / "probe_normal.png"
+    dest.parent.mkdir(parents=True)
+    dest.write_bytes(b"hand-made")
+    with pytest.raises(MaterialError, match="force"):
+        write_vmat(addon, "probe", baked / "probe_color.png")
+    assert dest.read_bytes() == b"hand-made"
+    write_vmat(addon, "probe", baked / "probe_color.png", force=True)
+    assert dest.read_bytes() == NORMAL_PNG
+
+
+def test_render_vmat_refuses_a_baked_value_that_is_not_an_addon_png():
+    with pytest.raises(MaterialError):
+        render_vmat("probe", baked={"normal": "../evil.png"})
+    with pytest.raises(MaterialError):
+        render_vmat("probe", baked={"ao": "materials/hammered/probe/probe_ao.tga"})
+    with pytest.raises(MaterialError):
+        render_vmat("probe", baked={"rough": "materials/hammered/probe/probe_rough.png"})
+
+
+def test_cli_asset_material_wires_the_baked_maps(tmp_path, monkeypatch, baked, capsys):
+    from s2docs import cli
+
+    root = _addon(tmp_path, monkeypatch)
+    code = cli.main(["--json", "asset", "material", "--addon", "probe_addon", "--name", "probe",
+                     "--color", str(baked / "probe_color.png")])
+    assert code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["textures"] == {
+        "TextureColor": "materials/hammered/probe/probe_color.png",
+        "TextureNormal": "materials/hammered/probe/probe_normal.png",
+        "TextureAmbientOcclusion": "materials/hammered/probe/probe_ao.png",
+    }
+    doc = (root / "materials" / "hammered" / "probe" / "probe.vmat").read_text(encoding="utf-8")
+    assert "materials/default/default_normal.tga" not in doc
+    assert (root / "materials/hammered/probe/probe_normal.png").read_bytes() == NORMAL_PNG
