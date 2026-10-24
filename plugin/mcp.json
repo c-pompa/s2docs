@@ -8,7 +8,7 @@
         "--exclude-newer",
         "2026-10-10T00:00:00Z",
         "--from",
-        "git+https://github.com/c-pompa/s2docs.git@b126b28ceeef18699a414c9b4e9cd0b30e2c5ddd",
+        "git+https://github.com/c-pompa/s2docs.git@66870b28cc18304ad6329c71104611ef4fdd2db3",
         "s2docs",
         "mcp"
       ],

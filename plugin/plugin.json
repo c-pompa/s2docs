@@ -1,7 +1,7 @@
 {
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "s2docs",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Source 2 documentation and mod tooling for CS2 and Deadlock. Searches an indexed copy of Valve's game data (convars, Hammer entities, schema classes, game events, cs_script and Pulse APIs, Source2Wiki pages) and drives the mod pipeline: scaffold addons, validate scripts and .cfg files, start map builds on a Windows host, deploy and verify what landed, and record evidence, test runs and job state. Runs entirely on your machine against a local SQLite index.",
   "author": {
     "name": "Christian Pompa",
