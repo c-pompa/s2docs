@@ -36,7 +36,7 @@ Side = Literal["server", "client"]
 AddonName = Annotated[str, Field(description="Addon name: lowercase [a-z0-9_], e.g. 'jump_arena'")]
 ProjectId = Annotated[str, Field(description="Project id from start_project, e.g. 'p-1a2b3c4d'")]
 RelPath = Annotated[str, Field(description="Path inside the addon, e.g. 'scripts/jump_arena.js'")]
-HostId = Annotated[str, Field(description="Host id from list_hosts, e.g. 'desktop-pc'")]
+HostId = Annotated[str, Field(description="Host id from list_hosts, e.g. 'build-pc'")]
 Owner = Annotated[
     str,
     Field(description="Who is asking: workstream/session id, e.g. 'ws/occluder-wire', 'p-1a2b3c4d', 'coord-session'"),
@@ -349,6 +349,38 @@ def create_mcp_server(db: Database, workspace: Path | None = None) -> MCPServer:
         check_game(game)
         return run(lambda r: ws.scaffold(workspace, r, game=game, name=name, with_script=with_script))
 
+    @server.tool(annotations=WRITES_WORKSPACE)
+    def build_model(
+        addon: AddonName,
+        name: str,
+        mesh: str,
+        game: GameId = "cs2",
+        translate: list[float] | None = None,
+        overwrite: bool = False,
+    ) -> str:
+        """Write a Source 2 model document (.vmdl) for a mesh that is already inside the addon.
+
+        `mesh` is addon-relative (e.g. models/probe/probe.dmx). The document copies the shape the
+        game's own compiler accepts — compile it on a host with resourcecompiler afterwards
+        (build_start). Returns the written path. Use overwrite=true to replace an existing .vmdl."""
+        from s2docs.asset.model import render_model_doc, write_model_doc
+        from s2docs.build.workspace import addon_root
+
+        check_game(game)
+
+        def _write() -> str:
+            root = addon_root(workspace, game, addon)
+            if not root.is_dir():
+                raise FileNotFoundError(f"addon {addon!r} does not exist in the local workspace")
+            target = root / "models" / name / f"{name}.vmdl"
+            if translate is not None and len(translate) != 3:
+                raise ValueError("translate must be exactly 3 numbers (x, y, z)")
+            shift = (translate[0], translate[1], translate[2]) if translate else None
+            doc = render_model_doc(name, mesh, translation=shift)
+            return str(write_model_doc(target, doc, overwrite=overwrite))
+
+        return _ws(_write)
+
     @server.tool(annotations=READ_ONLY)
     def list_addons(game: GameId = "cs2") -> list[str]:
         """List addons in the local workspace."""
@@ -489,11 +521,15 @@ def create_mcp_server(db: Database, workspace: Path | None = None) -> MCPServer:
 
     @server.tool(annotations=HOSTS_WRITE)
     def register_host(
-        host_id: Annotated[str, Field(description="Short id: lowercase [a-z0-9-], e.g. 'desktop-pc'")],
+        host_id: Annotated[str, Field(description="Short id: lowercase [a-z0-9-], e.g. 'build-pc'")],
         ssh_target: Annotated[
-            str, Field(description="ssh alias or user@host, e.g. 'pomps-pc' or 'pompa@100.64.130.72'")
+            str,
+            Field(
+                description="ssh alias or [user@]host[:port] (letters, digits, '.', '_', '-'; never starting "
+                "with '-'), e.g. 'rtx-pc' or 'pompa@192.0.2.172'"
+            ),
         ],
-        hostname: Annotated[str | None, Field(description="Machine name, e.g. 'DESKTOP-39NF657'")] = None,
+        hostname: Annotated[str | None, Field(description="Machine name, e.g. 'DESKTOP-BUILDPC'")] = None,
         ssh_key: Annotated[str | None, Field(description="Identity file path if not the ssh default")] = None,
         shell: Annotated[
             Literal["cmd", "powershell"] | None, Field(description="Login shell flavor on the host")

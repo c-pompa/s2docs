@@ -596,7 +596,10 @@ class Repository:
         if root is None:
             raise NotFound(f"no schema class/enum {name!r} in {game}" + (f" module {module}" if module else ""))
 
-        # Bases resolve by name, preferring the same module as the child.
+        # Bases resolve by name, preferring the same module as the child, then the first module by
+        # name. Written as "no better candidate exists" rather than ORDER BY ... LIMIT 1 in a
+        # correlated subquery: SQLite 3.46 (Debian trixie) cannot see the outer c.module from that
+        # ORDER BY. UNIQUE (build_id, module, name) makes the order total, so one candidate is left.
         rows = self.conn.execute(
             """
             WITH RECURSIVE chain(id, name, module, depth) AS (
@@ -605,11 +608,13 @@ class Repository:
                 SELECT s.id, s.name, s.module, c.depth + 1
                 FROM chain c
                 JOIN schema_class_bases b ON b.class_id = c.id
-                JOIN schema_classes s ON s.id = (
-                    SELECT id FROM schema_classes
-                    WHERE build_id = ? AND name = b.base_name
-                    ORDER BY module = c.module DESC, module LIMIT 1)
+                JOIN schema_classes s ON s.build_id = ? AND s.name = b.base_name
                 WHERE c.depth < ?
+                  AND NOT EXISTS (
+                      SELECT 1 FROM schema_classes t
+                      WHERE t.build_id = s.build_id AND t.name = s.name AND t.id != s.id
+                        AND ((t.module = c.module) > (s.module = c.module)
+                             OR ((t.module = c.module) = (s.module = c.module) AND t.module < s.module)))
             )
             SELECT id, name, min(depth) AS depth FROM chain GROUP BY id ORDER BY depth
             """,

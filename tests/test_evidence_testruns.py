@@ -23,7 +23,7 @@ from s2docs.orchestration.engine import GateFailed, Orchestrator
 @pytest.fixture
 def edb(tmp_path) -> Database:
     db = Database(tmp_path / "evidence.db")
-    hosts.register_host(db, "desktop-pc", "pompa@100.64.130.72", shell="powershell")
+    hosts.register_host(db, "build-pc", "pompa@192.0.2.172", shell="powershell")
     return db
 
 
@@ -136,11 +136,11 @@ def test_test_run_state_transitions(edb):
 
 def test_test_run_claims_and_releases_host(edb, tmp_path):
     pid = _project(edb, tmp_path)
-    run = test_runs.start(edb, "iso_test", host_id="desktop-pc", project_id=pid)
-    lock = hosts.get_host(edb, "desktop-pc").lock
+    run = test_runs.start(edb, "iso_test", host_id="build-pc", project_id=pid)
+    lock = hosts.get_host(edb, "build-pc").lock
     assert lock is not None and lock.owner == f"test:{run.id}"
     test_runs.finish(edb, run.id, "pass", note="ok")
-    assert hosts.get_host(edb, "desktop-pc").lock is None
+    assert hosts.get_host(edb, "build-pc").lock is None
     # finishing a project-linked run records a console-transcript evidence row
     rows = evidence.list_evidence(edb, project_id=pid, kind="console_transcript")
     assert len(rows) == 1 and rows[0].data["state"] == "pass" and rows[0].data["name"] == "iso_test"
@@ -150,26 +150,26 @@ def test_test_run_finish_does_not_release_another_owners_lock(edb, tmp_path):
     """The review's critical finding: finishing/clearing an orphaned test run must only release the
     lease it still owns — never delete whoever holds the host now."""
     pid = _project(edb, tmp_path)
-    run = test_runs.start(edb, "iso_test", host_id="desktop-pc", project_id=pid)
-    hosts.claim_host(edb, "desktop-pc", "ws/new-owner", force=True)  # another owner takes over
+    run = test_runs.start(edb, "iso_test", host_id="build-pc", project_id=pid)
+    hosts.claim_host(edb, "build-pc", "ws/new-owner", force=True)  # another owner takes over
     test_runs.finish(edb, run.id, "pass", note="orphan finished")
-    lock = hosts.get_host(edb, "desktop-pc").lock
+    lock = hosts.get_host(edb, "build-pc").lock
     assert lock is not None and lock.owner == "ws/new-owner"  # the new owner's lock survives
 
 
 def test_test_run_clear_does_not_release_another_owners_lock(edb):
-    run = test_runs.start(edb, "iso_test", host_id="desktop-pc")
-    hosts.claim_host(edb, "desktop-pc", "ws/new-owner", force=True)
+    run = test_runs.start(edb, "iso_test", host_id="build-pc")
+    hosts.claim_host(edb, "build-pc", "ws/new-owner", force=True)
     cleaned = test_runs.clear(edb, run.id)  # `iso_test off` on an orphaned run
     assert cleaned.state == "idle"
-    lock = hosts.get_host(edb, "desktop-pc").lock
+    lock = hosts.get_host(edb, "build-pc").lock
     assert lock is not None and lock.owner == "ws/new-owner"
 
 
 def test_test_run_host_contention_and_unknown(edb):
-    hosts.claim_host(edb, "desktop-pc", "ws/other")
+    hosts.claim_host(edb, "build-pc", "ws/other")
     with pytest.raises(hosts.HostLocked):
-        test_runs.start(edb, "iso_test", host_id="desktop-pc")
+        test_runs.start(edb, "iso_test", host_id="build-pc")
     assert test_runs.list_runs(edb) == []  # nothing recorded when the lease can't be taken
     with pytest.raises(hosts.HostError):
         test_runs.start(edb, "iso_test", host_id="ghost")
@@ -204,7 +204,7 @@ def test_mcp_evidence_and_test_flow(edb, tmp_path):
                 {"project_id": pid, "step_id": "draft", "kind": "file_hash", "data": {"md5": "cd" * 16}},
             )
             listed = await c.call_tool("list_evidence", {"project_id": pid})
-            t = await c.call_tool("test_start", {"name": "iso_test", "host_id": "desktop-pc", "project_id": pid})
+            t = await c.call_tool("test_start", {"name": "iso_test", "host_id": "build-pc", "project_id": pid})
             rid = t.structured_content["id"]
             stepped = await c.call_tool("test_step", {"run_id": rid, "text": "occ probe"})
             finished = await c.call_tool("test_finish", {"run_id": rid, "result": "pass", "note": "clean"})
@@ -338,7 +338,7 @@ def test_api_evidence_and_test_routes(edb, client, tmp_path):
     assert client.get("/api/evidence", params={"project_id": pid, "step_id": "draft"}).json()[0]["id"] == eid
     assert client.post("/api/evidence", json={"project_id": pid, "kind": "bogus"}).status_code == 422
 
-    started = client.post("/api/test-runs", json={"name": "iso_test", "host_id": "desktop-pc", "project_id": pid})
+    started = client.post("/api/test-runs", json={"name": "iso_test", "host_id": "build-pc", "project_id": pid})
     assert started.status_code == 201 and started.json()["state"] == "running"
     rid = started.json()["id"]
     assert client.post(f"/api/test-runs/{rid}/step", json={"text": "probe"}).json()["step"] == "probe"
@@ -347,7 +347,7 @@ def test_api_evidence_and_test_routes(edb, client, tmp_path):
         client.post(f"/api/test-runs/{rid}/finish", json={"result": "fail", "note": "boom"}).json()["state"] == "fail"
     )
     assert client.get("/api/test-runs", params={"state": "fail"}).json()[0]["id"] == rid
-    assert hosts.get_host(edb, "desktop-pc").lock is None
+    assert hosts.get_host(edb, "build-pc").lock is None
     # a second finish is a domain error (400)
     assert client.post(f"/api/test-runs/{rid}/finish", json={"result": "pass"}).status_code == 400
     assert client.post(f"/api/test-runs/{rid}/clear").json()["state"] == "idle"
@@ -367,7 +367,7 @@ def _run_cli(monkeypatch, tmp_path, argv):
 
 def test_cli_evidence_and_test(tmp_path, monkeypatch, capsys):
     db = Database(tmp_path / "data" / "s2docs.db")
-    hosts.register_host(db, "desktop-pc", "pompa@x", shell="powershell")
+    hosts.register_host(db, "build-pc", "pompa@x", shell="powershell")
     pid = _project(db, tmp_path)
 
     rc = _run_cli(
@@ -398,7 +398,7 @@ def test_cli_evidence_and_test(tmp_path, monkeypatch, capsys):
     rc = _run_cli(monkeypatch, tmp_path, ["evidence", "show", eid])
     assert rc == 0 and "file_hash" in capsys.readouterr().out
 
-    rc = _run_cli(monkeypatch, tmp_path, ["--json", "test", "start", "--name", "iso_test", "--host", "desktop-pc"])
+    rc = _run_cli(monkeypatch, tmp_path, ["--json", "test", "start", "--name", "iso_test", "--host", "build-pc"])
     assert rc == 0
     rid = json.loads(capsys.readouterr().out)["test_run"]["id"]
     rc = _run_cli(monkeypatch, tmp_path, ["--json", "test", "step", rid, "occ probe"])
@@ -407,7 +407,7 @@ def test_cli_evidence_and_test(tmp_path, monkeypatch, capsys):
     assert rc == 0 and '"state": "pass"' in capsys.readouterr().out
     rc = _run_cli(monkeypatch, tmp_path, ["--json", "test", "status"])
     assert rc == 0 and '"test_run"' in capsys.readouterr().out
-    assert hosts.get_host(db, "desktop-pc").lock is None
+    assert hosts.get_host(db, "build-pc").lock is None
 
 
 def test_cli_exit_codes(tmp_path, monkeypatch, capsys):
@@ -426,9 +426,9 @@ def test_cli_exit_codes(tmp_path, monkeypatch, capsys):
     capsys.readouterr()
     # locked
     db = Database(tmp_path / "data" / "s2docs.db")
-    hosts.register_host(db, "desktop-pc", "pompa@x")
-    hosts.claim_host(db, "desktop-pc", "ws/other")
-    rc = _run_cli(monkeypatch, tmp_path, ["test", "start", "--name", "iso_test", "--host", "desktop-pc"])
+    hosts.register_host(db, "build-pc", "pompa@x")
+    hosts.claim_host(db, "build-pc", "ws/other")
+    rc = _run_cli(monkeypatch, tmp_path, ["test", "start", "--name", "iso_test", "--host", "build-pc"])
     assert rc == 2 and "LOCKED" in capsys.readouterr().err
 
 

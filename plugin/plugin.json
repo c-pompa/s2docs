@@ -1,0 +1,51 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "s2docs",
+  "version": "0.1.2",
+  "description": "Source 2 documentation and mod tooling for CS2 and Deadlock. Searches an indexed copy of Valve's game data (convars, Hammer entities, schema classes, game events, cs_script and Pulse APIs, Source2Wiki pages) and drives the mod pipeline: scaffold addons, validate scripts and .cfg files, start map builds on a Windows host, deploy and verify what landed, and record evidence, test runs and job state. Runs entirely on your machine against a local SQLite index.",
+  "author": {
+    "name": "Christian Pompa",
+    "url": "https://github.com/c-pompa/s2docs"
+  },
+  "homepage": "https://github.com/c-pompa/s2docs",
+  "repository": "https://github.com/c-pompa/s2docs",
+  "license": "MIT",
+  "keywords": [
+    "source2",
+    "cs2",
+    "deadlock",
+    "hammer",
+    "cs_script",
+    "pulse",
+    "modding",
+    "vmap",
+    "mcp",
+    "game-dev"
+  ],
+  "extensions": {
+    "com.nousresearch.hermes": {
+      "servers": {
+        "s2docs": {
+          "trust": "untrusted",
+          "timeout": 300
+        }
+      },
+      "config_schema": {
+        "data_dir": {
+          "type": "str",
+          "env": "S2DOCS_DATA_DIR",
+          "default": "",
+          "label": "Index directory",
+          "description": "Absolute path to the s2docs data directory (holds s2docs.db, the addon workspace and the build sources). Empty uses the fixed per-user default (~/.local/share/s2docs on macOS and Linux, %LOCALAPPDATA%\\s2docs on Windows). Point this at an existing index instead of rebuilding one. Saving it restarts the s2docs server with the new directory."
+        },
+        "public_url": {
+          "type": "str",
+          "env": "S2DOCS_PUBLIC_URL",
+          "default": "",
+          "label": "Web UI base URL",
+          "description": "The address the s2docs web UI is served on, used to build the links tools return (job pages, screenshots, evidence). Empty uses the default http://127.0.0.1:8812. Set it when `s2docs serve` runs somewhere else."
+        }
+      }
+    }
+  }
+}

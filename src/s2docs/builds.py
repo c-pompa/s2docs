@@ -256,6 +256,9 @@ def start(
     if not command.strip():
         raise BuildError("command is required")
     host = hosts.get_host(db, host_id)  # raises HostError if unknown
+    # Built (and the stored target re-validated) before the lease or the run record exist, so an
+    # unsafe target fails cleanly instead of leaving a 'running' row behind.
+    argv = hosts.ssh_argv(host) + [command]
     rid = "b-" + secrets.token_hex(4)
     owner = f"build:{rid}"
     phase = kind.strip() or None  # e.g. 'compile' — settable per-run via kind, allowlisted per phase
@@ -296,7 +299,6 @@ def start(
             (rid, host_id, kind, command, owner, str(log_path), notes),
         )
 
-    argv = hosts.ssh_argv(host) + [command]
     log_fh = log_path.open("wb")
     try:
         kwargs: dict = {"stdout": log_fh, "stderr": subprocess.STDOUT}

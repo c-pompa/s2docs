@@ -19,7 +19,6 @@ from __future__ import annotations
 import pytest
 
 from s2docs.build.validate_script import ToolchainMissing, find_tsc
-from s2docs.db.repository import Repository
 from s2docs.learning import reward
 
 

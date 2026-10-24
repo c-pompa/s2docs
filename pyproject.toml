@@ -3,14 +3,17 @@ name = "s2docs"
 version = "0.1.0"
 description = "Source 2 (CS2, Deadlock) API/CLI documentation: SQLite index, FastAPI site, MCP server"
 authors = [
-    { name = "Christian Pompa", email = "chrispompaemail@gmail.com" }
+    { name = "Christian Pompa" }
 ]
 requires-python = ">=3.11"
+# Floors are the oldest releases the suite passes on at the [tool.uv] snapshot below, upper bounds
+# stop before the next breaking line after the locked version (<next major; <0.(minor+1) for 0.x).
+# Both are enforced by hermes-pr-feedback-ci (HPF-005, HPF-006); see docs/FEEDBACK_CI.md.
 dependencies = [
-    "fastapi>=0.143.0",
-    "mcp[cli]>=2.3.0,<3",
-    "pydantic>=2.14.0",
-    "uvicorn[standard]>=0.54.0",
+    "fastapi>=0.110.1,<0.144",
+    "mcp[cli]>=2.0.0,<3",
+    "pydantic>=2.12.0,<3",
+    "uvicorn[standard]>=0.31.1,<0.55",
 ]
 
 [project.scripts]
@@ -24,8 +27,15 @@ build-backend = "uv_build"
 dev = [
     "httpx>=0.28.1",
     "pytest>=9.1.1",
+    "pyyaml>=6.0.2",  # scripts/ci/registry.py reads ci/feedback-rules.yaml
     "ruff>=0.17.0",
 ]
+
+[tool.uv]
+# One release snapshot for everything uv resolves in this project (uv.lock, CI): the same instant
+# the plugin's first start resolves at (plugin/mcp.json --exclude-newer). Move both together, then
+# `uv lock` (HPF-009).
+exclude-newer = "2026-10-10T00:00:00Z"
 
 [tool.ruff]
 line-length = 120

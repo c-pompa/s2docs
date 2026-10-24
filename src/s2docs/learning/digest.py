@@ -24,7 +24,8 @@ import json
 from pathlib import Path
 
 from s2docs.db.connection import Database
-from s2docs.learning import events as _events, iso, jobs_index, learning_dir
+from s2docs.learning import events as _events
+from s2docs.learning import iso, jobs_index, learning_dir
 
 __all__ = ["CLASSES", "MIN_SIGNALS_PER_LESSON", "classify", "digest"]
 
@@ -198,8 +199,8 @@ def _render(signals: list[dict], counts: dict[str, int], lessons: dict, notes: l
         f"count >= {MIN_SIGNALS_PER_LESSON} and a named ref. A lesson is a rule, never a log.",
         "",
     ]
-    body = [f"- `{l['class']}` ({l['count']}) → {l['owner_hint'] or 'unmapped'}; refs: "
-            f"{', '.join(l['refs']) or '(none)'}" for l in lessons["lessons"]]
+    body = [f"- `{lesson['class']}` ({lesson['count']}) → {lesson['owner_hint'] or 'unmapped'}; refs: "
+            f"{', '.join(lesson['refs']) or '(none)'}" for lesson in lessons["lessons"]]
     lines += body or ["- _(nothing clears the bar)_"]
 
     lines += ["", "## Harness notes (a skip is not a pass)", ""]

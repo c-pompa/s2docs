@@ -64,7 +64,7 @@ __all__ = ["FLOORS", "K", "RewriteEvalError", "eval_set", "load_rewriter", "scor
 Rewriter = Callable[[str], Rewrite]
 
 # The measured baselines, recorded as floors. Re-measured on the 45-row set against the live index
-# (http://10.88.15.208:8812/api/search), recall@5: baseline (prose, unscoped) 0.11, deterministic
+# (http://127.0.0.1:8812/api/search), recall@5: baseline (prose, unscoped) 0.11, deterministic
 # rewrite (query+game) 0.27, oracle (curated keywords, game-scoped) 0.82. These are *floors*: at or
 # above is a pass. Changing one is a deliberate diff, never a way to make a failing run green.
 #

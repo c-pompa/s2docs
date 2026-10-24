@@ -24,7 +24,7 @@ from s2docs.mcp_server import create_mcp_server
 @pytest.fixture
 def wdb(tmp_path) -> Database:
     db = Database(tmp_path / "webui.db")
-    hosts.register_host(db, "desktop-pc", "pompa@100.64.130.72", hostname="DESKTOP-39NF657", shell="powershell")
+    hosts.register_host(db, "build-pc", "pompa@192.0.2.172", hostname="DESKTOP-BUILDPC", shell="powershell")
     hosts.register_host(db, "mini", "mini.local", shell="cmd")
     return db
 
@@ -38,46 +38,46 @@ def _age_lock(db: Database) -> None:
 
 # ------------------------------------------------------------ lock history (service)
 def test_lock_history_records_claim_and_release(wdb, tmp_path):
-    hosts.claim_host(wdb, "desktop-pc", "ws/a")
-    hosts.release_host(wdb, "desktop-pc", "ws/a")
-    evs = hosts.lock_history(wdb, "desktop-pc")
+    hosts.claim_host(wdb, "build-pc", "ws/a")
+    hosts.release_host(wdb, "build-pc", "ws/a")
+    evs = hosts.lock_history(wdb, "build-pc")
     assert [e.event for e in evs] == ["released", "claimed"]  # newest first
-    assert evs[0].owner == "ws/a" and evs[0].host_id == "desktop-pc"
+    assert evs[0].owner == "ws/a" and evs[0].host_id == "build-pc"
     assert evs[0].detail is None and evs[1].detail is None  # same owner: no takeover/release detail
     assert hosts.lock_history(wdb, "mini") == []  # no events for an untouched host
 
 
 def test_lock_history_stale_takeover_detail(wdb):
-    hosts.claim_host(wdb, "desktop-pc", "ws/dead", ttl_sec=60)
+    hosts.claim_host(wdb, "build-pc", "ws/dead", ttl_sec=60)
     _age_lock(wdb)
-    hosts.claim_host(wdb, "desktop-pc", "ws/new")
-    ev = hosts.lock_history(wdb, "desktop-pc")[0]
+    hosts.claim_host(wdb, "build-pc", "ws/new")
+    ev = hosts.lock_history(wdb, "build-pc")[0]
     assert ev.event == "claimed" and ev.owner == "ws/new" and "stale lock" in (ev.detail or "")
 
 
 def test_lock_history_forced_release_and_limit(wdb):
-    hosts.claim_host(wdb, "desktop-pc", "ws/a")
-    hosts.release_host(wdb, "desktop-pc", "ws/other", force=True)  # released by a different owner
-    assert "ws/other" in (hosts.lock_history(wdb, "desktop-pc")[0].detail or "")
+    hosts.claim_host(wdb, "build-pc", "ws/a")
+    hosts.release_host(wdb, "build-pc", "ws/other", force=True)  # released by a different owner
+    assert "ws/other" in (hosts.lock_history(wdb, "build-pc")[0].detail or "")
     # many events, newest-first and capped by limit
     for i in range(5):
-        hosts.claim_host(wdb, "desktop-pc", f"ws/{i}")
-        hosts.release_host(wdb, "desktop-pc", f"ws/{i}")
-    assert len(hosts.lock_history(wdb, "desktop-pc", limit=3)) == 3
-    assert hosts.lock_history(wdb, "desktop-pc")[0].event == "released"
+        hosts.claim_host(wdb, "build-pc", f"ws/{i}")
+        hosts.release_host(wdb, "build-pc", f"ws/{i}")
+    assert len(hosts.lock_history(wdb, "build-pc", limit=3)) == 3
+    assert hosts.lock_history(wdb, "build-pc")[0].event == "released"
     with pytest.raises(hosts.HostError):
         hosts.lock_history(wdb, "Bad Id")
 
 
 # ----------------------------------------------------- per-host filters (activity)
 def test_test_runs_host_filter(wdb):
-    a = test_runs.start(wdb, "iso_test", host_id="desktop-pc")
+    a = test_runs.start(wdb, "iso_test", host_id="build-pc")
     test_runs.start(wdb, "other")  # no host
-    assert [r.id for r in test_runs.list_runs(wdb, host_id="desktop-pc")] == [a.id]
+    assert [r.id for r in test_runs.list_runs(wdb, host_id="build-pc")] == [a.id]
     assert test_runs.list_runs(wdb, host_id="mini") == []
     # state + host combine
     test_runs.finish(wdb, a.id, "pass")
-    assert [r.id for r in test_runs.list_runs(wdb, state="pass", host_id="desktop-pc")] == [a.id]
+    assert [r.id for r in test_runs.list_runs(wdb, state="pass", host_id="build-pc")] == [a.id]
     assert test_runs.list_runs(wdb, state="pass", host_id="mini") == []
 
 
@@ -89,21 +89,21 @@ def client(wdb):
 
 
 def test_api_host_locks_route(wdb, client):
-    hosts.claim_host(wdb, "desktop-pc", "ws/a")
-    hosts.release_host(wdb, "desktop-pc", "ws/a")
-    r = client.get("/api/hosts/desktop-pc/locks")
+    hosts.claim_host(wdb, "build-pc", "ws/a")
+    hosts.release_host(wdb, "build-pc", "ws/a")
+    r = client.get("/api/hosts/build-pc/locks")
     assert r.status_code == 200
     events = r.json()
     assert [e["event"] for e in events] == ["released", "claimed"]
     assert events[0]["owner"] == "ws/a" and events[0]["id"] > events[1]["id"]
     assert client.get("/api/hosts/ghost/locks").status_code == 400  # HostError → 400, like GET /api/hosts/{id}
-    assert client.get("/api/hosts/desktop-pc/locks", params={"limit": 1}).json().__len__() == 1
+    assert client.get("/api/hosts/build-pc/locks", params={"limit": 1}).json().__len__() == 1
 
 
 def test_api_test_runs_host_filter(client):
-    started = client.post("/api/test-runs", json={"name": "iso_test", "host_id": "desktop-pc"})
+    started = client.post("/api/test-runs", json={"name": "iso_test", "host_id": "build-pc"})
     assert started.status_code == 201
-    assert client.get("/api/test-runs", params={"host_id": "desktop-pc"}).json()[0]["id"] == started.json()["id"]
+    assert client.get("/api/test-runs", params={"host_id": "build-pc"}).json()[0]["id"] == started.json()["id"]
     assert client.get("/api/test-runs", params={"host_id": "mini"}).json() == []
 
 
@@ -115,7 +115,7 @@ def test_activity_api_surface(client):
     for path in ("/api/builds", "/api/test-runs", "/api/deploys"):
         assert isinstance(client.get(path).json(), list)
     # a running test session becomes the page's 'Now' card
-    started = client.post("/api/test-runs", json={"name": "iso_tunnel", "host_id": "desktop-pc"}).json()
+    started = client.post("/api/test-runs", json={"name": "iso_tunnel", "host_id": "build-pc"}).json()
     assert client.get("/api/test-runs/current").json()["id"] == started["id"]
     assert started["state"] == "running"
 
@@ -191,9 +191,9 @@ def test_frontend_live_refresh_never_clobbers_typing(client):
 
 def test_api_build_and_test_lists_carry_lock(client):
     """The Activity page's lockStuckBadge reads r.lock — build and test-run list rows must carry it."""
-    started = client.post("/api/test-runs", json={"name": "iso_lock", "host_id": "desktop-pc"})
+    started = client.post("/api/test-runs", json={"name": "iso_lock", "host_id": "build-pc"})
     assert started.status_code == 201
-    row = client.get("/api/test-runs", params={"host_id": "desktop-pc"}).json()[0]
+    row = client.get("/api/test-runs", params={"host_id": "build-pc"}).json()[0]
     assert row["lock"] is not None and row["lock"]["owner"] == f"test:{started.json()['id']}"
 
 
@@ -204,12 +204,12 @@ def test_mcp_lock_history_via_list_hosts(wdb):
 
     async def main():
         async with Client(server) as c:
-            await c.call_tool("claim_host", {"host_id": "desktop-pc", "owner": "project:p-1a2b3c4d"})
+            await c.call_tool("claim_host", {"host_id": "build-pc", "owner": "project:p-1a2b3c4d"})
             listed = await c.call_tool("list_hosts", {})
             return listed
 
     listed = anyio.run(main)
-    host = next(h for h in listed.structured_content["result"] if h["id"] == "desktop-pc")
+    host = next(h for h in listed.structured_content["result"] if h["id"] == "build-pc")
     assert host["lock"]["owner"] == "project:p-1a2b3c4d" and host["lock"]["fresh"]
 
 
@@ -229,26 +229,26 @@ def timed_rows(wdb, client):
     with wdb.writer() as conn, conn:
         conn.execute(
             "INSERT INTO build_runs (id, host_id, kind, command, status, owner, created_at, updated_at) "
-            "VALUES ('b-live', 'desktop-pc', 'compile', 'x', 'running', 'build:b-live', "
+            "VALUES ('b-live', 'build-pc', 'compile', 'x', 'running', 'build:b-live', "
             "'2026-10-13T10:00:00Z', '2026-10-13T10:00:00Z')"
         )
         conn.execute(
             "INSERT INTO build_runs (id, host_id, kind, command, status, owner, created_at, updated_at) "
-            "VALUES ('b-done', 'desktop-pc', 'compile', 'x', 'succeeded', 'build:b-done', "
+            "VALUES ('b-done', 'build-pc', 'compile', 'x', 'succeeded', 'build:b-done', "
             "'2026-10-13T10:00:00Z', '2026-10-13T10:02:05Z')"
         )
         conn.execute(
             "INSERT INTO deployments (id, host_id, dest_root, entries, status, created_at, updated_at) "
-            "VALUES ('d-1a2b3c4d', 'desktop-pc', 'C:/dst', '[]', 'verified', "
+            "VALUES ('d-1a2b3c4d', 'build-pc', 'C:/dst', '[]', 'verified', "
             "'2026-10-13T10:00:00Z', '2026-10-13T10:00:30Z')"
         )
         conn.execute(
             "INSERT INTO deployments (id, host_id, dest_root, entries, status, notes, created_at, updated_at) "
-            "VALUES ('d-dry', 'desktop-pc', 'C:/dst', '[]', 'pushed', 'dry-run: nothing copied', "
+            "VALUES ('d-dry', 'build-pc', 'C:/dst', '[]', 'pushed', 'dry-run: nothing copied', "
             "'dry-run', 'dry-run')"
         )
     live_test = test_runs.start(wdb, "iso_live")  # no host: no lock to claim
-    done_test = test_runs.start(wdb, "iso_tunnel", host_id="desktop-pc")
+    done_test = test_runs.start(wdb, "iso_tunnel", host_id="build-pc")
     test_runs.finish(wdb, done_test.id, "pass")
     with wdb.writer() as conn, conn:
         conn.execute(
@@ -953,21 +953,21 @@ const lockStuckBadge = () => "";
 const fmtTime = (iso) => String(iso ?? "—");
 const link = (parts, label) => `<a href="#/${parts.map(enc).join("/")}">${esc(label)}</a>`;
 """ + status_block
-    # builds on desktop-pc start at 10:00; the deploy at 10:08, the live test at 10:05; a REAPED test
+    # builds on build-pc start at 10:00; the deploy at 10:08, the live test at 10:05; a REAPED test
     # started at 09:00 (oldest) but its updated_at is 10:30 (newest) — the late reaper touch that used
     # to float it to the top. A job links the three newest runs (deploy/test/build), so they nest.
-    builds = [{"id": "b-1", "host_id": "desktop-pc", "kind": "compile", "status": "succeeded",
+    builds = [{"id": "b-1", "host_id": "build-pc", "kind": "compile", "status": "succeeded",
                "created_at": "2026-10-13T10:00:00Z", "updated_at": "2026-10-13T10:02:00Z"}]
     tests = [
-        {"id": "t-1", "host_id": "desktop-pc", "name": "iso_tunnel", "state": "pass",
+        {"id": "t-1", "host_id": "build-pc", "name": "iso_tunnel", "state": "pass",
          "started_at": "2026-10-13T10:05:00Z", "created_at": "2026-10-13T10:05:00Z",
          "updated_at": "2026-10-13T10:07:00Z", "elapsed_sec": 120},
-        {"id": "t-reap", "host_id": "desktop-pc", "name": "iso_dead", "state": "idle",
+        {"id": "t-reap", "host_id": "build-pc", "name": "iso_dead", "state": "idle",
          "note": "reaped: lease lost", "started_at": "2026-10-13T09:00:00Z",
          "created_at": "2026-10-13T09:00:00Z", "finished_at": "2026-10-13T10:30:00Z",
          "updated_at": "2026-10-13T10:30:00Z", "elapsed_sec": 0},
     ]
-    deploys = [{"id": "d-1", "host_id": "desktop-pc", "addon": None, "status": "verified",
+    deploys = [{"id": "d-1", "host_id": "build-pc", "addon": None, "status": "verified",
                 "created_at": "2026-10-13T10:08:00Z", "updated_at": "2026-10-13T10:08:30Z", "entries": []}]
     jobs = [{"id": "j-a", "status": "inconclusive", "links": [{"kind": "build", "ref_id": "b-1"},
                                     {"kind": "test_run", "ref_id": "t-1"},
@@ -1257,7 +1257,7 @@ def test_live_phase_banners_and_action_execute_in_node(client):
     ready = {"id": 2, "level": "info", "phase": "ready",
              "message": "READY -- first test in 8 s -- keep the game up",
              "created_at": "2026-10-16T02:33:40Z",
-             "data": {"countdown_s": 8.0, "job_url": "http://10.88.15.208:8812/#/jobs/j-live"}}
+             "data": {"countdown_s": 8.0, "job_url": "http://127.0.0.1:8812/#/jobs/j-live"}}
     setup1 = {"id": 3, "level": "info", "phase": "setup",
               "message": "SETTING UP TEST 1 of 2 ring sweep (10 s)",
               "data": {"countdown_s": 10.0, "until": "2026-10-16T02:33:48Z", "step": "s3", "next": ""}}

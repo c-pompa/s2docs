@@ -164,7 +164,7 @@ def test_seeded_gate_main_passes_and_appends_history(golden, seeded_db, capsys):
 
     hist = learning_dir() / "eval_history.jsonl"
     assert hist.exists()
-    rows = [json.loads(l) for l in hist.read_text().splitlines() if l.strip()]
+    rows = [json.loads(line) for line in hist.read_text().splitlines() if line.strip()]
     assert len(rows) == 1 and rows[0]["recall"] == 1.0 and rows[0]["questions_total"] == 3
     assert gate.last_good_recall() == 1.0
 
