@@ -12,9 +12,12 @@ import json
 import re
 import shutil
 import subprocess
+import threading
+import time
 from pathlib import Path
 
 import pytest
+import uvicorn
 import yaml
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -190,3 +193,28 @@ def test_page_only_calls_routes_the_backend_serves(wired):
         # `/runs/${id}` is a literal prefix: its first segment must be a route of ours
         head = "/" + path.strip("/").split("/")[0]
         assert any(r == path or r.startswith(head) for r in routes), f"{path} is not served by {sorted(routes)}"
+
+
+def test_s2_reaches_a_real_s2docs_server(tmp_path, monkeypatch):
+    """The one hop the contract test fakes: base_url -> a real server, and s2docs' error text passed on."""
+    db = Database(tmp_path / "data" / "s2docs.db")
+    hosts.register_host(db, "pomps-pc", "pomps-pc", shell="cmd")
+    server = uvicorn.Server(uvicorn.Config(create_app(db.path, mount_mcp=False),
+                                          host="127.0.0.1", port=0, log_level="warning"))
+    thread = threading.Thread(target=server.run, daemon=True)
+    thread.start()
+    for _ in range(200):
+        if server.started:
+            break
+        time.sleep(0.05)
+    try:
+        monkeypatch.setenv("S2STUDIO_S2DOCS_URL",
+                           f"http://127.0.0.1:{server.servers[0].sockets[0].getsockname()[1]}")
+        mod = _load("s2studio_api_socket", PLUGIN / "dashboard" / "plugin_api.py")
+        assert mod.s2("GET", "/api/live/spawnables")[0]["id"] == "chicken"
+        with pytest.raises(mod.HTTPException) as err:
+            mod.s2("GET", "/api/jobs/j-000000ff")
+        assert err.value.status_code == 404 and err.value.detail
+    finally:
+        server.should_exit = True
+        thread.join(timeout=10)
