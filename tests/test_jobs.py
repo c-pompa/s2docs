@@ -997,8 +997,8 @@ def test_migration_0013_rebuilds_jobs_and_keeps_children(tmp_path):
     unchanged, integrity + foreign keys are clean, every old status still validates, and the cascade
     still works on the rebuilt tables.
 
-    A v12 database today upgrades past 0013 to the current schema (15), so this exercises the real
-    path an old checkout takes — and 0014 must leave everything the rebuild produced alone.
+    A v12 database today upgrades past 0013 to the current schema (the highest migration on disk), so this
+    exercises the real path an old checkout takes — and 0014 must leave everything the rebuild produced alone.
     """
     from s2docs.db import connection
 
@@ -1006,7 +1006,8 @@ def test_migration_0013_rebuilds_jobs_and_keeps_children(tmp_path):
     conn = connection.connect(path)
     tables = ("jobs", "job_events", "job_links")
     before = {t: conn.execute(f'SELECT count(*) FROM "{t}"').fetchone()[0] for t in tables}
-    assert connection.migrate(conn) == 15, "a v12 database upgrades all the way to the current schema"
+    latest = connection._migrations()[-1][0]
+    assert connection.migrate(conn) == latest, "a v12 database upgrades all the way to the current schema"
     after = {t: conn.execute(f'SELECT count(*) FROM "{t}"').fetchone()[0] for t in tables}
     assert before == after == {"jobs": 6, "job_events": 6, "job_links": 6}
     # the children survived intact (ids, phases, links — not just the counts)

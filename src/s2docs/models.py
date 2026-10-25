@@ -854,3 +854,43 @@ class AssetProvenance(BaseModel):
     frame_url: str | None = Field(
         default=None, description="REST path serving the frame bytes ('/api/artifacts/<job>/<name>')"
     )
+
+
+LiveStatus = Literal["verified", "sent", "failed", "refused"]
+
+
+class LiveAction(BaseModel):
+    id: str
+    host_id: str
+    source: str
+    text: str | None = None
+    intents: dict = Field(description="The validated IntentEnvelope")
+    lines: list[str] = []
+    status: LiveStatus
+    detail: str | None = None
+    readback: str | None = Field(default=None, description="Console tail the readback check was judged on")
+    request_id: str | None = None
+    created_at: str
+
+
+class LiveRequest(BaseModel):
+    id: str
+    host_id: str
+    player: str | None = None
+    text: str
+    state: Literal["pending", "done", "failed", "ignored"]
+    note: str | None = None
+    action_id: str | None = None
+    created_at: str
+
+
+class LiveHostStatus(BaseModel):
+    host_id: str
+    netcon: str = Field(description="host:port tried")
+    reachable: bool
+    map: str | None = None
+    spawngroups: list[str] = []
+    sandbox: bool = Field(description="hermes_sandbox answered hs_ping")
+    listening: bool = Field(default=False, description="An s2docs chat listener holds netcon open")
+    cs2_build: str | None = Field(default=None, description="`status` version, e.g. '1.41.9.2/14192'")
+    error: str | None = None

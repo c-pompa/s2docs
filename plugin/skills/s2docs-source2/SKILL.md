@@ -1,6 +1,6 @@
 ---
 name: s2docs-source2
-description: "Use for Source 2 work (CS2, Deadlock): look up convars, Hammer entities, schema classes, game events, cs_script and Pulse APIs, then scaffold and validate addons, build maps on a test host, deploy and verify, and record evidence, test runs and jobs through the s2docs server."
+description: "Use for Source 2 work (CS2, Deadlock): look up convars, Hammer entities, schema classes, game events, cs_script and Pulse APIs, then scaffold and validate addons, build maps on a test host, deploy and verify, record evidence, test runs and jobs, and keep a catalog of the assets that passed. Runs through the s2docs server."
 ---
 
 # s2docs — Source 2 documentation and mod pipeline
@@ -91,6 +91,47 @@ Steps that need a machine other than this one are explicit:
 - **Projects** — `start_project`, `next_step`, `update_step`, `get_project`, `list_projects` for
   multi-step recipes (`list_workflows` shows the recipes). `update_step` with `done` runs that
   step's gate; a failed gate means the step is not done, not that the gate is wrong.
+
+### The chain as one job
+
+`s2docs pipeline run` and `s2docs pipeline script` record a whole chain as a single durable job
+with one event per stage, instead of leaving a trail of unrelated builds. They are honest about
+which stages are real, so read the timeline rather than assuming every stage ran:
+
+- `s2docs pipeline run --prompt … --addon <name> --name <prop> --mesh <path> --host <id>` —
+  `prompt` → `concept` → `mesh` → `asset` → `build` → `deploy` → `ingame`. `asset` and `build`
+  are **real** (the same `.vmdl`/`.vmat` writers and server-owned build runs the CLI uses);
+  `concept` and `mesh` are recorded **stubbed** because no text-to-3D generator is wired into this
+  repo (the chain starts from a mesh that exists), and `deploy`/`ingame` are recorded **blocked**
+  with the measured reason.
+- `s2docs pipeline script --prompt … --addon <name> --name <script> [--script file.js]` —
+  text → cs_script. `generate` writes the `--script` text you supply (the caller is the
+  generator, so the stage never invents code it cannot attribute) and `validate` type-checks it
+  through the same `validate_cs_script`; a missing TypeScript toolchain is **blocked**, never a
+  pass and never a failure.
+
+Both return the job; `job_get`/`get_project` show the same chain. A produced artifact is linked
+to the job, not pasted into a message. Two things that bite: `--name` must be addon-safe
+(`[a-z][a-z0-9_]+`), and omitting `--build-command` records the build as **not attempted** — the
+chain still closes out, so the job shows an `asset` stage with no compile behind it.
+
+### Save what the user made — the catalog
+
+The catalog records an asset only after the chain proved it works. The gates are enforced on the
+server, so a rejected call means the evidence is genuinely missing — do not work around it:
+
+- `asset_promote(kind, name, build_id, licence, …)` — `kind` is `model` (a Hammered prop chain)
+  or `action` (cs_script). `build_id` must have reached `succeeded`, and `licence` is required
+  (never a Valve-derived asset). For `kind=model`, `frame_job_id` **and** `frame_artifact` are
+  required, the job must actually have stored that artifact, and its verdict must not be `fail` —
+  a job with no verdict is not a pass. A duplicate slug is a conflict. Provenance (build, deploy,
+  frame job, mesh hash, tri count) is linked, not copied: the catalog is a view over real runs,
+  never a second file store.
+- `asset_list(kind=?, tag=?, include_retired=false)` — newest first. Retiring is a soft delete,
+  so `include_retired=true` brings the row back with every link intact.
+- `asset_get(asset_id)` — one entry by id or slug, with its build/deploy/frame-job ids.
+
+Promote only what the user asked to keep, and quote the returned slug and ids back to them.
 
 ## Report
 
