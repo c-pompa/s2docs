@@ -298,6 +298,42 @@ def _cmd_asset(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_pipeline(args: argparse.Namespace) -> int:
+    """`s2docs pipeline run`: the chain as one job — asset+build real, concept/mesh stubbed, deploy/ingame blocked."""
+    from s2docs import pipeline
+
+    db = Database(get_settings().db_path)
+    job = pipeline.run_asset_build_slice(
+        db,
+        prompt=args.prompt,
+        addon=args.addon,
+        name=args.name,
+        mesh=args.mesh,
+        host_id=args.host,
+        material_color=args.color,
+        project_id=args.project,
+        build_command=args.build_command,
+        build_timeout_sec=args.build_timeout,
+    )
+    lines = [f"{job.id} {job.status} (phase {job.phase})"]
+    for event in job.events:
+        if not event.phase:
+            continue
+        if event.data.get("stubbed"):
+            mark = "stub"
+        elif event.data.get("blocked"):
+            mark = "blocked"
+        elif event.data.get("skipped"):
+            mark = "skipped"
+        else:
+            mark = event.level
+        lines.append(f"  {event.phase:<8} {mark:<8} {event.message}")
+    if job.summary is not None:
+        lines.append(f"  next: {job.summary.next}")
+    _emit(args, job.model_dump(mode="json"), lines)
+    return EXIT_ERROR if job.status == "error" else EXIT_OK
+
+
 def _asset_material(args: argparse.Namespace, root) -> int:
     """`s2docs asset material`: write materials/hammered/<name>/<name>.vmat + the PNGs beside it.
 
@@ -1089,6 +1125,23 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--force", action="store_true", help="Replace an existing .vmdl / .vmat + texture")
     p.add_argument("--game", default="cs2", choices=["cs2"])
     p.set_defaults(fn=_cmd_asset)
+
+    p = sub.add_parser(
+        "pipeline",
+        help="Run the asset chain as one job (prompt->concept->mesh->asset->build->deploy->ingame)",
+    )
+    pc = p.add_subparsers(dest="pipeline_cmd", required=True)
+    q = pc.add_parser("run", help="Run the chain for one mesh and close the job out")
+    q.add_argument("--prompt", required=True, help="What was asked for; recorded on the job")
+    q.add_argument("--addon", required=True, help="Addon name in the local workspace")
+    q.add_argument("--name", required=True, help="Asset name (addon-safe: [a-z][a-z0-9_]+)")
+    q.add_argument("--mesh", required=True, help="Addon-relative mesh path, e.g. models/probe/probe.fbx")
+    q.add_argument("--host", required=True, help="Build host id (see `s2docs host list`)")
+    q.add_argument("--color", help="baked colour .png (its _normal/_ao siblings wire automatically)")
+    q.add_argument("--build-command", help="host-side compile line; omit to record the build as not attempted")
+    q.add_argument("--build-timeout", type=int, default=300, help="seconds to wait for the build")
+    q.add_argument("--project", help="ledger project id to attach the chain to")
+    q.set_defaults(fn=_cmd_pipeline)
 
     p = sub.add_parser("prompt", help="Render a prompt template, e.g. prompt cs2_script task='...'")
     p.add_argument("name")
