@@ -166,6 +166,23 @@ def test_scp_argv_keeps_both_operands_off_the_option_parser(tmp_path, monkeypatc
     assert hosts.scp_argv(_host("pompa@build-pc:2222"), tmp_path / "a", "C:/a")[3:6] == ["-P", "2222", "--"]
 
 
+def test_scp_pull_argv_keeps_the_remote_operand_first_and_both_off_the_option_parser(tmp_path, monkeypatch):
+    """The pull direction (host -> Mac, Task 4.5): same hardening, operands in the scp order."""
+    monkeypatch.chdir(tmp_path)
+    local = Path("-oProxyCommand=id")  # a hostile *relative* local name is made absolute
+    argv = hosts.scp_pull_argv(_host("pompa@192.0.2.172"), "C:/src/hermes_sandbox.vpk", local)
+    absolute = str(tmp_path.resolve() / local)
+    assert argv == ["scp", "-o", "ConnectTimeout=15", "--", "pompa@192.0.2.172:C:/src/hermes_sandbox.vpk", absolute]
+    assert not local.is_absolute() and argv[-1].startswith("/")
+    assert hosts.scp_pull_argv(_host("pompa@build-pc:2222"), "C:/a", tmp_path / "a")[3:6] == ["-P", "2222", "--"]
+
+
+@pytest.mark.parametrize("remote", ["-oProxyCommand=id", "-C:/x", "-", "", "C:/a\nb", "C:/a\rb"])
+def test_scp_pull_argv_refuses_an_option_like_empty_or_multiline_remote(tmp_path, remote):
+    with pytest.raises(hosts.HostError, match="remote"):
+        hosts.scp_pull_argv(_host("build-pc"), remote, tmp_path / "a.vpk")
+
+
 @pytest.mark.parametrize("target", [REVIEWER_TARGET, "build-pc -oProxyCommand=id", "pompa@-x"])
 def test_argv_builders_refuse_a_stored_unsafe_target(tmp_path, target):
     with pytest.raises(hosts.HostError, match="invalid ssh_target"):

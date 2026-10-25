@@ -1,0 +1,117 @@
+// hermes_sandbox: runtime half of s2docs live actions (cs_script point_script), GENERATED into
+// maps/scripts/hermes_sandbox.js by s2docs.live.sandbox_map — edit the sources, not the output.
+// Streamed onto stock de_dust2 with `spawn_group_load hermes_sandbox`. Driven over netcon (sv_cheats 1):
+//   hs_ping                                              -> [hs] pong <alive>
+//   hs_spawn <id> <count> <formation> <spacing> <follow> -> [hs] spawned <k> <id> ... | [hs] error <why>
+//   hs_clear <id|all>                                    -> [hs] cleared <k>
+//   hs_model <models/....vmdl> [scale]                   -> [hs] precaching … then [hs] model … spawned name=…
+// In-game chat lines starting with !h are echoed as [hs] chat <slot> <text> for the s2docs listener (P5).
+import { Instance } from "cs_script/point_script";
+
+/*FORMATION*/
+
+const HEIGHT = /*HEIGHTS*/{};
+/** @type {{id: string, ents: any[], follow: boolean, formation: string, spacing: number}[]} */
+const groups = [];
+
+function human() {
+  for (const c of Instance.GetAllPlayerControllers()) {
+    if (c && !c.IsBot()) { const p = c.GetPlayerPawn(); if (p && p.IsValid()) return p; }
+  }
+  return undefined;
+}
+
+function place(group, pawn) {
+  const o = pawn.GetAbsOrigin(), yaw = pawn.GetEyeAngles().yaw;
+  const pts = positions([o.x, o.y, o.z], yaw, group.ents.length, group.formation, group.spacing, HEIGHT[group.id] ?? 32);
+  group.ents.forEach((e, i) => { if (e && e.IsValid()) e.Teleport({ position: { x: pts[i][0], y: pts[i][1], z: pts[i][2] } }); });
+  return pts;
+}
+
+Instance.RegisterCheatCommand("hs_ping", () => {
+  const alive = groups.reduce((n, g) => n + g.ents.filter(e => e && e.IsValid()).length, 0);
+  Instance.Msg(`[hs] pong ${alive}`);
+});
+
+Instance.RegisterCheatCommand("hs_spawn", (args) => {
+  const [id, countS, formation, spacingS, followS] = String(args).trim().split(/\s+/);
+  /** @type {any} */
+  const tpl = Instance.FindEntityByName(`hs_tpl_${id}`);
+  const pawn = human();
+  if (!tpl) { Instance.Msg(`[hs] error no template hs_tpl_${id}`); return; }
+  if (!pawn) { Instance.Msg("[hs] error no human player"); return; }
+  const count = Math.max(1, Math.min(16, Number(countS) || 1));
+  /** @type {{id: string, ents: any[], follow: boolean, formation: string, spacing: number}} */
+  const group = { id, ents: [], follow: followS === "1", formation: formation || "line", spacing: Number(spacingS) || 48 };
+  for (let i = 0; i < count; i++) {
+    const spawned = tpl.ForceSpawn(pawn.GetAbsOrigin(), { pitch: 0, yaw: pawn.GetEyeAngles().yaw, roll: 0 });
+    if (spawned && spawned.length) group.ents.push(spawned[0]);
+  }
+  const pts = place(group, pawn);
+  groups.push(group);
+  Instance.Msg(`[hs] spawned ${group.ents.length} ${id} at ${pts.map(p => p.join(",")).join(";")}`);
+});
+
+Instance.RegisterCheatCommand("hs_clear", (args) => {
+  const which = String(args).trim() || "all";
+  let n = 0;
+  for (let i = groups.length - 1; i >= 0; i--) {
+    if (which !== "all" && groups[i].id !== which) continue;
+    for (const e of groups[i].ents) if (e && e.IsValid()) { e.Remove(); n++; }
+    groups.splice(i, 1);
+  }
+  Instance.Msg(`[hs] cleared ${n}`);
+});
+
+// hs_model <models/....vmdl> [scale] -- experimental runtime precache, then the generic template + SetModel.
+/** @type {{vmdl: string, scale: number, pre: any, asked: number}[]} */
+const pendingModels = [];
+Instance.RegisterCheatCommand("hs_model", (args) => {
+  const [vmdl, scaleS] = String(args).trim().split(/\s+/);
+  if (!/^models\/[a-z0-9_\/]+\.vmdl$/.test(vmdl || "")) { Instance.Msg("[hs] error bad model path"); return; }
+  const pre = Instance.Precache({ resources: [vmdl] });
+  if (!pre) { Instance.Msg(`[hs] error precache refused ${vmdl}`); return; }
+  pendingModels.push({ vmdl, scale: Number(scaleS) || 1, pre, asked: Instance.GetGameTime() });
+  Instance.Msg(`[hs] precaching ${vmdl}`);
+});
+
+function pumpModels() {
+  for (let i = pendingModels.length - 1; i >= 0; i--) {
+    const p = pendingModels[i];
+    if (p.pre.IsLoadedForAll()) {
+      /** @type {any} */
+      const tpl = Instance.FindEntityByName("hs_tpl_prop");
+      const pawn = human();
+      /** @type {any} */
+      const ent = tpl && pawn ? (tpl.ForceSpawn(pawn.GetAbsOrigin(), { pitch: 0, yaw: pawn.GetEyeAngles().yaw, roll: 0 }) || [])[0] : undefined;
+      if (ent) {
+        ent.SetModel(p.vmdl);
+        ent.SetModelScale(p.scale);
+        /** @type {{id: string, ents: any[], follow: boolean, formation: string, spacing: number}} */
+        const g = { id: "prop", ents: [ent], follow: false, formation: "grid", spacing: 64 };
+        place(g, pawn);
+        groups.push(g);
+        Instance.Msg(`[hs] model ${p.vmdl} spawned name=${ent.GetModelName()}`);
+      } else {
+        Instance.Msg(`[hs] error model ${p.vmdl} loaded but no template/player`);
+      }
+      pendingModels.splice(i, 1);
+    } else if (Instance.GetGameTime() - p.asked > 20) {
+      Instance.Msg(`[hs] error precache timeout ${p.vmdl} server=${p.pre.IsServerLoaded()}`);
+      pendingModels.splice(i, 1);
+    }
+  }
+}
+
+Instance.OnPlayerChat((event) => {
+  const text = String(event.text || "");
+  if (/^!h(ermes)?\s/i.test(text)) Instance.Msg(`[hs] chat ${event.player ? event.player.GetPlayerSlot() : -1} ${text.replace(/^!h(ermes)?\s+/i, "")}`);
+});
+
+Instance.SetThink(() => {
+  pumpModels();
+  const pawn = human();
+  if (pawn) for (const g of groups) if (g.follow) place(g, pawn);
+  Instance.SetNextThink(Instance.GetGameTime() + 0.1);
+});
+Instance.OnActivate(() => Instance.SetNextThink(Instance.GetGameTime()));
