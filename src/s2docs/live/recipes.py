@@ -12,17 +12,23 @@ from s2docs.live.spawnables import Spawnable
 TEAM_NUM = {"spectator": 1, "t": 2, "ct": 3}
 # The form spike S0 (Task 0.2) proved moves the LOCAL player over netcon. Change only with new evidence.
 ME_TEAM_LINE = "jointeam {num} 1"
-# UNVERIFIED (2026-10-25 review): the index documents `getpos` as "dump position" and `getpos_exact` as
-# "dump origin", which suggests getpos is the EYE (origin + 64 standing). Not yet measured on CS2 —
-# P2 measures `getpos` vs `getpos_exact` live and replaces this guess with the recorded difference.
-GETPOS_EYE_HEIGHT = 64.0
+# MEASURED (pomps-pc, CS2 1.41.9.2/14192, 2026-10-25, standing still, two identical samples):
+#   getpos        -> setpos -428 -843 156.874420      (the EYE: +61.58 over the feet, NOT the +64 the old
+#                                                      guess subtracted)
+#   getpos_exact  -> setpos_exact -428 -843 95.296288 (the FEET)
+# So the console spawn reads `getpos_exact` and adds no offset at all. There is no eye-height constant.
 
 _NUM = r"-?\d+(?:\.\d+)?"
+# The console's own removal line, measured 2026-10-25 on pomps-pc: `Removed 3 chickens`.
+REMOVED_RE = r"Removed (\d+) {cls}\b"
+# The sandbox runtime's answer to `hs_clear`: `[hs] cleared 4`.
+HS_CLEARED_RE = r"\[hs\] cleared (\d+)"
 ALLOWED = re.compile(
     r"sv_cheats 1|mp_autoteambalance 0|mp_limitteams 0|bot_kick|bot_add_t|bot_add_ct|mp_warmup_end"
-    r"|mp_restartgame 1|jointeam [123](?: 1)?|sleep \d+|hs_ping"
+    r"|mp_restartgame 1|jointeam [123](?: 1)?|sleep \d+|hs_ping|spawn_group_load hermes_sandbox"
     r"|hs_spawn [a-z][a-z0-9_]* \d{1,2} (?:line|circle|stack|grid) \d+(?:\.\d+)? [01]"
-    r"|hs_clear [a-z][a-z0-9_]*|ent_remove_all [a-z_]+"
+    r"|hs_clear [a-z][a-z0-9_]*|hs_model models/[a-z0-9_/]+\.vmdl(?: \d+(?:\.\d+)?)?"
+    r"|ent_remove_all [a-z_]+"
     rf'|ent_create [a-z_]+ \{{"origin" "{_NUM} {_NUM} {_NUM}"\}}'
     r"|say Hermes: [A-Za-z0-9 .,:'()/+-]{0,120}"
 )
@@ -36,7 +42,7 @@ class LiveUnavailable(ValueError):
 class Pose:
     x: float
     y: float
-    z: float  # eye height, as getpos prints it
+    z: float  # FEET height, as getpos_exact prints it
     yaw: float
 
 
@@ -54,7 +60,7 @@ class Plan:
 
 
 def needs_pose(env: IntentEnvelope, spawnables: dict[str, Spawnable], *, sandbox: bool) -> bool:
-    """True when a console spawn needs a getpos readback before compiling."""
+    """True when a console spawn needs a `getpos_exact` readback before compiling."""
     return not sandbox and any(isinstance(i, SpawnIntent) for i in env.intents)
 
 
@@ -106,9 +112,9 @@ def compile_plan(env: IntentEnvelope, spawnables: dict[str, Spawnable], *, sandb
                 if intent.follow:
                     raise LiveUnavailable("follow needs the sandbox runtime")
                 if pose is None:
-                    raise LiveUnavailable("a console spawn needs the player's position (getpos)")
-                feet = (pose.x, pose.y, pose.z - GETPOS_EYE_HEIGHT)
-                for x, y, z in positions(feet, pose.yaw, intent.count, intent.formation, intent.spacing, spec.height):
+                    raise LiveUnavailable("a console spawn needs the player's position (getpos_exact)")
+                for x, y, z in positions((pose.x, pose.y, pose.z), pose.yaw, intent.count, intent.formation,
+                                         intent.spacing, spec.height):
                     plan.lines.append(f'ent_create {spec.classname} {{"origin" "{x} {y} {z}"}}')
                 plan.expect.append({"check": "ent_count", "classname": spec.classname, "min": intent.count})
             plan.summary.append(f"spawn: {intent.count} {spec.label} ({intent.formation}"
@@ -118,9 +124,18 @@ def compile_plan(env: IntentEnvelope, spawnables: dict[str, Spawnable], *, sandb
             if sandbox:
                 plan.needs_sandbox = True
                 plan.lines.append(f"hs_clear {intent.what or 'all'}")
+                spec = spawnables.get(intent.what) if intent.what else None
+                if spec is not None:
+                    # the count line, plus ent_find <class> as the fallback when nothing was removed
+                    plan.expect.append({"check": "clear", "classname": spec.classname, "count": HS_CLEARED_RE})
+                else:
+                    # `hs_clear all` names no class to re-check: its own count line is the readback
+                    plan.expect.append({"check": "reply", "pattern": r"\[hs\] cleared \d+"})
             else:
                 targets = [spawnables[intent.what]] if intent.what in spawnables else list(spawnables.values())
                 plan.lines += [f"ent_remove_all {s.classname}" for s in targets]
+                plan.expect += [{"check": "clear", "classname": s.classname,
+                                 "count": REMOVED_RE.format(cls=re.escape(s.classname))} for s in targets]
             plan.summary.append(f"clear: {intent.what or 'everything spawned'}")
     if env.say:
         plan.lines.append(f"say Hermes: {_sanitise(env.say)}")

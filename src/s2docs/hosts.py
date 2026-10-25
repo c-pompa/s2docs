@@ -190,8 +190,9 @@ def ssh_argv(host: m.Host) -> list[str]:
     return ["ssh", *_connection_options(host, target, port_flag="-p"), "--", target.destination]
 
 
-def scp_argv(host: m.Host, local: Path, remote: str) -> list[str]:
-    """scp argv copying ``local`` to ``remote`` on the host, hardened like :func:`ssh_argv`.
+def scp_argv(host: m.Host, local: Path, remote: str, *, pull: bool = False) -> list[str]:
+    """scp argv copying ``local`` to ``remote`` on the host (``pull=True``: ``remote`` down to ``local``),
+    hardened like :func:`ssh_argv`. The ONLY place an scp argv is built (CI rule HPF-003).
 
     ``--`` precedes both operands; the ``host:path`` operand starts with the validated destination,
     so it can never start with '-'; and the local path is made absolute, so it can neither look like
@@ -201,7 +202,27 @@ def scp_argv(host: m.Host, local: Path, remote: str) -> list[str]:
     operand = f"{target.destination}:{remote}"
     if operand.startswith("-"):  # unreachable for a validated destination; kept as the invariant
         raise HostError(f"refusing an scp operand that starts with '-': {operand!r}")
-    return ["scp", *_connection_options(host, target, port_flag="-P"), "--", str(Path(local).resolve()), operand]
+    local_path = str(Path(local).resolve())
+    pair = [operand, local_path] if pull else [local_path, operand]
+    return ["scp", *_connection_options(host, target, port_flag="-P"), "--", *pair]
+
+
+def scp_pull_argv(host: m.Host, remote: str, local: Path) -> list[str]:
+    """scp argv copying ``remote`` on the host *down* to ``local`` — :func:`scp_argv` in reverse.
+
+    Same hardening as the push direction. The remote text here is a caller's string rather than a
+    validated destination, so it is refused when it is empty, starts with '-' (scp would read it as an
+    option) or carries a newline/NUL byte (a second remote command on the far side). ``--`` still ends
+    option parsing before both operands, and the local path is made absolute so it cannot look like a
+    ``host:path`` operand.
+    """
+    if not isinstance(remote, str) or not remote:
+        raise HostError("refusing an empty remote path")
+    if remote.startswith("-"):
+        raise HostError(f"refusing a remote path that starts with '-': {remote!r}")
+    if any(ch in remote for ch in "\r\n\x00"):
+        raise HostError(f"refusing a remote path with a newline or NUL: {remote!r}")
+    return scp_argv(host, local, remote, pull=True)
 
 
 def _record_lock_event(

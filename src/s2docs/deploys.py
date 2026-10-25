@@ -75,6 +75,15 @@ def _hash_remote(host: m.Host, paths: list[str], *, timeout: int = SSH_TIMEOUT_S
     return out
 
 
+def remote_md5(host: m.Host, paths: list[str]) -> dict[str, str]:
+    """The MD5 each path has *on the host* (one Get-FileHash pass), or ``'missing'``.
+
+    The readback half of a pull: a file scp brought back is only trusted when its local MD5 equals what
+    the host says it has.
+    """
+    return _hash_remote(host, paths)
+
+
 def _copy_file(host: m.Host, local: Path, remote: str, *, timeout: int = SSH_TIMEOUT_SEC) -> None:
     argv = hosts.scp_argv(host, local, remote)
     try:

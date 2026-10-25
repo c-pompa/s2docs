@@ -28,7 +28,7 @@ An envelope is `{"intents": [...], "say": "optional one-line reply"}` — 1 to 8
 |---|---|---|
 | `bots` | `team_size` (players per side **including you** when `me` is set, `5v5` = 5) **or** `t` / `ct` (exact bot counts) — the two forms are exclusive; `me` (`t`\|`ct`\|`spectator`); `restart` (default true) | `mp_autoteambalance 0`, `mp_limitteams 0`, `bot_kick`, `jointeam <n> 1` when `me` is set, then `bot_add_t` × t and `bot_add_ct` × ct, `mp_warmup_end`, `mp_restartgame 1` |
 | `spawn` | `what` (a spawnable id), `count` 1-16, `formation` (`line`\|`circle`\|`stack`\|`grid`), `spacing` 8-512, `follow` | sandbox: `hs_spawn <id> <count> <formation> <spacing> <follow>`; console: `ent_create <classname> {"origin" "x y z"}` per item |
-| `clear` | `what` (one id) — omit for everything spawned | sandbox: `hs_clear <id>` \| `hs_clear all`; console: `ent_remove_all <classname>` |
+| `clear` | `what` (one id) — omit for everything spawned | sandbox: `hs_clear <id>` \| `hs_clear all`; console: `ent_remove_all <classname>`; judged by its removal count (`Removed N <class>` / `[hs] cleared N`) or by a follow-up `ent_find` with no rows |
 
 Ids are `^[a-z][a-z0-9_]{0,47}$`, so `chicken;quit` is a validation error, not a command. `say` is
 sanitised down to `[A-Za-z0-9 .,:'()/+-]` and can only ever produce `say Hermes: …`.
@@ -38,6 +38,14 @@ sanitised down to `[A-Za-z0-9 .,:'()/+-]` and can only ever produce `say Hermes:
 | id | classname | template | height (u) | console_ok |
 |---|---|---|---|---|
 | `chicken` | `chicken` | `hs_tpl_chicken` | 24 | yes — S1, 2026-10-25 |
+| `car_wreck` | `prop_dynamic` | `hs_tpl_car_wreck` | 64 — **unmeasured** | no |
+| `car_hatch` | `prop_dynamic` | `hs_tpl_car_hatch` | 64 — **unmeasured** | no |
+| `car_van` | `prop_dynamic` | `hs_tpl_car_van` | 96 — **unmeasured** | no |
+
+The three vehicles are VPK-listed single-model props (`dust_car_wreck_body`, `cara_82hatchback`, `van`):
+dust2's own hatchback/taxi/flatbed ship as 4-part models, so they would spawn as one decapitated piece. Their
+heights are only used for `stack` spacing and are **placeholders** until the Task 4.8 live stack readback
+measures them; fix them there and regenerate.
 
 `console_ok` is `True` only where a recorded spike saw the entity **render**; a spawn of an unproven
 class is refused with "needs the sandbox" instead of silently drawing nothing (that is what went wrong
@@ -50,7 +58,7 @@ and a mismatch raises before anything is sent — so a bug in a recipe cannot be
 
 ```
 sv_cheats 1 | mp_autoteambalance 0 | mp_limitteams 0 | bot_kick | bot_add_t | bot_add_ct |
-mp_warmup_end | mp_restartgame 1 | jointeam [123]( 1)? | sleep N | hs_ping |
+mp_warmup_end | mp_restartgame 1 | jointeam [123]( 1)? | sleep N | hs_ping | spawn_group_load hermes_sandbox |
 hs_spawn <id> <n> <formation> <spacing> <0|1> | hs_clear <id> | ent_remove_all <classname> |
 ent_create <classname> {"origin" "<x> <y> <z>"} | say Hermes: <safe text>
 ```
@@ -82,14 +90,98 @@ readback round trip of its own. It never greps the stream for "BOT": join lines
 The Python and the JS sandbox share the same expected values in
 `tests/fixtures/live/formation_vectors.json` (Task 4.3 asserts the JS side against the same file).
 
-A console spawn subtracts `GETPOS_EYE_HEIGHT` (64 u) from `getpos`, on the assumption that `getpos`
-reports the **eye**. That is **not measured yet**: the index documents `getpos` as "dump position" and
-`getpos_exact` as "dump origin", which points that way. P2 records both live and replaces the guess
-(or switches the recipe to `getpos_exact`, which removes the offset entirely).
+A console spawn takes the player's position from **`getpos_exact`**, which prints the **feet**. Measured on
+pomps-pc (CS2 `1.41.9.2/14192`, 2026-10-25, standing still, two identical samples), the same spot read:
+
+```
+getpos        -> setpos        -428.000000 -843.000000 156.874420;setang       0.000000 133.500031 0.000000
+getpos_exact  -> setpos_exact  -428.000000 -843.000000  95.296288;setang_exact 0.000000 133.500031 0.000000
+```
+
+So `getpos` is the eye at +61.58 over the feet. The old code subtracted a guessed `GETPOS_EYE_HEIGHT` of 64
+from `getpos`; that constant is **gone** — the recipe adds no offset, and `getpos` output is deliberately not
+parsed (`service.parse_pose` only matches the `setpos_exact …;setang_exact …` shape).
+
+A `clear` is verified by its own removal line when it reports at least one removal — `Removed 3 chickens` from
+`ent_remove_all` (measured on pomps-pc 2026-10-25) or `[hs] cleared N` from the sandbox — and otherwise by a
+follow-up `ent_find <class>` that lists no entity rows. It is `failed` when rows remain, so `clear` no longer
+comes back `sent`. `hs_clear all` names no class to re-check and is judged on its own `[hs] cleared N` line.
 
 The `ent_find` readback counts entity ROWS (`   'chicken' : '' (entindex 354)`), never the class name:
 ent_find's header line (`...containing substrings: "chicken"`) contains the name even when nothing exists,
 which once made an empty search count as one chicken.
+
+## The sandbox: `hermes_sandbox` (helper map + cs_script runtime)
+
+Stock de_dust2 is never modified. Everything that has to *create* entities is done by a second, tiny addon
+streamed onto the running map with `spawn_group_load hermes_sandbox`:
+
+```
+hermes_sandbox/maps/hermes_sandbox.vmap        entity-only map: 1 point_script + 2 entities per spawnable
+hermes_sandbox/maps/scripts/hermes_sandbox.js  the cs_script that point_script runs
+```
+
+Both are **generated** by `s2docs.live.sandbox_map` from the templates in `src/s2docs/live/sandbox/`
+(`hermes_sandbox.vmap.in`, `runtime.js`, `formation.mjs`) plus `spawnables.STOCK`:
+
+- `hermes_sandbox.vmap.in` is a copy of iso-spectate's `iso_spectate_ui.vmap` with its three entities deleted
+  and one `{{ENTITIES}}` line left in the world's `children` array. Entity-only on purpose: a hand-authored
+  WORLD mesh crashes `resourcecompiler` (`docs/HAMMERED.md`), while an entity-only helper map compiles in
+  seconds.
+- Per spawnable the generator writes a `point_template` (`hs_tpl_<id>`, `Template01 hs_src_<id>`) and its child
+  entity (`hs_src_<id>`: classname, plus `model` for a `prop_dynamic`). The template is what puts a model in
+  the map's resource manifest — which `ent_create` never did, and why it rendered nothing on retail.
+- `runtime.js` carries `/*FORMATION*/` (filled with `formation.mjs`, minus `export`) and `/*HEIGHTS*/{}` (filled
+  from the spawnables), so the shipped script is ONE file whose only import is `cs_script/point_script`.
+
+Rendering is byte-stable (uuid5 ids from a fixed namespace, spawnables sorted by id), so a deploy's MD5 only
+changes when the content does. Run `node --test 'tests/js/*.test.mjs'` for the JS half of the shared formation
+vectors and `pytest tests/test_live_sandbox_map.py` for the generated map/script.
+
+The runtime registers cheat commands only, and answers on the console:
+
+| command | reply |
+|---|---|
+| `hs_ping` | `[hs] pong <live entities>` |
+| `hs_spawn <id> <count> <formation> <spacing> <0\|1>` | `[hs] spawned <k> <id> at x,y,z;…` or `[hs] error <why>` |
+| `hs_clear <id\|all>` | `[hs] cleared <k>` |
+| `hs_model <models/…vmdl> [scale]` | `[hs] precaching …`, then `[hs] model … spawned name=…` (spike S2, Task 4.9) |
+
+`s2docs validate-script` on the generated script is clean: **0 errors**, and only `deprecated_api` warnings
+for `Instance.RegisterCheatCommand` and `Instance.Msg` (16 as of the `hs_model` addition). They are kept on
+purpose — they are the only way a script takes console input and writes console output, and iso-spectate's
+shipped `spectate.vjs` uses the same pair.
+
+**Spike S2 (`hs_model`, Task 4.9).** `hs_model <models/…vmdl> [scale]` asks the running server to
+`Instance.Precache` a compiled model and, once `IsLoadedForAll()` says it is there, spawns the generic
+`hs_tpl_prop` template and swaps the model onto it with `SetModel`/`SetModelScale`. The template is a roasted
+chicken on purpose: a roasted chicken where the requested model should be is the tell that `SetModel` did not
+take. It is **code only** until the live spike records `runtime_precache` as `pass` for the running build
+(`live_capabilities`); nothing in P6 may assume it works before that row exists.
+
+### Building and loading it
+
+```python
+from s2docs.live import sandbox_build as sb
+run = sb.build(db, "desktop-pc")      # 1. render + push the sources, start a server-owned compile
+sb.pull_compiled(db, "desktop-pc")    # 2. bring the .vpk/.vjs_c back, md5-checked against the host
+sb.deploy_loose(db, "pomps-pc")       # 3. push them to the PLAYING host's loose game/csgo/maps tree
+```
+
+1. **Compiles run on `desktop-pc` only** (`COMPILE_HOSTS`). pomps-pc hard-froze on a compile once; any other
+   host raises instead of starting `resourcecompiler`. The run is server-owned (`builds.start`), so its log
+   and exit code stay reachable after the request returns.
+2. The compiled files have to come back to the Mac because the deploy service pushes *from* here:
+   `hosts.scp_pull_argv` (reverse of `scp_argv`, same `--`-before-operands hardening, refuses an empty,
+   option-like or newline-carrying remote path) plus one `Get-FileHash` readback per file.
+3. Loose files, not the addon: an addon-mounted script did not load in iso-spectate.
+4. `POST /api/live/sandbox/load {host_id, deploy_id}` sends `sv_cheats 1`, `spawn_group_load hermes_sandbox`,
+   `sleep 3`, `status`, `hs_ping`, and is `verified` only when `status` lists the spawngroup **and** `hs_ping`
+   answers. It refuses a `409` unless the deployment is verified, on that host, and carries
+   `maps/hermes_sandbox.vpk` — a missing vpk makes `spawn_group_load` kick the client and kill the server.
+5. `POST /api/live/launch {host_id, map}` starts CS2 through a one-shot scheduled task with an **interactive**
+   principal (a service-spawned `cs2.exe` has no desktop), with the PowerShell script on ssh's **stdin** — never
+   an inline `-Command "…"` string — then polls netcon for up to 120 s.
 
 ## Where netcon lives: the registry, not an env var
 
@@ -114,6 +206,8 @@ editing the plist is a fleet change). The address must match `host:port`; anythi
 | `PUT /api/live/hosts/{id}` | record an address |
 | `GET /api/live/capabilities?host_id=` | the capability ledger for the build that host runs now |
 | `POST /api/live/capabilities {cs2_build, name, status, evidence}` | record one spike result |
+| `POST /api/live/sandbox/load {host_id, deploy_id}` | stream `hermes_sandbox` onto the running map; `verified` only on spawngroup + `[hs] pong` |
+| `POST /api/live/launch {host_id, map}` | start CS2 on the host (`de_*` only) and wait for its netcon |
 
 A host that cannot take an action now (no netcon address, unreachable, leased by a test run) is a `409`
 with `conflict: true`; a malformed envelope is `422`.

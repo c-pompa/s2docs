@@ -19,6 +19,7 @@ from s2docs.config import GAMES, server_identity
 from s2docs.db.connection import Database
 from s2docs.db.repository import Repository
 from s2docs.live import capabilities as live_capabilities
+from s2docs.live import launch as live_launch
 from s2docs.live import service as live
 from s2docs.live import spawnables as live_spawnables
 from s2docs.live.intent import IntentEnvelope
@@ -1014,6 +1015,28 @@ def live_record_capability(body: LiveCapIn, db: Db):
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     return {"cs2_build": body.cs2_build, "name": body.name, "status": body.status}
+
+
+class LiveSandboxLoadIn(BaseModel):
+    host_id: str
+    deploy_id: str = Field(description="A verified deployment that carries maps/hermes_sandbox.vpk")
+
+
+class LiveLaunchIn(BaseModel):
+    host_id: str
+    map: str = Field(default="de_dust2", pattern=r"^de_[a-z0-9_]+$", description="A de_* map to launch")
+
+
+@router.post("/live/sandbox/load")
+def live_load_sandbox(body: LiveSandboxLoadIn, db: Db):
+    """Stream the hermes_sandbox helper map onto the running game (409 unless the deployment is verified)."""
+    return live.load_sandbox(db, body.host_id, body.deploy_id)
+
+
+@router.post("/live/launch")
+def live_launch_cs2(body: LiveLaunchIn, db: Db):
+    """Start CS2 on the host (scheduled task, interactive principal) and wait until netcon answers."""
+    return live_launch.launch(db, body.host_id, body.map)
 
 
 class RenderedPrompt(BaseModel):

@@ -52,8 +52,9 @@ def test_say_is_sanitised_and_never_a_command():
 
 def test_console_spawn_uses_pose_when_proven(monkeypatch):
     proven = {"chicken": spawnables.Spawnable("chicken", "Chicken", "hs_tpl_chicken", "chicken", None, 24.0, True)}
+    # a Pose z IS the feet (getpos_exact): no eye offset is subtracted any more
     plan = compile_plan(env({"action": "spawn", "what": "chicken", "count": 2}), proven, sandbox=False,
-                        pose=Pose(0.0, 0.0, 64.0, 0.0))
+                        pose=Pose(0.0, 0.0, 0.0, 0.0))
     assert plan.lines[1:] == ['ent_create chicken {"origin" "-48.0 0.0 0.0"}',
                               'ent_create chicken {"origin" "-96.0 0.0 0.0"}']
 
@@ -66,3 +67,34 @@ def test_console_spawn_uses_pose_when_proven(monkeypatch):
 def test_every_line_matches_the_allowlist(raw):
     for line in compile_plan(env(raw), STOCK, sandbox=True).lines:
         assert ALLOWED.fullmatch(line), line
+
+
+def test_sandbox_load_lines_are_in_the_allowlist():
+    assert ALLOWED.fullmatch("spawn_group_load hermes_sandbox")
+    for bad in ("spawn_group_load hermes_sandbox; quit", "spawn_group_load evil", "spawn_group_load",
+                "spawn_group_load hermes_sandbox extra"):
+        assert not ALLOWED.fullmatch(bad), bad
+
+
+def test_hs_model_lines_are_in_the_allowlist():
+    """Spike S2's runtime-precache command: a vmdl path and an optional scale, nothing else."""
+    for good in ("hs_model models/props_vehicles/bus01_2.vmdl", "hs_model models/tsr_eefa8331/tsr_eefa8331.vmdl",
+                 "hs_model models/props_vehicles/van.vmdl 1.5", "hs_model models/a/b/c.vmdl 2"):
+        assert ALLOWED.fullmatch(good), good
+    for bad in ("hs_model", "hs_model models/x.vmdl; quit", "hs_model Models/x.vmdl", "hs_model /models/x.vmdl",
+                "hs_model models/../x.vmdl", "hs_model models/x.vmdl 1.5 2", "hs_model models/x.mdl",
+                "hs_model models/x.vmdl -1", "hs_model models/X.vmdl", "hs_model models/x.vmdl extra"):
+        assert not ALLOWED.fullmatch(bad), bad
+
+
+def test_clear_expects_a_readback_in_both_modes():
+    """A clear is judged, not assumed: the removal count, with an ent_find fallback for zero."""
+    console = compile_plan(env({"action": "clear", "what": "chicken"}), STOCK, sandbox=False)
+    assert console.lines == ["sv_cheats 1", "ent_remove_all chicken"]
+    assert console.expect == [{"check": "clear", "classname": "chicken", "count": r"Removed (\d+) chicken\b"}]
+
+    sandbox = compile_plan(env({"action": "clear", "what": "chicken"}), STOCK, sandbox=True)
+    assert sandbox.expect == [{"check": "clear", "classname": "chicken", "count": r"\[hs\] cleared (\d+)"}]
+
+    everything = compile_plan(env({"action": "clear"}), STOCK, sandbox=True)
+    assert everything.expect == [{"check": "reply", "pattern": r"\[hs\] cleared \d+"}]
