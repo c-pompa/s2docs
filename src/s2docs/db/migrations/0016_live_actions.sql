@@ -35,3 +35,16 @@ CREATE TABLE live_hosts (
     netcon_addr  TEXT NOT NULL,                   -- ip-or-name:port, e.g. 10.88.20.235:2121
     updated_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
 );
+
+-- What was MEASURED to work on a given CS2 build (spikes S0-S6). A pass on one build is not assumed on
+-- the next: after a CS2 update the plugin shows these as unknown until re-probed.
+-- cs2_build is the string netcon `status` prints ('1.41.9.2/14192'), not a steam.inf integer: registered
+-- hosts carry no facts.cs2_path, and pomps-pc's sshd flaps while netcon keeps answering.
+CREATE TABLE live_capabilities (
+    cs2_build   TEXT NOT NULL,                   -- netcon `status`: 'version : 1.41.9.2/14192 ...'
+    name        TEXT NOT NULL,
+    status      TEXT NOT NULL CHECK (status IN ('pass', 'fail')),
+    evidence    TEXT NOT NULL,                   -- readback line / neutral answer / artifact path
+    checked_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    PRIMARY KEY (cs2_build, name)
+);

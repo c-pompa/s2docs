@@ -18,6 +18,7 @@ from s2docs.build.validate_script import validate_cs_script
 from s2docs.config import GAMES, server_identity
 from s2docs.db.connection import Database
 from s2docs.db.repository import Repository
+from s2docs.live import capabilities as live_capabilities
 from s2docs.live import service as live
 from s2docs.live import spawnables as live_spawnables
 from s2docs.live.intent import IntentEnvelope
@@ -985,6 +986,34 @@ def live_actions(db: Db, host_id: str | None = None, limit: Annotated[int, Query
 @router.get("/live/status", response_model=m.LiveHostStatus)
 def live_status(db: Db, host_id: Annotated[str, Query(description="Host to probe over netcon")]):
     return live.status(db, host_id)
+
+
+class LiveCapIn(BaseModel):
+    cs2_build: str = Field(description="The build key netcon `status` prints, e.g. '1.41.9.2/14192'")
+    name: str = Field(description="A capability name from GET /api/live/capabilities")
+    status: Literal["pass", "fail"]
+    evidence: str = Field(max_length=2000, description="The readback line, neutral answer or artifact that proves it")
+
+
+@router.get("/live/capabilities")
+def live_capability_list(db: Db, host_id: Annotated[str, Query(description="Host whose running CS2 build keys it")]):
+    """Which experimental capabilities were MEASURED on the build this host is running now.
+
+    `unknown` means not probed on that build (or CS2 was updated since): the plugin shows those as
+    unknown until the matching spike runs again. A missing build key (CS2 not in a map) is 200 with
+    `cs2_build: null` and the reason — it is the game's state, not a server fault.
+    """
+    return live.capability_report(db, host_id)
+
+
+@router.post("/live/capabilities", response_model=None)
+def live_record_capability(body: LiveCapIn, db: Db):
+    """Record one spike result for one CS2 build (a writer: the plugin's Live tab and `s2docs live cap-record`)."""
+    try:
+        live_capabilities.record(db, body.cs2_build, body.name, body.status, body.evidence)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return {"cs2_build": body.cs2_build, "name": body.name, "status": body.status}
 
 
 class RenderedPrompt(BaseModel):

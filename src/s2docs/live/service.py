@@ -10,7 +10,7 @@ import sqlite3
 from s2docs import hosts
 from s2docs import models as m
 from s2docs.db.connection import Database
-from s2docs.live import recipes, spawnables
+from s2docs.live import capabilities, recipes, spawnables
 from s2docs.live.intent import IntentEnvelope
 from s2docs.live.netcon import NetconClient, NetconError
 
@@ -145,8 +145,27 @@ def status(db: Database, host_id: str, *, client=None, listening: bool = False) 
     except NetconError as exc:
         return m.LiveHostStatus(host_id=host_id, netcon=where, reachable=False, sandbox=False, error=str(exc))
     groups = _SPAWNGROUP.findall(reply)
+    try:
+        build: str | None = capabilities.cs2_version(reply)
+    except capabilities.CapabilityError:
+        build = None  # reachable but not in a map yet: no version line to key the capability ledger on
     return m.LiveHostStatus(host_id=host_id, netcon=where, reachable=True, map=groups[0] if groups else None,
-                            spawngroups=groups, sandbox="[hs] pong" in reply, listening=listening)
+                            spawngroups=groups, sandbox="[hs] pong" in reply, listening=listening, cs2_build=build)
+
+
+def capability_report(db: Database, host_id: str, *, client=None) -> dict:
+    """The capability ledger for the build this host is running. A missing build key is not a server fault."""
+    hosts.get_host(db, host_id)
+    client = client or client_for(db, host_id)
+    try:
+        reply = client.run(["status"], drain=0.8, settle=0.3)
+    except NetconError as exc:
+        raise LiveError(f"cannot read the CS2 build on {host_id} over netcon: {exc}") from exc
+    try:
+        build: str | None = capabilities.cs2_version(reply)
+    except capabilities.CapabilityError as exc:
+        return {"cs2_build": None, "error": str(exc), "capabilities": capabilities.table(db, "")}
+    return {"cs2_build": build, "capabilities": capabilities.table(db, build)}
 
 
 def _row(r: sqlite3.Row) -> m.LiveAction:

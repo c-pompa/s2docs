@@ -892,4 +892,5 @@ class LiveHostStatus(BaseModel):
     spawngroups: list[str] = []
     sandbox: bool = Field(description="hermes_sandbox answered hs_ping")
     listening: bool = Field(default=False, description="An s2docs chat listener holds netcon open")
+    cs2_build: str | None = Field(default=None, description="`status` version, e.g. '1.41.9.2/14192'")
     error: str | None = None

@@ -190,3 +190,21 @@ def test_live_tools(server):
     assert spawnables.structured_content["result"][0]["id"] == "chicken"
     # a plain `dict` return carries no output schema, so the payload arrives as the text content
     assert json.loads(plan.content[0].text)["lines"].count("bot_add_t") == 4
+
+
+def test_live_capabilities_is_read_only_and_needs_netcon(db):
+    """`live_capabilities` is listed read-only and, with no netcon address recorded, says exactly that."""
+    from s2docs import hosts
+
+    hosts.register_host(db, "pomps-pc", "pomps-pc", shell="cmd")
+    server = create_mcp_server(db)
+
+    async def main():
+        async with Client(server) as c:
+            tools = {t.name: t for t in (await c.list_tools()).tools}
+            called = await c.call_tool("live_capabilities", {"host_id": "pomps-pc"})
+            return tools, called
+
+    tools, called = run(main)
+    assert tools["live_capabilities"].annotations.read_only_hint
+    assert called.is_error and "no netcon address" in called.content[0].text

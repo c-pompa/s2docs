@@ -1079,7 +1079,7 @@ def _cmd_live(args: argparse.Namespace) -> int:
     from pydantic import ValidationError
 
     from s2docs.db.repository import NotFound
-    from s2docs.live import service
+    from s2docs.live import capabilities, service
     from s2docs.live.intent import IntentEnvelope
 
     db = Database(get_settings().db_path)
@@ -1103,6 +1103,17 @@ def _cmd_live(args: argparse.Namespace) -> int:
             human = [f"{a.id}  {a.created_at}  {a.host_id}  {a.source:6}  {a.status:8}  {a.detail or ''}"
                      for a in rows]
             return _emit(args, {"actions": [a.model_dump() for a in rows]}, human or ["no live actions"])
+        if args.live_cmd == "caps":
+            report = service.capability_report(db, args.host)
+            human = [f"cs2_build: {report['cs2_build'] or 'unknown'}"]
+            if report.get("error"):
+                human.append(f"  error: {report['error']}")
+            human += [f"  {name:20} {row['status']:7}  {row['what']}" for name, row in report["capabilities"].items()]
+            return _emit(args, report, human)
+        if args.live_cmd == "cap-record":
+            capabilities.record(db, args.build, args.name, args.status, args.evidence)
+            return _emit(args, {"cs2_build": args.build, "name": args.name, "status": args.status},
+                         [f"{args.build}  {args.name} -> {args.status}"])
     except service.LiveError as exc:
         return _fail(str(exc), EXIT_CONFLICT)  # 4: the host cannot take an action now (no netcon, leased)
     except ValidationError as exc:
@@ -1513,6 +1524,13 @@ def main(argv: list[str] | None = None) -> int:
     q = lc.add_parser("actions", help="Recent live actions (newest first)")
     q.add_argument("--host")
     q.add_argument("--limit", type=int, default=20)
+    q = lc.add_parser("caps", help="Which experimental capabilities were measured on the host's CS2 build")
+    q.add_argument("--host", required=True)
+    q = lc.add_parser("cap-record", help="Record one spike result for one CS2 build")
+    q.add_argument("--build", required=True, help="The build key netcon `status` prints, e.g. 1.41.9.2/14192")
+    q.add_argument("--name", required=True, help="Capability name (see `live caps`)")
+    q.add_argument("--status", required=True, choices=["pass", "fail"])
+    q.add_argument("--evidence", required=True, help="The readback/answer/artifact that proves it")
     p.set_defaults(fn=_cmd_live)
 
     args = parser.parse_args(argv)

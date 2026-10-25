@@ -1222,6 +1222,16 @@ def create_mcp_server(db: Database, workspace: Path | None = None) -> MCPServer:
         """Is CS2 up on the host (netcon), which map/spawngroups are loaded, is the sandbox answering."""
         return _live(lambda: live_service.status(db, host_id))
 
+    @server.tool(annotations=READ_ONLY)
+    def live_capabilities(
+        host_id: Annotated[str, Field(description="Host whose running CS2 build keys the ledger")],
+    ) -> dict:
+        """Which experimental capabilities were measured on the build this host runs now.
+
+        'unknown' = not probed on that build (or CS2 was updated since), so do not promise a feature that
+        needs it until its spike passes again."""
+        return _live(lambda: live_service.capability_report(db, host_id))
+
     # -------------------------------------------------------------- resources
     @server.resource(
         "s2docs://cs2/cs_script/point_script.d.ts",
