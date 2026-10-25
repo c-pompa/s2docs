@@ -1,3 +1,5 @@
+import json
+
 import anyio
 import pytest
 from mcp import Client
@@ -54,6 +56,7 @@ def test_tools_are_listed_read_only(server):
         "job_restatus",
         "job_cancel",
         "asset_promote",
+        "live_act",
     }
     assert all(t.annotations and t.annotations.read_only_hint for t in tools if t.name not in writers)
     # Non-idempotent writers must NOT advertise idempotency: a retry would launch a second compile,
@@ -171,3 +174,19 @@ def test_mcp_build_model_writes_the_physics_node_on_request(db, tmp_path):
     plain = (root / "models" / "probe2" / "probe2.vmdl").read_text(encoding="utf-8")
     assert "Physics" not in plain
     assert hull_only.is_error
+
+
+def test_live_tools(server):
+    async def main():
+        async with Client(server) as c:
+            names = {t.name for t in (await c.list_tools()).tools}
+            spawnables = await c.call_tool("live_spawnables", {})
+            envelope = {"intents": [{"action": "bots", "team_size": 5, "me": "t"}]}
+            plan = await c.call_tool("live_plan", {"envelope": envelope})
+            return names, spawnables, plan
+
+    names, spawnables, plan = run(main)
+    assert {"live_spawnables", "live_plan", "live_act", "live_status"} <= names
+    assert spawnables.structured_content["result"][0]["id"] == "chicken"
+    # a plain `dict` return carries no output schema, so the payload arrives as the text content
+    assert json.loads(plan.content[0].text)["lines"].count("bot_add_t") == 4
