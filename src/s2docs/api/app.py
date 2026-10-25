@@ -25,6 +25,7 @@ from s2docs.db.repository import NotFound
 from s2docs.evidence import EvidenceValidationError
 from s2docs.hosts import HostLocked
 from s2docs.jobs import JobConflict, JobValidationError
+from s2docs.live import service as live_service
 from s2docs.orchestration.engine import GateFailed, Orchestrator
 from s2docs.prompts import PromptError
 
@@ -137,6 +138,11 @@ def create_app(db_path: Path | None = None, *, mount_mcp: bool = True, workspace
         # A promotion payload problem (missing licence, a model with no frame, a frame the job never
         # stored) reports every offending field in one 422, so an agent fixes them in one pass.
         return JSONResponse({"detail": str(exc), "fields": exc.fields}, status_code=422)
+
+    @app.exception_handler(live_service.LiveError)
+    async def _live_error(_: Request, exc: live_service.LiveError) -> JSONResponse:
+        # The host cannot take a live action now (no netcon address, unreachable, leased by a test run).
+        return JSONResponse({"detail": str(exc), "conflict": True}, status_code=409)
 
     @app.exception_handler(assets.AssetConflict)
     async def _asset_conflict(_: Request, exc: assets.AssetConflict) -> JSONResponse:

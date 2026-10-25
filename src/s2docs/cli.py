@@ -1074,6 +1074,55 @@ def _watch_job(db, job_id: str) -> int:
         time.sleep(1.0)
 
 
+def _cmd_live(args: argparse.Namespace) -> int:
+    """`s2docs live ...`: probe a host's CS2 over netcon, record where netcon listens, run an envelope."""
+    from pydantic import ValidationError
+
+    from s2docs.db.repository import NotFound
+    from s2docs.live import capabilities, service
+    from s2docs.live.intent import IntentEnvelope
+
+    db = Database(get_settings().db_path)
+    try:
+        if args.live_cmd == "status":
+            st = service.status(db, args.host)
+            human = [f"{st.host_id}  {st.netcon}  reachable={st.reachable}  sandbox={st.sandbox}  map={st.map or '-'}"]
+            if st.error:
+                human.append(f"  error: {st.error}")
+            return _emit(args, {"status": st.model_dump()}, human)
+        if args.live_cmd == "set-netcon":
+            addr = service.set_netcon(db, args.host, args.addr)
+            return _emit(args, {"host_id": args.host, "netcon_addr": addr}, [f"{args.host} -> {addr}"])
+        if args.live_cmd == "act":
+            env = IntentEnvelope.model_validate_json(args.envelope)
+            act = service.act(db, args.host, env, source="cli", text=args.text)
+            return _emit(args, {"action": act.model_dump()},
+                         [f"{act.id}  {act.status}  {act.detail or ''}"] + [f"  > {line}" for line in act.lines])
+        if args.live_cmd == "actions":
+            rows = service.list_actions(db, args.host, limit=args.limit)
+            human = [f"{a.id}  {a.created_at}  {a.host_id}  {a.source:6}  {a.status:8}  {a.detail or ''}"
+                     for a in rows]
+            return _emit(args, {"actions": [a.model_dump() for a in rows]}, human or ["no live actions"])
+        if args.live_cmd == "caps":
+            report = service.capability_report(db, args.host)
+            human = [f"cs2_build: {report['cs2_build'] or 'unknown'}"]
+            if report.get("error"):
+                human.append(f"  error: {report['error']}")
+            human += [f"  {name:20} {row['status']:7}  {row['what']}" for name, row in report["capabilities"].items()]
+            return _emit(args, report, human)
+        if args.live_cmd == "cap-record":
+            capabilities.record(db, args.build, args.name, args.status, args.evidence)
+            return _emit(args, {"cs2_build": args.build, "name": args.name, "status": args.status},
+                         [f"{args.build}  {args.name} -> {args.status}"])
+    except service.LiveError as exc:
+        return _fail(str(exc), EXIT_CONFLICT)  # 4: the host cannot take an action now (no netcon, leased)
+    except ValidationError as exc:
+        return _fail(f"invalid envelope: {exc}", EXIT_VALIDATION)  # 9
+    except NotFound as exc:
+        return _fail(str(exc), EXIT_NOT_FOUND)  # 3
+    return _fail(f"unknown live command {args.live_cmd!r}", EXIT_ERROR)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="s2docs", description="Source 2 docs index, API and MCP server")
     parser.add_argument("-v", "--verbose", action="store_true")
@@ -1460,6 +1509,29 @@ def main(argv: list[str] | None = None) -> int:
     q = jc.add_parser("watch", help="Tail a job's events until it ends")
     q.add_argument("job_id")
     p.set_defaults(fn=_cmd_job)
+
+    p = sub.add_parser("live", help="Live actions on a running CS2: probe netcon, run a validated request")
+    lc = p.add_subparsers(dest="live_cmd", required=True)
+    q = lc.add_parser("status", help="Probe the host's CS2 over netcon (map, spawngroups, sandbox)")
+    q.add_argument("--host", required=True)
+    q = lc.add_parser("set-netcon", help="Record where the host's CS2 -netconport listens")
+    q.add_argument("--host", required=True)
+    q.add_argument("--addr", required=True, help="IP-or-name:port, e.g. 10.88.20.235:2121")
+    q = lc.add_parser("act", help="Run an IntentEnvelope on the host and judge it by readback")
+    q.add_argument("--host", required=True)
+    q.add_argument("--envelope", required=True, help='JSON: {"intents": [{"action": "bots", "team_size": 5}]}')
+    q.add_argument("--text", help="The user's own words, verbatim")
+    q = lc.add_parser("actions", help="Recent live actions (newest first)")
+    q.add_argument("--host")
+    q.add_argument("--limit", type=int, default=20)
+    q = lc.add_parser("caps", help="Which experimental capabilities were measured on the host's CS2 build")
+    q.add_argument("--host", required=True)
+    q = lc.add_parser("cap-record", help="Record one spike result for one CS2 build")
+    q.add_argument("--build", required=True, help="The build key netcon `status` prints, e.g. 1.41.9.2/14192")
+    q.add_argument("--name", required=True, help="Capability name (see `live caps`)")
+    q.add_argument("--status", required=True, choices=["pass", "fail"])
+    q.add_argument("--evidence", required=True, help="The readback/answer/artifact that proves it")
+    p.set_defaults(fn=_cmd_live)
 
     args = parser.parse_args(argv)
     # stdout is the MCP stdio channel: logs must go to stderr.

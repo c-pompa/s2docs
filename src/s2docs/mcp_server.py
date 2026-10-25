@@ -25,6 +25,10 @@ from s2docs.build.validate_script import validate_cs_script as _validate_cs_scri
 from s2docs.config import GAMES, get_settings, server_identity
 from s2docs.db.connection import Database, DatabaseNotInitialized
 from s2docs.db.repository import NotFound, Repository
+from s2docs.live import recipes as live_recipes
+from s2docs.live import service as live_service
+from s2docs.live import spawnables as live_spawnables_mod
+from s2docs.live.intent import IntentEnvelope
 from s2docs.orchestration.engine import OrchestrationError, Orchestrator, workflow_info
 from s2docs.orchestration.workflows import WORKFLOWS
 from s2docs.prompts import PROMPTS, PromptError, render_prompt
@@ -1181,6 +1185,52 @@ def create_mcp_server(db: Database, workspace: Path | None = None) -> MCPServer:
     ) -> m.Asset:
         """One catalog entry by id or slug, with its build/deploy/frame-job ids and retirement state."""
         return _assets(lambda: assets.resolve(db, asset_id))
+
+    # -------------------------------------------------------------- live actions
+    LIVE_WRITE = ToolAnnotations(read_only_hint=False, destructive_hint=False, open_world_hint=True)
+
+    def _live(fn: Callable[[], T]) -> T:
+        try:
+            return fn()
+        except (live_service.LiveError, live_recipes.LiveUnavailable, NotFound) as exc:
+            raise ToolError(str(exc)) from exc
+
+    @server.tool(annotations=READ_ONLY)
+    def live_spawnables() -> list[dict]:
+        """Ids a live spawn may name (stock entities; catalog models once the sandbox carries them)."""
+        return [s.as_dict() for s in live_spawnables_mod.stock().values()]
+
+    @server.tool(annotations=READ_ONLY)
+    def live_plan(
+        envelope: Annotated[IntentEnvelope, Field(description="{intents:[...], say?} — see live_spawnables for ids")],
+    ) -> dict:
+        """Dry run: the allowlisted console lines a request compiles to. Use before live_act to show the user."""
+        return _live(lambda: live_service.plan_only(envelope))
+
+    @server.tool(annotations=LIVE_WRITE)
+    def live_act(
+        host_id: Annotated[str, Field(description="pomps-pc | desktop-pc")],
+        envelope: Annotated[IntentEnvelope, Field(description="The validated request")],
+        text: Annotated[str | None, Field(description="The user's own words, verbatim")] = None,
+    ) -> m.LiveAction:
+        """Run a request on the host's running CS2 and judge it by readback. Refused (not failed) when it
+        needs the sandbox and the sandbox is not loaded. 'verified' is the only success that was checked."""
+        return _live(lambda: live_service.act(db, host_id, envelope, source="mcp", text=text))
+
+    @server.tool(annotations=READ_ONLY)
+    def live_status(host_id: Annotated[str, Field(description="Host to probe")]) -> m.LiveHostStatus:
+        """Is CS2 up on the host (netcon), which map/spawngroups are loaded, is the sandbox answering."""
+        return _live(lambda: live_service.status(db, host_id))
+
+    @server.tool(annotations=READ_ONLY)
+    def live_capabilities(
+        host_id: Annotated[str, Field(description="Host whose running CS2 build keys the ledger")],
+    ) -> dict:
+        """Which experimental capabilities were measured on the build this host runs now.
+
+        'unknown' = not probed on that build (or CS2 was updated since), so do not promise a feature that
+        needs it until its spike passes again."""
+        return _live(lambda: live_service.capability_report(db, host_id))
 
     # -------------------------------------------------------------- resources
     @server.resource(
