@@ -73,6 +73,28 @@ def test_host_leased_by_a_test_run_is_refused(db):
         service.act(db, "pomps-pc", bots_env(), source="cli", client=FakeClient({}))
 
 
+# Real `ent_find chicken` replies from S1 (pomps-pc, CS2 1.41.9.2). The header line itself contains the
+# class name, so an empty search must count 0, not 1.
+ENT_FIND_HEADER = 'Searching for entities with class/target name containing substrings: "chicken"'
+ENT_FIND_ONE = ENT_FIND_HEADER + "\n   'chicken' : '' (entindex 354)"
+GETPOS = "setpos -657.271362 -755.879639 182.555878;setang 0.000000 -152.499847 0.000000"
+
+
+def _console_chicken(db, ent_find_reply):
+    env = IntentEnvelope.model_validate({"intents": [{"action": "spawn", "what": "chicken", "count": 1}]})
+    client = FakeClient({"hs_ping": "Unknown command", "getpos": GETPOS, "ent_find chicken": ent_find_reply})
+    return service.act(db, "pomps-pc", env, source="cli", client=client)
+
+
+def test_console_spawn_verified_only_by_entity_rows(db):
+    assert _console_chicken(db, ENT_FIND_ONE).status == "verified"
+
+
+def test_console_spawn_with_no_entities_is_failed(db):
+    act = _console_chicken(db, ENT_FIND_HEADER)
+    assert act.status == "failed" and "listed 0 chicken" in act.detail
+
+
 
 def test_rest_plan_schema_and_actions(db, monkeypatch):
     monkeypatch.setattr(service, "client_for", lambda db_, host_id: FakeClient({"hs_ping": "", "status": ROWS9}))

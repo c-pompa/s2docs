@@ -82,8 +82,14 @@ readback round trip of its own. It never greps the stream for "BOT": join lines
 The Python and the JS sandbox share the same expected values in
 `tests/fixtures/live/formation_vectors.json` (Task 4.3 asserts the JS side against the same file).
 
-A console spawn subtracts `GETPOS_EYE_HEIGHT` (64 u) from `getpos`, because `getpos` reports the **eye**:
-without it, chickens spawn in the player's face instead of on the floor.
+A console spawn subtracts `GETPOS_EYE_HEIGHT` (64 u) from `getpos`, on the assumption that `getpos`
+reports the **eye**. That is **not measured yet**: the index documents `getpos` as "dump position" and
+`getpos_exact` as "dump origin", which points that way. P2 records both live and replaces the guess
+(or switches the recipe to `getpos_exact`, which removes the offset entirely).
+
+The `ent_find` readback counts entity ROWS (`   'chicken' : '' (entindex 354)`), never the class name:
+ent_find's header line (`...containing substrings: "chicken"`) contains the name even when nothing exists,
+which once made an empty search count as one chicken.
 
 ## Where netcon lives: the registry, not an env var
 

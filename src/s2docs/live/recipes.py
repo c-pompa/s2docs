@@ -12,7 +12,9 @@ from s2docs.live.spawnables import Spawnable
 TEAM_NUM = {"spectator": 1, "t": 2, "ct": 3}
 # The form spike S0 (Task 0.2) proved moves the LOCAL player over netcon. Change only with new evidence.
 ME_TEAM_LINE = "jointeam {num} 1"
-# Measured in S0/S2: getpos reports the eye; subtract to stand items on the floor.
+# UNVERIFIED (2026-10-25 review): the index documents `getpos` as "dump position" and `getpos_exact` as
+# "dump origin", which suggests getpos is the EYE (origin + 64 standing). Not yet measured on CS2 —
+# P2 measures `getpos` vs `getpos_exact` live and replaces this guess with the recorded difference.
 GETPOS_EYE_HEIGHT = 64.0
 
 _NUM = r"-?\d+(?:\.\d+)?"

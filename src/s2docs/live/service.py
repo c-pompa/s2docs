@@ -71,7 +71,10 @@ def _check(expect: list[dict], reply: str, readback: str) -> tuple[bool, str]:
         elif e["check"] == "reply" and not re.search(e["pattern"], reply):
             return False, f"no console line matching {e['pattern']!r}"
         elif e["check"] == "ent_count":
-            n = readback.count(e["classname"])
+            # Count ENTITY ROWS (`   'chicken' : '' (entindex 354)`, measured in S1), never the bare class name:
+            # ent_find's header line `...containing substrings: "chicken"` contains it even when nothing exists.
+            row = re.compile(rf"^\s*'{re.escape(e['classname'])}'\s*:", re.M)
+            n = len(row.findall(readback))
             if n < e["min"]:
                 return False, f"ent_find listed {n} {e['classname']}, expected >= {e['min']}"
     return True, "all readback checks passed"
