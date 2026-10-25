@@ -206,3 +206,121 @@ def test_cli_runs_the_chain_and_emits_the_job(tmp_path, monkeypatch, capsys):
     assert payload["status"] == "inconclusive"
     assert [e["phase"] for e in payload["events"] if e["phase"]] == list(pipeline.STAGES)
     assert (workspace / "models" / "bridge" / "bridge.vmdl").is_file()
+
+
+# ------------------------------------------------------------------ text -> cs_script slice
+
+
+def _fake_validation(*, ok: bool, errors: int = 0):
+    from s2docs.models import ScriptValidation
+
+    return ScriptValidation(ok=ok, errors=errors, warnings=0, diagnostics=[], checker="tsc (fake)")
+
+
+def _patch_validate(monkeypatch, *, raises=None, result=None):
+    import s2docs.build.validate_script as vs
+
+    def fake(_repo, _code, *, game="cs2", filename="script.js"):
+        if raises is not None:
+            raise raises
+        return result
+
+    monkeypatch.setattr(vs, "validate_cs_script", fake)
+
+
+def test_script_slice_writes_validates_and_blocks_the_rest(db, tmp_path, monkeypatch):
+    root = _addon(tmp_path, monkeypatch)
+    _host(db)
+    _patch_validate(monkeypatch, result=_fake_validation(ok=True))
+
+    job = pipeline.run_script_slice(
+        db, prompt="a ping/pong script", addon="probe_addon", name="pinger",
+        host_id="desktop-pc", script_text='import { Instance } from "cs_script/point_script";\n',
+    )
+
+    assert [e.phase for e in job.events if e.phase] == list(pipeline.SCRIPT_STAGES)
+    assert job.status == "inconclusive", "build/deploy/verdict are blocked, so no pass"
+    written = root / "scripts" / "pinger.js"
+    assert written.is_file() and "cs_script/point_script" in written.read_text(encoding="utf-8")
+    generate = next(e for e in job.events if e.phase == "generate")
+    assert generate.data["source"] == "supplied"
+    validate = next(e for e in job.events if e.phase == "validate")
+    assert validate.level == "milestone"
+    for stage in ("build", "deploy", "verdict"):
+        assert next(e for e in job.events if e.phase == stage).data["blocked"] is True
+
+
+def test_script_slice_uses_the_scaffold_skeleton_when_no_text_is_supplied(db, tmp_path, monkeypatch):
+    root = _addon(tmp_path, monkeypatch)
+    _host(db)
+    _patch_validate(monkeypatch, result=_fake_validation(ok=True))
+
+    job = pipeline.run_script_slice(db, prompt="p", addon="probe_addon", name="pinger",
+                                    host_id="desktop-pc")
+
+    generate = next(e for e in job.events if e.phase == "generate")
+    assert generate.data["source"] == "scaffold skeleton"
+    assert "Instance.OnActivate" in (root / "scripts" / "pinger.js").read_text(encoding="utf-8")
+
+
+def test_script_slice_fails_when_validation_reports_errors(db, tmp_path, monkeypatch):
+    _addon(tmp_path, monkeypatch)
+    _host(db)
+    _patch_validate(monkeypatch, result=_fake_validation(ok=False, errors=2))
+
+    job = pipeline.run_script_slice(db, prompt="p", addon="probe_addon", name="pinger",
+                                    host_id="desktop-pc", script_text="const x = ;\n")
+
+    assert job.status == "failed"
+    validate = next(e for e in job.events if e.phase == "validate")
+    assert validate.level == "error"
+    assert validate.data["errors"] == 2
+
+
+def test_script_slice_blocks_validate_when_the_toolchain_is_missing(db, tmp_path, monkeypatch):
+    from s2docs.build.validate_script import ToolchainMissing
+
+    _addon(tmp_path, monkeypatch)
+    _host(db)
+    _patch_validate(monkeypatch, raises=ToolchainMissing("no tsc"))
+
+    job = pipeline.run_script_slice(db, prompt="p", addon="probe_addon", name="pinger",
+                                    host_id="desktop-pc")
+
+    validate = next(e for e in job.events if e.phase == "validate")
+    assert validate.data["blocked"] is True
+    assert "tsc" in validate.data["reason"]
+    assert job.status == "inconclusive", "a missing toolchain is not a validation failure"
+
+
+def test_cli_runs_the_script_chain(tmp_path, monkeypatch, capsys):
+    import json
+
+    from s2docs import cli
+    from s2docs.config import get_settings
+    from s2docs.db.connection import Database
+
+    data = tmp_path / "data"
+    data.mkdir()
+    monkeypatch.setenv("S2DOCS_DATA_DIR", str(data))
+    workspace = _addon(tmp_path, monkeypatch)
+    get_settings.cache_clear()
+    db = Database(get_settings().db_path)
+    with db.writer():
+        pass
+    _host(db)
+    _patch_validate(monkeypatch, result=_fake_validation(ok=True))
+
+    code = cli.main([
+        "--json", "pipeline", "script",
+        "--prompt", "a ping/pong script",
+        "--addon", "probe_addon",
+        "--name", "pinger",
+        "--host", "desktop-pc",
+    ])
+
+    assert code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == "inconclusive"
+    assert [e["phase"] for e in payload["events"] if e["phase"]] == list(pipeline.SCRIPT_STAGES)
+    assert (workspace / "scripts" / "pinger.js").is_file()

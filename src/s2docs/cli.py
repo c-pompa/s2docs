@@ -298,23 +298,8 @@ def _cmd_asset(args: argparse.Namespace) -> int:
     return 0
 
 
-def _cmd_pipeline(args: argparse.Namespace) -> int:
-    """`s2docs pipeline run`: the chain as one job — asset+build real, concept/mesh stubbed, deploy/ingame blocked."""
-    from s2docs import pipeline
-
-    db = Database(get_settings().db_path)
-    job = pipeline.run_asset_build_slice(
-        db,
-        prompt=args.prompt,
-        addon=args.addon,
-        name=args.name,
-        mesh=args.mesh,
-        host_id=args.host,
-        material_color=args.color,
-        project_id=args.project,
-        build_command=args.build_command,
-        build_timeout_sec=args.build_timeout,
-    )
+def _emit_chain(args: argparse.Namespace, job) -> int:
+    """Render a chain job: the stages with their disposition, then the close-out's next step."""
     lines = [f"{job.id} {job.status} (phase {job.phase})"]
     for event in job.events:
         if not event.phase:
@@ -332,6 +317,44 @@ def _cmd_pipeline(args: argparse.Namespace) -> int:
         lines.append(f"  next: {job.summary.next}")
     _emit(args, job.model_dump(mode="json"), lines)
     return EXIT_ERROR if job.status == "error" else EXIT_OK
+
+
+def _cmd_pipeline(args: argparse.Namespace) -> int:
+    """`s2docs pipeline run`: the chain as one job — asset+build real, concept/mesh stubbed, deploy/ingame blocked."""
+    from s2docs import pipeline
+
+    db = Database(get_settings().db_path)
+    job = pipeline.run_asset_build_slice(
+        db,
+        prompt=args.prompt,
+        addon=args.addon,
+        name=args.name,
+        mesh=args.mesh,
+        host_id=args.host,
+        material_color=args.color,
+        project_id=args.project,
+        build_command=args.build_command,
+        build_timeout_sec=args.build_timeout,
+    )
+    return _emit_chain(args, job)
+
+
+def _cmd_pipeline_script(args: argparse.Namespace) -> int:
+    """`s2docs pipeline script`: text -> cs_script as one job — generate+validate real, the rest blocked."""
+    from s2docs import pipeline
+
+    text = Path(args.script).read_text(encoding="utf-8") if args.script else None
+    db = Database(get_settings().db_path)
+    job = pipeline.run_script_slice(
+        db,
+        prompt=args.prompt,
+        addon=args.addon,
+        name=args.name,
+        host_id=args.host,
+        script_text=text,
+        project_id=args.project,
+    )
+    return _emit_chain(args, job)
 
 
 def _asset_material(args: argparse.Namespace, root) -> int:
@@ -1142,6 +1165,15 @@ def main(argv: list[str] | None = None) -> int:
     q.add_argument("--build-timeout", type=int, default=300, help="seconds to wait for the build")
     q.add_argument("--project", help="ledger project id to attach the chain to")
     q.set_defaults(fn=_cmd_pipeline)
+
+    s = pc.add_parser("script", help="Run the text->cs_script chain for one script")
+    s.add_argument("--prompt", required=True, help="What the script should do; recorded on the job")
+    s.add_argument("--addon", required=True, help="Addon name in the local workspace")
+    s.add_argument("--name", required=True, help="Script name (addon-safe: [a-z][a-z0-9_]+)")
+    s.add_argument("--host", required=True, help="Build host id (see `s2docs host list`)")
+    s.add_argument("--script", help="an existing .js to use instead of the scaffold skeleton")
+    s.add_argument("--project", help="ledger project id to attach the chain to")
+    s.set_defaults(fn=_cmd_pipeline_script)
 
     p = sub.add_parser("prompt", help="Render a prompt template, e.g. prompt cs2_script task='...'")
     p.add_argument("name")
