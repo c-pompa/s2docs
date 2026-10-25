@@ -172,6 +172,15 @@ CS2 addon scaffolded by s2docs (no cs_script).
 """
 
 
+def script_template(name: str) -> str:
+    """The cs_script skeleton ``scaffold`` writes, as a string.
+
+    Public because the pipeline's *generate* stage must produce the same artifact the scaffold
+    produces — a second, drifting copy of this template is how the two silently disagree.
+    """
+    return _SCRIPT_TEMPLATE.format(name=name)
+
+
 def scaffold(workspace: Path, repo: Repository, *, game: str, name: str, with_script: bool = True) -> m.Addon:
     root = addon_root(workspace, game, name)
     if root.exists():

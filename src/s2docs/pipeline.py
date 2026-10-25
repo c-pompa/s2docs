@@ -204,3 +204,142 @@ def run_asset_build_slice(
             ),
         ),
     )
+
+
+# --------------------------------------------------------------------------- text -> cs_script
+
+#: The script chain, in order. Same contract as STAGES: one event per entry, ``phase`` = the id.
+SCRIPT_STAGES: tuple[str, ...] = ("prompt", "generate", "validate", "build", "deploy", "verdict")
+
+SCRIPT_BLOCKED: dict[str, str] = {
+    "build": (
+        "the .js -> .vjs compile path is not established in this repo (the engine loads "
+        "scripts/<name>.vjs); recorded instead of guessing a compiler invocation"
+    ),
+    "deploy": (
+        "needs a reachable target host and a mounted addon; not attempted by this slice "
+        "(pomps-pc sshd flaps for minutes at a time)"
+    ),
+    "verdict": (
+        "an in-game verdict needs a live server plus the driver; blocked with the ingame stage "
+        "(docs/HAMMERED.md 2026-10-24)"
+    ),
+}
+
+
+def run_script_slice(
+    db,
+    *,
+    prompt: str,
+    addon: str,
+    name: str,
+    host_id: str,
+    script_text: str | None = None,
+    game: str = "cs2",
+    kind: str = "test",
+    title: str | None = None,
+    project_id: str | None = None,
+    origin: str = "agent",
+    expected: str | None = None,
+) -> m.Job:
+    """Run the text -> cs_script chain for one script and return the closed-out job.
+
+    ``generate`` writes ``script_text`` when the caller supplies one (the LLM/caller is the
+    generator) and otherwise the scaffold's own skeleton, so the stage never invents code it cannot
+    attribute. ``validate`` type-checks through the same ``validate_cs_script`` the CLI uses; a
+    missing TypeScript toolchain is *blocked*, not a pass and not a failure.
+    """
+    from s2docs.build.validate_script import ToolchainMissing, validate_cs_script
+    from s2docs.build.workspace import addon_root, script_template
+    from s2docs.db.repository import Repository
+
+    job = jobs.enqueue(
+        db,
+        kind=kind,
+        title=title or f"{addon}: {name} cs_script chain",
+        target=addon,
+        purpose=prompt,
+        expected=expected or f"a type-checked cs_script ({name}.js) plus the job timeline for every stage",
+        host_id=host_id,
+        project_id=project_id,
+        origin=origin,
+    )
+    jobs.start(db, job.id, worker="pipeline-slice")
+    _stage(db, job.id, "prompt", level="milestone", message="prompt recorded", data={"prompt": prompt})
+
+    # ---- generate ----------------------------------------------------------
+    workspace = get_settings().workspace_dir
+    root = addon_root(workspace, game, addon)
+    if not root.is_dir():
+        _stage(
+            db, job.id, "generate", level="error",
+            message=f"addon {addon!r} is not in the workspace",
+            data={"workspace": str(workspace), "hint": f"run `s2docs scaffold {addon}` first"},
+        )
+        return jobs.finish(db, job.id, status="error", summary=_summary(
+            what=f"cs_script chain for {name} stopped at generate: addon {addon} is not in the workspace.",
+            why="The script is written into the addon's content tree, so the addon is the gate.",
+            learned=f"workspace={workspace} has no addon {addon!r}.",
+            next_=f"Run `s2docs scaffold {addon}`, then re-run the chain.",
+        ))
+
+    text = script_text if script_text is not None else script_template(name)
+    target = root / "scripts" / f"{name}.js"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(text, encoding="utf-8")
+    _stage(
+        db, job.id, "generate", level="milestone", message="script written",
+        data={"path": target.relative_to(root).as_posix(), "bytes": len(text.encode("utf-8")),
+              "source": "supplied" if script_text is not None else "scaffold skeleton"},
+    )
+
+    # ---- validate ----------------------------------------------------------
+    validation = "blocked"
+    try:
+        with db.reader() as conn:
+            result = validate_cs_script(Repository(conn), text, game=game, filename=f"{name}.js")
+    except ToolchainMissing as exc:
+        _stage(db, job.id, "validate", level="warn", message="validate blocked: no TypeScript toolchain",
+               data={"blocked": True, "reason": str(exc)})
+    else:
+        if result.ok:
+            validation = "ok"
+            _stage(db, job.id, "validate", level="milestone", message="script type-checks",
+                   data={"errors": result.errors, "warnings": result.warnings, "checker": result.checker})
+        else:
+            validation = "failed"
+            _stage(
+                db, job.id, "validate", level="error", message=f"script has {result.errors} error(s)",
+                data={"errors": result.errors, "warnings": result.warnings,
+                      "diagnostics": [d.model_dump() for d in result.diagnostics[:5]]},
+            )
+
+    # ---- build / deploy / verdict: blocked, recorded as such ---------------
+    for stage in ("build", "deploy", "verdict"):
+        _stage(db, job.id, stage, message=f"{stage} blocked",
+               data={"blocked": True, "reason": SCRIPT_BLOCKED[stage]})
+
+    learned = (
+        f"generate wrote scripts/{name}.js ({len(text.encode('utf-8'))} B, "
+        f"{'caller-supplied' if script_text is not None else 'scaffold skeleton'}); "
+        f"validate {validation}; build/deploy/verdict blocked"
+    )
+    return jobs.finish(
+        db, job.id,
+        status="failed" if validation == "failed" else "inconclusive",
+        summary=_summary(
+            what=(
+                f"Ran the cs_script chain for {name} in addon {addon}: "
+                f"{', '.join(SCRIPT_STAGES)} recorded on one job."
+            ),
+            why=(
+                "A text->script action kind needs a durable record of what was generated and whether "
+                "it type-checks, not a shell transcript."
+            ),
+            learned=learned,
+            next_=(
+                "Establish the .js->.vjs compile path, then deploy the addon and capture an in-game "
+                "verdict once a host with an active display adapter is reachable."
+            ),
+        ),
+    )
