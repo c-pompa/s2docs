@@ -1,0 +1,31 @@
+name: s2studio
+version: 0.1.0
+manifest_version: 2
+requires_hermes: ">=0.21.5"
+description: >-
+  Source 2 Studio: the s2docs catalog of what you made for CS2, the test runs that prove it, and a live
+  panel that turns a sentence ("5v5 bots, me on T") into allowlisted console actions on a CS2 host.
+  Backend routes mount at /api/plugins/s2studio/; the desktop half renders the page.
+author: cpompa
+license: MIT
+tags: [source2, cs2, s2docs]
+provides_tools: []
+provides_hooks: []
+config_schema:
+  s2docs_url:
+    type: str
+    default: "http://127.0.0.1:8812"
+    label: s2docs URL
+    description: Where s2docs serve answers. Use http://127.0.0.1:8813 while developing against a throwaway server.
+  default_host:
+    type: str
+    default: "pomps-pc"
+    label: Game host
+    description: The s2docs host whose running CS2 the Live tab drives (its netcon address is set with PUT /api/live/hosts/ID on the server).
+  chat_auto_run:
+    type: bool
+    default: true
+    label: Run in-game chat requests
+    description: >-
+      When on, a "!h ..." line typed in CS2 chat is turned into an action and run at once (it is still
+      validated and allowlisted). When off it waits in the Live tab for you to press Run.
