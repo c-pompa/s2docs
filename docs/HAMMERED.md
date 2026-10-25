@@ -266,3 +266,23 @@ the game, not a file.
   map/addon that references the model**, so the mount precaches it, instead of `ent_create` of a loose
   file — see the `source2-modding` skill for the launch/control caveats collected here. Everything copied
   to pomps-pc was removed afterwards (`Test-Path` False for both dirs).
+- **2026-10-24 — map-compile route: hand-authored vmaps are NOT compilable; bisected to the mesh shape.**
+  The plan to precache the prop by reference (a map that places it) got as far as a real 28,745 B vmap:
+  element/attribute schema copied from the emitted `de_dust2_iso.vmap` (`CMapEntity` ->
+  `entity_properties` -> `EditGameClassProps` with `classname` as a KEYVALUE), 2 closed box meshes,
+  `info_player_start`, `light_environment`, and `prop_dynamic` carrying
+  `models/tsr_eefa8331/tsr_eefa8331.vmdl`. It round-trips through `dmx.load`, and the model compiled
+  clean first (`b-1d107380`). Then `resourcecompiler -i maps/testprop.vmap -nop4` died in ~5 s with
+  `Encountered accessviolation. Failed to write minidump …`, an **empty stdout log** and **no
+  `No display adapters found` line** — so this was not the WARP/adapter gate that blocks desktop-pc.
+  Two probe failures narrowed it: compiling from `D:\Temp` answers `Unable to determine mod from file`
+  in 0 s (a vmap must live under `content/csgo_addons/<addon>/maps/`), and after moving it there, a
+  **world-only probe with zero entities crashed identically** (~4 s, accessviolation, no vpk). So the
+  entity block is innocent and the cause is the mesh representation: our `CDmePolygonMeshData` carries
+  only `position` + `vertexindex`, and rc builds its ray-tracing environment from the half-edge graph
+  that shape does not have. Conclusion: **do not hand-author map geometry** — the only proven-compilable
+  representation is whole source `CMapMesh` elements re-parented untouched from a decompiled map. The
+  in-game proof therefore needs a real decompiled vmap as its base, which is the Hammered pipeline's
+  scale (38-minute compiles), not a slice. Tool + schema kept as
+  `source2-modding/scripts/make_prop_map.py`; the full trap list is in that skill's
+  `references/map-rebuild-pitfalls.md`. Everything deployed to pomps-pc was removed afterwards.
