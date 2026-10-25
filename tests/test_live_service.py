@@ -1,3 +1,5 @@
+import json
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -88,3 +90,16 @@ def test_rest_plan_schema_and_actions(db, monkeypatch):
         act = c.post("/api/live/actions", json={**body, "source": "plugin", "text": "5v5 me on T"})
         assert act.status_code == 201 and act.json()["status"] == "verified"
         assert c.get("/api/live/actions?host_id=pomps-pc").json()[0]["id"] == act.json()["id"]
+
+
+def test_cli_lists_actions_as_json(db, capsys, monkeypatch):
+    """`s2docs live actions --json` reads the same store the service wrote to (S2DOCS_DB points it there)."""
+    from s2docs import cli
+    from s2docs.config import get_settings
+
+    service.act(db, "pomps-pc", bots_env(), source="cli", client=FakeClient({"hs_ping": "", "status": ROWS9}))
+    monkeypatch.setenv("S2DOCS_DB", str(db.path))
+    get_settings.cache_clear()
+    assert cli.main(["--json", "live", "actions"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["schema"] == "s2docs/v1" and payload["actions"][0]["status"] == "verified"
