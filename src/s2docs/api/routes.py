@@ -18,6 +18,9 @@ from s2docs.build.validate_script import validate_cs_script
 from s2docs.config import GAMES, server_identity
 from s2docs.db.connection import Database
 from s2docs.db.repository import Repository
+from s2docs.live import service as live
+from s2docs.live import spawnables as live_spawnables
+from s2docs.live.intent import IntentEnvelope
 from s2docs.orchestration.engine import Orchestrator, workflow_info
 from s2docs.orchestration.workflows import WORKFLOWS
 from s2docs.prompts import PROMPTS, render_prompt
@@ -915,6 +918,73 @@ class PromptOut(BaseModel):
     title: str
     description: str
     arguments: list[PromptArgOut]
+
+
+# ------------------------------------------------------------------ live actions
+
+
+class LivePlanIn(BaseModel):
+    host_id: str
+    envelope: IntentEnvelope
+
+
+class LiveActIn(LivePlanIn):
+    source: Literal["plugin", "mcp", "chat", "cli"] = "plugin"
+    text: str | None = Field(default=None, max_length=500)
+    request_id: str | None = None
+
+
+class LiveHostIn(BaseModel):
+    netcon_addr: str = Field(description="host:port of the host's CS2 -netconport, e.g. 10.88.20.235:2121")
+
+
+@router.put("/live/hosts/{host_id}")
+def live_set_host(host_id: str, body: LiveHostIn, db: Db):
+    """Record where a host's CS2 netcon listens (409 on a malformed address, 404 on an unknown host)."""
+    return {"host_id": host_id, "netcon_addr": live.set_netcon(db, host_id, body.netcon_addr)}
+
+
+@router.get("/live/hosts")
+def live_hosts(db: Db):
+    return live.list_netcon(db)
+
+
+@router.get("/live/spawnables")
+def live_spawnable_list():
+    """What a spawn intent's `what` may name."""
+    return [s.as_dict() for s in live_spawnables.stock().values()]
+
+
+@router.get("/live/intent-schema")
+def live_intent_schema():
+    """The JSON schema a model fills, plus the spawnable ids it may use. The plugin builds its prompt from this."""
+    return {"schema": IntentEnvelope.model_json_schema(),
+            "spawnables": [s.as_dict() for s in live_spawnables.stock().values()]}
+
+
+@router.post("/live/plan")
+def live_plan(body: LivePlanIn):
+    """Dry run: the console lines an envelope compiles to (assuming the sandbox is loaded). No host contact."""
+    try:
+        return live.plan_only(body.envelope)
+    except live.recipes.LiveUnavailable as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.post("/live/actions", response_model=m.LiveAction, status_code=201)
+def live_act(body: LiveActIn, db: Db):
+    """Run an envelope on the host's live game and judge it by readback (verified | sent | failed | refused)."""
+    return live.act(db, body.host_id, body.envelope, source=body.source, text=body.text, request_id=body.request_id)
+
+
+@router.get("/live/actions", response_model=list[m.LiveAction])
+def live_actions(db: Db, host_id: str | None = None, limit: Annotated[int, Query(ge=1, le=200)] = 50):
+    return live.list_actions(db, host_id, limit=limit)
+
+
+@router.get("/live/status", response_model=m.LiveHostStatus)
+def live_status(db: Db, host_id: Annotated[str, Query(description="Host to probe over netcon")]):
+    return live.status(db, host_id)
 
 
 class RenderedPrompt(BaseModel):

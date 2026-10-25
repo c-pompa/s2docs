@@ -1,6 +1,8 @@
 import pytest
+from fastapi.testclient import TestClient
 
 from s2docs import hosts
+from s2docs.api.app import create_app
 from s2docs.db.connection import Database
 from s2docs.live import service
 from s2docs.live.intent import IntentEnvelope
@@ -67,3 +69,22 @@ def test_host_leased_by_a_test_run_is_refused(db):
     hosts.claim_host(db, "pomps-pc", "verify_demo/j-1", ttl_sec=600)
     with pytest.raises(service.LiveError, match="verify_demo/j-1"):
         service.act(db, "pomps-pc", bots_env(), source="cli", client=FakeClient({}))
+
+
+
+def test_rest_plan_schema_and_actions(db, monkeypatch):
+    monkeypatch.setattr(service, "client_for", lambda db_, host_id: FakeClient({"hs_ping": "", "status": ROWS9}))
+    with TestClient(create_app(db.path)) as c:
+        assert c.put("/api/live/hosts/pomps-pc", json={"netcon_addr": "10.88.20.235:2121"}).status_code == 200
+        assert c.put("/api/live/hosts/pomps-pc", json={"netcon_addr": "x;y"}).status_code == 409
+        assert c.get("/api/live/hosts").json() == [{"host_id": "pomps-pc", "netcon_addr": "10.88.20.235:2121"}]
+        schema = c.get("/api/live/intent-schema").json()
+        assert "intents" in schema["schema"]["properties"] and schema["spawnables"][0]["id"] == "chicken"
+        body = {"host_id": "pomps-pc", "envelope": {"intents": [{"action": "bots", "team_size": 5, "me": "t"}]}}
+        plan = c.post("/api/live/plan", json=body).json()
+        assert plan["lines"].count("bot_add_t") == 4
+        bad = c.post("/api/live/plan", json={"host_id": "pomps-pc", "envelope": {"intents": [{"action": "nuke"}]}})
+        assert bad.status_code == 422
+        act = c.post("/api/live/actions", json={**body, "source": "plugin", "text": "5v5 me on T"})
+        assert act.status_code == 201 and act.json()["status"] == "verified"
+        assert c.get("/api/live/actions?host_id=pomps-pc").json()[0]["id"] == act.json()["id"]
