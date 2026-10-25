@@ -1,0 +1,12 @@
+[
+  {"origin": [0, 0, 0], "yaw": 0, "count": 3, "formation": "line", "spacing": 48, "height": 24,
+   "expect": [[-48, 0, 0], [-96, 0, 0], [-144, 0, 0]]},
+  {"origin": [100, 200, 10], "yaw": 90, "count": 2, "formation": "line", "spacing": 50, "height": 24,
+   "expect": [[100, 150, 10], [100, 100, 10]]},
+  {"origin": [0, 0, 0], "yaw": 0, "count": 3, "formation": "stack", "spacing": 48, "height": 60,
+   "expect": [[96, 0, 0], [96, 0, 60], [96, 0, 120]]},
+  {"origin": [0, 0, 0], "yaw": 0, "count": 4, "formation": "circle", "spacing": 48, "height": 24,
+   "expect": [[48, 0, 0], [0, 48, 0], [-48, 0, 0], [0, -48, 0]]},
+  {"origin": [0, 0, 0], "yaw": 0, "count": 4, "formation": "grid", "spacing": 40, "height": 24,
+   "expect": [[80, 20, 0], [80, -20, 0], [120, 20, 0], [120, -20, 0]]}
+]
