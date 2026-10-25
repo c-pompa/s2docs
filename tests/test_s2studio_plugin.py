@@ -9,6 +9,9 @@ will really see.
 
 import importlib.util
 import json
+import re
+import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -163,3 +166,27 @@ def test_ids_are_checked_before_proxying(wired):
     _, c = wired
     assert c.get("/api/plugins/s2studio/runs/..%2Fhosts").status_code in (404, 422)
     assert c.get("/api/plugins/s2studio/artifact/j-1/..%2Fx").status_code in (404, 422)
+
+
+# ---------------------------------------------------------------- Task 3.4: the page
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
+def test_plugin_js_parses(tmp_path):
+    src = (PLUGIN / "desktop" / "plugin.js").read_text(encoding="utf-8")
+    (tmp_path / "plugin.mjs").write_text(src, encoding="utf-8")
+    r = subprocess.run(["node", "--check", str(tmp_path / "plugin.mjs")], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+
+
+def test_page_only_calls_routes_the_backend_serves(wired):
+    """The page and plugin_api.py ship together: a path the page calls must be a route this backend has."""
+    mod, _ = wired
+    src = (PLUGIN / "desktop" / "plugin.js").read_text(encoding="utf-8")
+    called = {m.split("?")[0].rstrip("/") for m in re.findall(r"api\.rest\(\s*['\"`]([^'\"`]+)", src)}
+    assert called, "the page calls the backend through ctx.rest"
+    routes = {r.path for r in mod.router.routes if hasattr(r, "path")}
+    for path in called:
+        # `/runs/${id}` is a literal prefix: its first segment must be a route of ours
+        head = "/" + path.strip("/").split("/")[0]
+        assert any(r == path or r.startswith(head) for r in routes), f"{path} is not served by {sorted(routes)}"
