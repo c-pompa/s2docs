@@ -14,7 +14,7 @@ import time
 from pathlib import Path
 
 from s2docs.config import GAMES, get_game, get_settings
-from s2docs.db.connection import Database
+from s2docs.db.connection import Database, DatabaseNotInitialized, schema_version
 
 # Stable exit-code contract (docs/CLI_PLAN.md §2). 2 = locked matches the Phase 1 host commands.
 EXIT_OK = 0
@@ -86,9 +86,60 @@ def _emit(args: argparse.Namespace, payload: dict, human: list[str]) -> int:
     return EXIT_OK
 
 
+def _table(header: tuple[str, ...], rows: list[tuple[str, ...]]) -> list[str]:
+    """Columns padded to the widest cell with a two-space gutter — the layout `_human_job` hand-rolls inline."""
+    widths = [max(len(line[i]) for line in (header, *rows)) for i in range(len(header))]
+    return ["  ".join(cell.ljust(w) for cell, w in zip(line, widths, strict=True)).rstrip() for line in (header, *rows)]
+
+
+def _cmd_sync_check(args: argparse.Namespace) -> int:
+    """`sync --check`: is the index older than the checkout it describes? Read-only, never rewrites.
+
+    Compares the recorded build per game (`builds.source_commit`, `builds.ingested_at`) with the
+    checkout under data/sources (see ingest/hygiene.py), so it opens the store with the read-only
+    `Database.reader()` and is safe to run against the database a live server is serving.
+
+    With --fail-if-stale the exit is 6 (EXIT_PARTIAL): the report itself succeeded, so 1 (EXIT_ERROR)
+    would claim the check broke, and 3 (EXIT_NOT_FOUND) would claim a record is missing. A non-current
+    game is also named on stderr, so the JSON on stdout stays a clean single object.
+    """
+    from s2docs.ingest.hygiene import check_index
+
+    settings = get_settings()
+    games = [get_game(args.game)] if args.game else None
+    try:
+        with Database(settings.db_path).reader() as conn:
+            report = check_index(conn, sources_dir=settings.sources_dir, games=games)
+            version = schema_version(conn)
+    except DatabaseNotInitialized as exc:
+        return _fail(str(exc), EXIT_ERROR)
+
+    rows = [
+        (
+            g.game,
+            str(g.build_number) if g.build_number is not None else "-",
+            g.patch_version or "-",
+            g.ingested_at or "-",
+            g.verdict,
+        )
+        for g in report.games
+    ]
+    header = ("game", "build", "patch", "indexed", "verdict")
+    lines = [f"index: {settings.db_path}  schema v{version}", *_table(header, rows)]
+    lines += [f"  {g.game}: {g.detail}" for g in report.stale_games]
+    _emit(args, {"db": str(settings.db_path), "schema_version": version, **report.as_dict()}, lines)
+    if report.all_current:
+        return EXIT_OK
+    print(f"STALE: {', '.join(g.game for g in report.stale_games)} — run `s2docs sync`", file=sys.stderr)
+    return EXIT_PARTIAL if args.fail_if_stale else EXIT_OK
+
+
 def _cmd_sync(args: argparse.Namespace) -> int:
     from s2docs.ingest.loader import load_build
     from s2docs.ingest.sources import sync_source
+
+    if args.check:
+        return _cmd_sync_check(args)
 
     settings = get_settings()
     db = Database(settings.db_path)
@@ -1139,6 +1190,16 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--keep", type=int, default=5, help="Builds to keep per game (for diffs)")
     p.add_argument("--skip-docs", action="store_true", help="Don't refresh community docs (source2.wiki)")
     p.add_argument("--docs-only", action="store_true", help="Only refresh community docs")
+    p.add_argument(
+        "--check",
+        action="store_true",
+        help="Read-only staleness report: is the index older than the checkout it was built from?",
+    )
+    p.add_argument(
+        "--fail-if-stale",
+        action="store_true",
+        help="With --check: exit 6 when any game is not current (a cron/CI gate)",
+    )
     p.set_defaults(fn=_cmd_sync)
 
     p = sub.add_parser("load", help="Load a local GameTracking checkout")
@@ -1534,6 +1595,9 @@ def main(argv: list[str] | None = None) -> int:
     p.set_defaults(fn=_cmd_live)
 
     args = parser.parse_args(argv)
+    if getattr(args, "fail_if_stale", False) and not getattr(args, "check", False):
+        # Usage error (argparse's own code 2, docs/CLI_PLAN.md §2): a gate flag on its own would do nothing.
+        parser.error("--fail-if-stale requires --check")
     # stdout is the MCP stdio channel: logs must go to stderr.
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.INFO,
