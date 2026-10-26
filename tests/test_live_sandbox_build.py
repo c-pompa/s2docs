@@ -8,6 +8,7 @@ Two rules this file pins:
 
 from __future__ import annotations
 
+import base64
 import json
 from pathlib import Path
 
@@ -36,8 +37,8 @@ def db(tmp_path) -> Database:
     d = Database(tmp_path / "data" / "s2docs.db")
     hosts.register_host(d, "desktop-pc", "desktop-pc", shell="powershell")
     hosts.register_host(d, "pomps-pc", "pomps-pc", shell="powershell")
-    _set_facts(d, "desktop-pc", {"cs2_path": CS2})
-    _set_facts(d, "pomps-pc", {"cs2_path": CS2})
+    _set_facts(d, "desktop-pc", {"probe": {"cs2": {"path": CS2}}})
+    _set_facts(d, "pomps-pc", {"probe": {"cs2": {"path": CS2}}})
     return d
 
 
@@ -84,16 +85,30 @@ def test_build_writes_the_addon_deploys_the_sources_then_starts_the_compile(db, 
     assert [f["path"] for f in pushed["files"]] == ["maps/hermes_sandbox.vmap", "maps/scripts/hermes_sandbox.js"]
     assert all(f["local"].startswith(str(staging)) for f in pushed["files"])
 
-    # 2. one PowerShell line, script first then the map (iso_hud_build.ps1 shape)
+    # 2. the compile runs INSIDE the logged-in session: in ssh's session 0 resourcecompiler finds no
+    #    display adapter and the vmap compile access-violates (measured 2026-10-25 on desktop-pc), so the
+    #    command is an EncodedCommand whose script runs both rc passes from a one-shot Interactive task
     command = started["command"]
-    assert command.count("resourcecompiler.exe") == 2 and " -nop4 -i " in command
-    assert command.index(r"maps\scripts\hermes_sandbox.js") < command.index(r"\maps\hermes_sandbox.vmap")
+    assert command.startswith("powershell -NoProfile -ExecutionPolicy Bypass -EncodedCommand ")
+    script = sandbox_build.compile_script(CS2)
+    assert command.endswith(base64.b64encode(script.encode("utf-16-le")).decode())
+    assert "-LogonType Interactive" in script and "Register-ScheduledTask" in script
+    assert "Unregister-ScheduledTask" in script, "the one-shot task never outlives the compile"
+    assert script.count("resourcecompiler.exe") == 2 and " -nop4 -i " in script
+    assert script.index(r"maps\scripts\hermes_sandbox.js") < script.index(r"\maps\hermes_sandbox.vmap")
+    assert "hermes_sandbox_rc.done" in script and "exit " in script
+    # a crashed map pass must FAIL the build (live 2026-10-25: the NTSTATUS exit code is negative, so taking
+    # the max of the two passes reported 0, and a stale vpk was pulled back as if it were new)
+    assert "Math]::Max" not in script
+    assert "Map build finished" in script and "LastWriteTime" in script, "require a fresh vpk + the build line"
+    # a Disc(onnected) RDP session gives resourcecompiler no display adapter either: refuse up front
+    assert "query user" in script and "Active" in script
     assert started["kind"] == "compile" and "map=hermes_sandbox" in started["notes"]
 
 
 def test_build_needs_the_host_cs2_path(db):
     _set_facts(db, "desktop-pc", {})
-    with pytest.raises(service.LiveError, match="cs2_path"):
+    with pytest.raises(service.LiveError, match="facts.probe.cs2.path"):
         sandbox_build.build(db, "desktop-pc")
 
 

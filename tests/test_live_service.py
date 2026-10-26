@@ -78,7 +78,8 @@ def test_sandbox_spawn_verified_by_the_hs_spawn_line(db):
     client = FakeClient({"hs_ping": "[hs] pong 0",
                          "hs_spawn chicken 4 line 48 1": "[hs] spawned 4 chicken at 1,2,3;4,5,6;7,8,9;10,11,12"})
     act = service.act(db, "pomps-pc", _sandbox_chicken(), source="cli", client=client)
-    assert act.status == "verified" and act.lines == ["sv_cheats 1", "hs_spawn chicken 4 line 48 1"]
+    assert act.status == "verified"
+    assert act.lines == ["sv_cheats 1", "hs_spawn chicken 4 line 48 1", *recipes.SAFE_TEST_LINES]
     assert "spawn: 4 Chicken (line, following you)" in act.detail
 
 
@@ -228,7 +229,8 @@ def test_load_sandbox_verified_by_the_spawngroup_and_pong(db):
     client = FakeClient({"status": SPAWNGROUP_LOADED, "hs_ping": "[hs] pong 0"})
     out = service.load_sandbox(db, "pomps-pc", did, client=client)
     assert out["status"] == "verified" and out["spawngroups"] == ["hermes_sandbox"]
-    assert out["lines"] == ["sv_cheats 1", "spawn_group_load hermes_sandbox", "sleep 3", "status", "hs_ping"]
+    assert out["lines"] == ["sv_cheats 1", *recipes.SAFE_TEST_LINES, "spawn_group_load hermes_sandbox", "sleep 3",
+                            "status", "hs_ping"]
 
 
 def test_load_sandbox_failed_when_the_group_or_the_pong_is_missing(db):

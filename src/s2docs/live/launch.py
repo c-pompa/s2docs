@@ -26,7 +26,7 @@ MAP_RE = re.compile(r"^de_[a-z0-9_]+$")
 TASK_NAME = "hermes_cs2_launch"
 DEFAULT_NETCON_PORT = 2121
 # Same shape the iso-spectate launch used: retail, windowed, console log on, netcon for the actions.
-LAUNCH_ARGS = "-insecure -novid -windowed -w 1920 -h 1080 -netconport {port} -condebug"
+LAUNCH_ARGS = "-steam -insecure -novid -windowed -w 1920 -h 1080 -netconport {port} -condebug"
 LAUNCH_TIMEOUT_SEC = 120.0
 POLL_SEC = 2.0
 SSH_TIMEOUT_SEC = 60
@@ -41,18 +41,23 @@ def _ps_quote(value: str) -> str:
 
 
 def script(cs2_exe: str, map_name: str, *, port: int = DEFAULT_NETCON_PORT) -> str:
-    """The PowerShell that starts the game as the logged-in user and removes the task again."""
-    args = LAUNCH_ARGS.format(port=port) + f" +map {map_name}"
+    """The PowerShell that starts the game as the logged-in user and removes the task again.
+
+    Mirrors the recipe measured on pomps-pc (S0, P2): Interactive principal, no RunLevel (an elevated
+    cs2.exe next to a non-elevated Steam is a different, unmeasured setup). Never assign a PowerShell
+    automatic variable here: `$args = ...` silently became an array and broke -Argument (live 2026-10-25).
+    """
+    cs2_args = LAUNCH_ARGS.format(port=port) + f" +map {map_name}"
     return "\n".join([
         "$ErrorActionPreference = 'Stop'",
         f"$exe = {_ps_quote(cs2_exe)}",
-        f"$args = {_ps_quote(args)}",
+        f"$cs2Args = {_ps_quote(cs2_args)}",
         f"$name = {_ps_quote(TASK_NAME)}",
-        "$action = New-ScheduledTaskAction -Execute $exe -Argument $args"
+        "$action = New-ScheduledTaskAction -Execute $exe -Argument $cs2Args"
         " -WorkingDirectory (Split-Path -LiteralPath $exe)",
         "$principal = New-ScheduledTaskPrincipal"
         " -UserId ([System.Security.Principal.WindowsIdentity]::GetCurrent().Name)"
-        " -LogonType Interactive -RunLevel Highest",
+        " -LogonType Interactive",
         "Register-ScheduledTask -TaskName $name -Action $action -Principal $principal -Force | Out-Null",
         "try { Start-ScheduledTask -TaskName $name; Start-Sleep -Seconds 2 }",
         "finally { Unregister-ScheduledTask -TaskName $name -Confirm:$false }",
@@ -63,10 +68,11 @@ def script(cs2_exe: str, map_name: str, *, port: int = DEFAULT_NETCON_PORT) -> s
 
 def _cs2_exe(db: Database, host_id: str) -> str:
     host = hosts.get_host(db, host_id)
-    cs2 = (host.facts or {}).get("cs2_path")
-    if not cs2:
-        raise service.LiveError(f"{host_id} has no facts.cs2_path; run `s2docs host probe --id {host_id}` first")
-    return str(cs2).rstrip("\\/") + "\\game\\bin\\win64\\cs2.exe"
+    try:
+        cs2 = hosts.cs2_install_path(host)
+    except hosts.HostError as exc:
+        raise service.LiveError(str(exc)) from exc
+    return cs2.rstrip("\\/") + "\\game\\bin\\win64\\cs2.exe"
 
 
 def launch(
@@ -90,15 +96,20 @@ def launch(
     exe = _cs2_exe(db, host_id)
     host = hosts.get_host(db, host_id)
 
-    argv = hosts.ssh_argv(host) + ["powershell -NoProfile -ExecutionPolicy Bypass -Command -"]
+    # hosts.powershell_argv (-EncodedCommand), never `-Command -` with the script on stdin: stdin is parsed line
+    # by line, so the try/finally below failed to parse, the task was registered but never started or removed,
+    # and ssh still exited 0 (live on pomps-pc 2026-10-25). Hence also the 'launched' check below.
+    argv = hosts.powershell_argv(host, script(exe, map_name))
     try:
-        proc = subprocess.run(argv, input=script(exe, map_name), capture_output=True, text=True,
-                              timeout=SSH_TIMEOUT_SEC)
+        proc = subprocess.run(argv, capture_output=True, text=True, timeout=SSH_TIMEOUT_SEC)
     except subprocess.TimeoutExpired as exc:
         raise service.LiveError(f"launching CS2 on {host_id} timed out after {SSH_TIMEOUT_SEC}s") from exc
     if proc.returncode != 0:
         raise service.LiveError(f"launching CS2 on {host_id} failed (rc={proc.returncode}): "
                                 f"{(proc.stderr or proc.stdout).strip()[:300]}")
+    if "launched" not in (proc.stdout or ""):
+        raise service.LiveError(f"the launch script on {host_id} did not confirm it started CS2: "
+                                f"{(proc.stderr or proc.stdout or 'no output').strip()[:300]}")
 
     deadline = time.monotonic() + max(0.0, timeout_sec)
     client = (client_factory or (lambda: service.client_for(db, host_id)))()

@@ -190,6 +190,31 @@ def ssh_argv(host: m.Host) -> list[str]:
     return ["ssh", *_connection_options(host, target, port_flag="-p"), "--", target.destination]
 
 
+POWERSHELL = "powershell -NoProfile -ExecutionPolicy Bypass -EncodedCommand"
+# cmd.exe (pomps-pc's login shell) cuts a command line at 8191 characters instead of refusing it.
+CMD_EXE_MAX_LINE = 8191
+
+
+def powershell_command(script: str) -> str:
+    """The one remote command s2docs uses to run PowerShell on a host: ``-EncodedCommand`` (UTF-16LE base64).
+
+    The script is parsed whole, and no quote or ``$`` in it can be re-split by the outer shell. Never send a
+    script on stdin with ``-Command -``: that is parsed LINE BY LINE, so a ``try {}`` / ``finally {}`` split
+    over two lines fails to parse while ssh still exits 0 (a CS2 launch task was registered but never started,
+    live 2026-10-25). Callers should also print a success token and check for it: rc 0 alone proves nothing.
+    """
+    return f"{POWERSHELL} {base64.b64encode(script.encode('utf-16-le')).decode()}"
+
+
+def powershell_argv(host: m.Host, script: str) -> list[str]:
+    """``ssh_argv(host)`` plus :func:`powershell_command`; refuses a script cmd.exe would silently truncate."""
+    command = powershell_command(script)
+    if host.shell == "cmd" and len(command) > CMD_EXE_MAX_LINE - 200:  # leave room for ssh's own wrapping
+        raise HostError(f"PowerShell script for {host.id} is {len(command)} characters encoded; cmd.exe cuts "
+                        f"command lines at {CMD_EXE_MAX_LINE} - copy it over as a .ps1 file instead")
+    return ssh_argv(host) + [command]
+
+
 def scp_argv(host: m.Host, local: Path, remote: str, *, pull: bool = False) -> list[str]:
     """scp argv copying ``local`` to ``remote`` on the host (``pull=True``: ``remote`` down to ``local``),
     hardened like :func:`ssh_argv`. The ONLY place an scp argv is built (CI rule HPF-003).
@@ -205,6 +230,18 @@ def scp_argv(host: m.Host, local: Path, remote: str, *, pull: bool = False) -> l
     local_path = str(Path(local).resolve())
     pair = [operand, local_path] if pull else [local_path, operand]
     return ["scp", *_connection_options(host, target, port_flag="-P"), "--", *pair]
+
+
+def cs2_install_path(host: m.Host) -> str:
+    """The host's CS2 install root, as ``s2docs host probe`` stores it: ``facts.probe.cs2.path``.
+
+    The one reader of that fact (sandbox build/deploy and the CS2 launch both need it). An unprobed host
+    is refused with the command that fixes it.
+    """
+    path = (((host.facts or {}).get("probe") or {}).get("cs2") or {}).get("path")
+    if not isinstance(path, str) or not path.strip():
+        raise HostError(f"{host.id} has no probed CS2 path (facts.probe.cs2.path); run `s2docs host probe {host.id}`")
+    return path
 
 
 def scp_pull_argv(host: m.Host, remote: str, local: Path) -> list[str]:
@@ -472,8 +509,7 @@ def probe_host(db: Database, host_id: str, *, timeout: int = 90) -> m.Host:
     host = get_host(db, host_id)
     if not PROBE_SCRIPT.exists():
         raise HostError(f"probe script missing at {PROBE_SCRIPT}")
-    encoded = base64.b64encode(PROBE_SCRIPT.read_bytes().decode("utf-8").encode("utf-16-le")).decode()
-    cmd = ssh_argv(host) + [f"powershell -NoProfile -ExecutionPolicy Bypass -EncodedCommand {encoded}"]
+    cmd = powershell_argv(host, PROBE_SCRIPT.read_bytes().decode("utf-8"))
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
     except subprocess.TimeoutExpired as exc:

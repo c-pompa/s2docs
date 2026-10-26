@@ -214,11 +214,12 @@ def test_every_ssh_call_site_puts_the_destination_right_after_double_dash(hdb, t
     hosts.probe_host(hdb, "build-pc")
     assert calls[-1][-3:-1] == ["--", "pompa@192.0.2.172"]
 
-    # deploy_push: one scp per file, then the Get-FileHash ssh call
+    # deploy_push: one ssh pass creating the parent dirs, one scp per file, then the Get-FileHash ssh call
     calls.clear()
     phase["now"] = "hash"
     deploys.push(hdb, "build-pc", "C:/dst", [{"path": "a.txt", "local": str(local)}])
-    scp, ssh = calls
+    mkdir, scp, ssh = calls
+    assert mkdir[0] == "ssh" and mkdir[-3:-1] == ["--", "pompa@192.0.2.172"]
     assert scp[0] == "scp" and scp[-3:] == ["--", str(local.resolve()), "pompa@192.0.2.172:C:/dst/a.txt"]
     assert ssh[0] == "ssh" and ssh[-3:-1] == ["--", "pompa@192.0.2.172"]
 

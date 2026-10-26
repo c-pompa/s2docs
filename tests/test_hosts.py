@@ -217,3 +217,64 @@ def test_host_reads_do_not_take_the_write_lock(hdb, monkeypatch):
     monkeypatch.setattr(Database, "writer", boom)
     assert hosts.list_hosts(hdb)[0].id == "build-pc"
     assert hosts.get_host(hdb, "build-pc").id == "build-pc"
+
+
+# The exact `facts` shape `s2docs host probe desktop-pc` stored on 2026-10-25 (trimmed to the CS2 part).
+PROBED = {"probe": {"host": "DESKTOP-39NF657", "cs2": {
+    "path": "c:\\program files (x86)\\steam\\steamapps\\common\\Counter-Strike Global Offensive",
+    "build": "2000935", "workshop_tools": True}}}
+
+
+def test_cs2_install_path_reads_the_probe_facts():
+    from s2docs import models as m
+    host = m.Host(id="desktop-pc", ssh_target="desktop-pc", facts=PROBED)
+    assert hosts.cs2_install_path(host) == PROBED["probe"]["cs2"]["path"]
+
+
+@pytest.mark.parametrize("facts", [{}, {"probe": {}}, {"probe": {"cs2": {}}}, {"cs2_path": "C:\\x"}])
+def test_cs2_install_path_refuses_unprobed_hosts(facts):
+    from s2docs import models as m
+    host = m.Host(id="pomps-pc", ssh_target="pomps-pc", facts=facts)
+    with pytest.raises(hosts.HostError, match=r"s2docs host probe pomps-pc"):
+        hosts.cs2_install_path(host)
+
+
+def test_powershell_command_is_one_encoded_argument_parsed_whole():
+    """The one way s2docs runs PowerShell on a host: -EncodedCommand (UTF-16LE base64). Never `-Command -` on
+    stdin (parsed line by line: a try/finally split over lines broke silently with rc 0, live 2026-10-25)."""
+    import base64
+    script = "try { 'a' }\nfinally { 'b' }\n$x = 'it''s'"
+    cmd = hosts.powershell_command(script)
+    prefix = "powershell -NoProfile -ExecutionPolicy Bypass -EncodedCommand "
+    assert cmd.startswith(prefix) and " " not in cmd[len(prefix):]
+    assert base64.b64decode(cmd[len(prefix):]).decode("utf-16-le") == script
+
+
+def test_powershell_argv_is_ssh_argv_plus_the_command():
+    from s2docs import models as m
+    host = m.Host(id="desktop-pc", ssh_target="pompa@192.0.2.10", shell="powershell")
+    argv = hosts.powershell_argv(host, "Write-Output 1")
+    assert argv[:-1] == hosts.ssh_argv(host) and argv[-1] == hosts.powershell_command("Write-Output 1")
+
+
+def test_powershell_argv_refuses_a_script_too_long_for_cmd_exe():
+    """pomps-pc's login shell is cmd.exe: a command line over 8191 characters is cut, not rejected."""
+    from s2docs import models as m
+    cmd_host = m.Host(id="pomps-pc", ssh_target="pomps-pc", shell="cmd")
+    ps_host = m.Host(id="desktop-pc", ssh_target="desktop-pc", shell="powershell")
+    big = "Write-Output 'x'\n" * 300  # ~13.6k characters once encoded
+    with pytest.raises(hosts.HostError, match="8191"):
+        hosts.powershell_argv(cmd_host, big)
+    assert hosts.powershell_argv(ps_host, big)[-1].startswith("powershell ")
+
+
+def test_only_hosts_builds_a_powershell_command():
+    """Five hand-rolled copies of the -EncodedCommand line existed before hosts.powershell_command; keep it one.
+    Matches the command SHAPE (a string literal starting `powershell -`), not the shell-type enum or prose."""
+    import re
+    from pathlib import Path
+    src = Path(hosts.__file__).parent
+    shape = re.compile(r"""["']powershell\s+-""")
+    offenders = [str(p.relative_to(src)) for p in src.rglob("*.py")
+                 if p.name != "hosts.py" and shape.search(p.read_text(encoding="utf-8"))]
+    assert offenders == [], f"build PowerShell commands with hosts.powershell_command / powershell_argv: {offenders}"

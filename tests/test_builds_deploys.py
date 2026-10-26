@@ -671,3 +671,29 @@ def test_mcp_material_guard_surfaces_and_strict(bdb, tmp_path, monkeypatch):
     assert status.structured_content["warnings"]["counts"]["missing_material"] == 2
     assert log.structured_content["warnings"]["counts"]["failed_compile"] == 1
     assert strict.is_error and "material guard" in strict.content[0].text
+
+
+def _decoded(argv) -> str:
+    import base64
+    return base64.b64decode(argv[-1].rsplit(" ", 1)[-1]).decode("utf-16-le")
+
+
+def test_deploy_push_creates_missing_remote_dirs_before_copying(bdb, tmp_path, monkeypatch):
+    """A first deploy into a fresh tree (a new addon's content/csgo_addons/<name>/maps/scripts) failed live
+    with 'scp: dest open ... No such file or directory' (2026-10-25): scp never creates directories."""
+    js = _local(tmp_path, "hermes_sandbox.js", b"//js\n")
+    vmap = _local(tmp_path, "hermes_sandbox.vmap", b"<!-- vmap -->\n")
+    dest = "C:/cs2/content/csgo_addons/hermes_sandbox"
+    calls: list = []
+    remotes = {f"{dest}/maps/scripts/hermes_sandbox.js": md5_file(js),
+               f"{dest}/maps/hermes_sandbox.vmap": md5_file(vmap)}
+    monkeypatch.setattr(deploys.subprocess, "run", fake_ssh(remotes, calls=calls))
+    deploy = deploys.push(bdb, "build-pc", dest, [
+        {"path": "maps/scripts/hermes_sandbox.js", "local": str(js)},
+        {"path": "maps/hermes_sandbox.vmap", "local": str(vmap)},
+    ])
+    assert deploy.status == "verified"
+    first_scp = next(i for i, a in enumerate(calls) if a[0] == "scp")
+    mkdirs = [_decoded(a) for a in calls[:first_scp] if a[0] == "ssh" and "CreateDirectory" in _decoded(a)]
+    assert len(mkdirs) == 1, "one ssh pass creates every parent, before any scp"
+    assert f"'{dest}/maps/scripts'" in mkdirs[0] and f"'{dest}/maps'" in mkdirs[0]

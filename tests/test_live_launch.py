@@ -50,7 +50,7 @@ def _set_facts(db: Database, host_id: str, facts: dict) -> None:
 def db(tmp_path) -> Database:
     d = Database(tmp_path / "data" / "s2docs.db")
     hosts.register_host(d, "pomps-pc", "pomps-pc", shell="powershell")
-    _set_facts(d, "pomps-pc", {"cs2_path": CS2})
+    _set_facts(d, "pomps-pc", {"probe": {"cs2": {"path": CS2}}})
     return d
 
 
@@ -68,14 +68,20 @@ def _launch(db, monkeypatch, *, client=None, timeout_sec=120, map_name="de_dust2
     return out, calls
 
 
-def test_launch_sends_the_script_on_stdin_and_polls_netcon(db, monkeypatch):
+def test_launch_sends_the_script_encoded_and_polls_netcon(db, monkeypatch):
+    """-EncodedCommand, never `-Command -` on stdin: stdin is parsed LINE BY LINE, so a try/finally split over
+    two lines fails to parse, the task is registered but never started or removed, and ssh still exits 0
+    (live on pomps-pc 2026-10-25: hermes_cs2_launch left behind with LastTaskResult 0x41303)."""
+    import base64
     out, calls = _launch(db, monkeypatch, client=_Client(fail_times=2))
     argv, kw = calls[0]
     host = hosts.get_host(db, "pomps-pc")
     assert argv[:-1] == hosts.ssh_argv(host)
-    assert argv[-1].endswith("-Command -") and "powershell" in argv[-1].lower()  # stdin, not an inline string
+    prefix = "powershell -NoProfile -ExecutionPolicy Bypass -EncodedCommand "
+    assert argv[-1].startswith(prefix) and "input" not in kw
 
-    script = kw["input"]
+    script = base64.b64decode(argv[-1][len(prefix):]).decode("utf-16-le")
+    assert script == launch.script(CS2 + r"\game\bin\win64\cs2.exe", "de_dust2")
     assert "Register-ScheduledTask" in script and "Start-ScheduledTask" in script
     assert "Unregister-ScheduledTask" in script and "-LogonType Interactive" in script
     assert "-netconport 2121" in script and "+map de_dust2" in script and "-insecure" in script
@@ -103,7 +109,7 @@ def test_launch_refuses_a_leased_host(db, monkeypatch):
 def test_launch_needs_the_cs2_path_fact(db, monkeypatch):
     _set_facts(db, "pomps-pc", {})
     monkeypatch.setattr(launch.subprocess, "run", lambda *a, **kw: pytest.fail("must not ssh without a path"))
-    with pytest.raises(service.LiveError, match="cs2_path"):
+    with pytest.raises(service.LiveError, match="facts.probe.cs2.path"):
         launch.launch(db, "pomps-pc", "de_dust2", client_factory=lambda: _Client())
 
 
@@ -126,3 +132,33 @@ def test_launch_rest_route(db, monkeypatch):
         assert c.post("/api/live/launch", json={"host_id": "pomps-pc", "map": "de_dust2;quit"}).status_code == 422
         ok = c.post("/api/live/launch", json={"host_id": "pomps-pc", "map": "de_dust2"})
         assert ok.status_code == 200 and ok.json()["map"] == "de_dust2"
+
+
+def test_script_assigns_no_powershell_automatic_variable():
+    """Live 2026-10-25: `$args = '...'` hit PowerShell's automatic $args (an array), so
+    New-ScheduledTaskAction -Argument failed with 'Cannot convert value to type System.String'."""
+    import re
+    text = launch.script("C:\\cs2\\game\\bin\\win64\\cs2.exe", "de_dust2")
+    automatic = r"args|input|host|error|_|this|matches|PSItem|null|true|false|PID|PWD|HOME|profile"
+    assert not re.search(rf"^\$(?:{automatic})\s*=", text, re.M | re.I)
+    assert "-Argument $cs2Args" in text
+
+
+def test_script_launches_unelevated_like_the_measured_recipe():
+    """The recipe proven on pomps-pc (S0, P2) used an Interactive principal with no RunLevel: an
+    elevated cs2.exe next to a non-elevated Steam client is a different, unmeasured setup."""
+    text = launch.script("C:\\cs2\\game\\bin\\win64\\cs2.exe", "de_dust2")
+    assert "-LogonType Interactive" in text and "RunLevel" not in text
+
+
+def test_launch_args_match_the_measured_recipe():
+    """Every launch that worked on pomps-pc on 2026-10-25 used -steam -insecure ... -netconport 2121 -condebug."""
+    assert launch.LAUNCH_ARGS.startswith("-steam -insecure ")
+    assert "-netconport {port}" in launch.LAUNCH_ARGS and "-condebug" in launch.LAUNCH_ARGS
+
+
+def test_launch_fails_when_the_script_did_not_say_launched(db, monkeypatch):
+    """rc 0 alone proves nothing (a PowerShell parse error keeps rc 0): the script's 'launched' line must return."""
+    monkeypatch.setattr(launch.subprocess, "run", lambda *a, **kw: _Result(stdout="", stderr="Missing closing '}'"))
+    with pytest.raises(service.LiveError, match="did not confirm"):
+        launch.launch(db, "pomps-pc", "de_dust2", client_factory=lambda: _Client(), sleep=lambda _s: None)
