@@ -286,3 +286,21 @@ the game, not a file.
   scale (38-minute compiles), not a slice. Tool + schema kept as
   `source2-modding/scripts/make_prop_map.py`; the full trap list is in that skill's
   `references/map-rebuild-pitfalls.md`. Everything deployed to pomps-pc was removed afterwards.
+- **2026-10-25 — pipeline: `deploy` moved from blocked to real; `ingame` stays blocked.** The
+  asset-chain slice (`s2docs pipeline run`, one job for prompt → … → ingame) recorded `deploy` as
+  blocked on "no reachable target host", which undersold the half that already ships: `deploys.push`
+  copies to a host and re-reads every MD5 over SSH (`Get-FileHash`), and `deploy verify` repeats that
+  readback — both exercised by the deploy tests, neither reachable from the chain. `deploy` is now a
+  real stage when the caller passes `--dest` and the build succeeded: it pushes the addon's workspace
+  content (the same `workspace.describe` manifest `s2docs deploy push <addon>` builds) and verifies it,
+  and the deployment id is linked to the job as `kind="deploy"` exactly the way the build run is linked
+  as `kind="build"`, so the job alone names the destination and the bytes the host confirmed. What it
+  proves: where the compiled addon went and that the host's MD5s matched — not just that a compile
+  exited 0. Without `--dest` the stage is recorded **skipped**, with a `reason` that says no
+  destination was given (a missing argument, not a missing capability); with `--dest` but no successful
+  build it is skipped for that reason instead. A failed push or a failed MD5 readback marks the stage
+  `error` and closes the job `failed`. **`ingame` is unchanged and still blocked** (2026-10-24):
+  `ent_create` never renders a loose model in this client, and the map-compile route needs a host with
+  an active display adapter — so the chain's best close-out is still `inconclusive`, and no in-game
+  verdict was invented. `REAL_STAGES` is now `asset, build, deploy`; covered by
+  `tests/test_pipeline.py` (destination, no destination, failed push, failed readback).
