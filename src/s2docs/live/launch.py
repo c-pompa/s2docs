@@ -63,10 +63,11 @@ def script(cs2_exe: str, map_name: str, *, port: int = DEFAULT_NETCON_PORT) -> s
 
 def _cs2_exe(db: Database, host_id: str) -> str:
     host = hosts.get_host(db, host_id)
-    cs2 = (host.facts or {}).get("cs2_path")
-    if not cs2:
-        raise service.LiveError(f"{host_id} has no facts.cs2_path; run `s2docs host probe --id {host_id}` first")
-    return str(cs2).rstrip("\\/") + "\\game\\bin\\win64\\cs2.exe"
+    try:
+        cs2 = hosts.cs2_install_path(host)
+    except hosts.HostError as exc:
+        raise service.LiveError(str(exc)) from exc
+    return cs2.rstrip("\\/") + "\\game\\bin\\win64\\cs2.exe"
 
 
 def launch(

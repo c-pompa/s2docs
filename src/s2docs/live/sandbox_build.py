@@ -49,11 +49,11 @@ def _posix(path: str) -> str:
 
 
 def _cs2_path(host: m.Host) -> str:
-    """The host's CS2 install root, from the probe facts (``hosts.probe_host`` stores ``cs2_path``)."""
-    cs2 = (host.facts or {}).get("cs2_path")
-    if not cs2:
-        raise LiveError(f"{host.id} has no facts.cs2_path; run `s2docs host probe --id {host.id}` first")
-    return str(cs2)
+    """The host's CS2 install root (``hosts.cs2_install_path``: the probe's ``facts.probe.cs2.path``)."""
+    try:
+        return hosts.cs2_install_path(host)
+    except hosts.HostError as exc:
+        raise LiveError(str(exc)) from exc
 
 
 def content_root(cs2: str) -> str:

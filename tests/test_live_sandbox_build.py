@@ -36,8 +36,8 @@ def db(tmp_path) -> Database:
     d = Database(tmp_path / "data" / "s2docs.db")
     hosts.register_host(d, "desktop-pc", "desktop-pc", shell="powershell")
     hosts.register_host(d, "pomps-pc", "pomps-pc", shell="powershell")
-    _set_facts(d, "desktop-pc", {"cs2_path": CS2})
-    _set_facts(d, "pomps-pc", {"cs2_path": CS2})
+    _set_facts(d, "desktop-pc", {"probe": {"cs2": {"path": CS2}}})
+    _set_facts(d, "pomps-pc", {"probe": {"cs2": {"path": CS2}}})
     return d
 
 
@@ -93,7 +93,7 @@ def test_build_writes_the_addon_deploys_the_sources_then_starts_the_compile(db, 
 
 def test_build_needs_the_host_cs2_path(db):
     _set_facts(db, "desktop-pc", {})
-    with pytest.raises(service.LiveError, match="cs2_path"):
+    with pytest.raises(service.LiveError, match="facts.probe.cs2.path"):
         sandbox_build.build(db, "desktop-pc")
 
 

@@ -50,7 +50,7 @@ def _set_facts(db: Database, host_id: str, facts: dict) -> None:
 def db(tmp_path) -> Database:
     d = Database(tmp_path / "data" / "s2docs.db")
     hosts.register_host(d, "pomps-pc", "pomps-pc", shell="powershell")
-    _set_facts(d, "pomps-pc", {"cs2_path": CS2})
+    _set_facts(d, "pomps-pc", {"probe": {"cs2": {"path": CS2}}})
     return d
 
 
@@ -103,7 +103,7 @@ def test_launch_refuses_a_leased_host(db, monkeypatch):
 def test_launch_needs_the_cs2_path_fact(db, monkeypatch):
     _set_facts(db, "pomps-pc", {})
     monkeypatch.setattr(launch.subprocess, "run", lambda *a, **kw: pytest.fail("must not ssh without a path"))
-    with pytest.raises(service.LiveError, match="cs2_path"):
+    with pytest.raises(service.LiveError, match="facts.probe.cs2.path"):
         launch.launch(db, "pomps-pc", "de_dust2", client_factory=lambda: _Client())
 
 

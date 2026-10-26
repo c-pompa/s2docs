@@ -217,3 +217,23 @@ def test_host_reads_do_not_take_the_write_lock(hdb, monkeypatch):
     monkeypatch.setattr(Database, "writer", boom)
     assert hosts.list_hosts(hdb)[0].id == "build-pc"
     assert hosts.get_host(hdb, "build-pc").id == "build-pc"
+
+
+# The exact `facts` shape `s2docs host probe desktop-pc` stored on 2026-10-25 (trimmed to the CS2 part).
+PROBED = {"probe": {"host": "DESKTOP-39NF657", "cs2": {
+    "path": "c:\\program files (x86)\\steam\\steamapps\\common\\Counter-Strike Global Offensive",
+    "build": "2000935", "workshop_tools": True}}}
+
+
+def test_cs2_install_path_reads_the_probe_facts():
+    from s2docs import models as m
+    host = m.Host(id="desktop-pc", ssh_target="desktop-pc", facts=PROBED)
+    assert hosts.cs2_install_path(host) == PROBED["probe"]["cs2"]["path"]
+
+
+@pytest.mark.parametrize("facts", [{}, {"probe": {}}, {"probe": {"cs2": {}}}, {"cs2_path": "C:\\x"}])
+def test_cs2_install_path_refuses_unprobed_hosts(facts):
+    from s2docs import models as m
+    host = m.Host(id="pomps-pc", ssh_target="pomps-pc", facts=facts)
+    with pytest.raises(hosts.HostError, match=r"s2docs host probe pomps-pc"):
+        hosts.cs2_install_path(host)

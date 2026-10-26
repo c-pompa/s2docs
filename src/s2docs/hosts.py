@@ -207,6 +207,18 @@ def scp_argv(host: m.Host, local: Path, remote: str, *, pull: bool = False) -> l
     return ["scp", *_connection_options(host, target, port_flag="-P"), "--", *pair]
 
 
+def cs2_install_path(host: m.Host) -> str:
+    """The host's CS2 install root, as ``s2docs host probe`` stores it: ``facts.probe.cs2.path``.
+
+    The one reader of that fact (sandbox build/deploy and the CS2 launch both need it). An unprobed host
+    is refused with the command that fixes it.
+    """
+    path = (((host.facts or {}).get("probe") or {}).get("cs2") or {}).get("path")
+    if not isinstance(path, str) or not path.strip():
+        raise HostError(f"{host.id} has no probed CS2 path (facts.probe.cs2.path); run `s2docs host probe {host.id}`")
+    return path
+
+
 def scp_pull_argv(host: m.Host, remote: str, local: Path) -> list[str]:
     """scp argv copying ``remote`` on the host *down* to ``local`` — :func:`scp_argv` in reverse.
 
