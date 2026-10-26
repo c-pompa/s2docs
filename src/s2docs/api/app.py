@@ -42,11 +42,11 @@ def _reap_interval() -> int:
 
 
 async def _reap_loop(db: Database, interval: int) -> None:
-    """Periodically finalize runs that lost their owner (build watchers and stale test sessions)."""
+    """Periodically finalize runs that lost their owner (build processes and stale test sessions)."""
     while True:
         await asyncio.sleep(interval)
         try:
-            builds.reconcile_orphans(db)
+            builds.recover(db)
             test_runs.reap_stale(db)
         except Exception:  # a failed pass must not kill the task
             logger.exception("reaper pass failed")
@@ -71,9 +71,11 @@ def create_app(db_path: Path | None = None, *, mount_mcp: bool = True, workspace
         # Only touch the store when it exists: a probe against a missing db must stay 503, not create it.
         if db.path.exists():
             try:
-                builds.reconcile_orphans(db)  # finalize build runs left 'running' by a dead watcher
+                # Ask the OS about every still-'running' run: a build launched detached survives this
+                # restart, so "no watcher in this process" is no longer evidence that it died.
+                builds.recover(db)
             except Exception:
-                logger.exception("startup build reconcile failed")
+                logger.exception("startup build recovery failed")
             interval = _reap_interval()
             if interval > 0:
                 reap_task = asyncio.create_task(_reap_loop(db, interval))
