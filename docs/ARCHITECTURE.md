@@ -56,5 +56,12 @@ three surfaces. That is the pattern the rest of the codebase lacks — see seam 
 
 1. Pick the suffix of the baseline you want to compare against (`docs/arch/baseline-<suffix>/`).
 2. Regenerate after the change.
-3. Compare the `manifest.json` counts and the two SVGs side by side — the arrows and the layer
-   bands are the same layout, so a new box or a moved arrow is the diff.
+3. Put them side by side — the layouts are identical, so a new box or a moved arrow is the diff:
+
+```bash
+uv run python scripts/arch_compare.py docs/arch/baseline-20261025-2257 docs/arch/after-<suffix>
+```
+
+It writes a single self-contained HTML page (both diagrams inlined, plus a counts table with the
+delta per surface) and prints the same table. The `manifest.json` in each directory carries the
+commit sha and the counted surfaces, so the numbers cannot drift from the tree.
