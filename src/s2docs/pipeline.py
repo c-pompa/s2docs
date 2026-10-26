@@ -3,44 +3,52 @@
 This is the vertical slice of the ``pipeline`` ledger step, and it is deliberately explicit about
 which stages are real:
 
-* ``asset`` and ``build`` call the same code the CLI calls (the ``.vmdl``/``.vmat`` writers and the
-  server-owned build runs), so the chain is proven exactly where it runs today.
+* ``asset``, ``build`` and ``deploy`` call the same code the CLI calls (the ``.vmdl``/``.vmat``
+  writers, the server-owned build runs, and ``deploys.push`` + ``deploys.verify``), so the chain is
+  proven exactly where it runs today.
 * ``concept`` and ``mesh`` are recorded as **stubbed**. No text->3D generator is wired into this
   repo (``docs/HAMMERED.md``: the chain starts from an existing mesh), and a stage that silently
   "passes" without producing anything is worse than one that says so.
-* ``deploy`` and ``ingame`` are recorded as **blocked**, with the measured reason, because the
-  in-game step is genuinely blocked (``ent_create`` never renders a loose model in this client; the
-  map-compile route needs a host with an active display adapter).
+* ``ingame`` is recorded as **blocked**, with the measured reason (``ent_create`` never renders a
+  loose model in this client; the map-compile route needs a host with an active display adapter).
+
+``deploy`` only runs when the caller supplies a destination *and* the build succeeded; otherwise it
+is recorded **skipped** with the reason (no destination, or nothing new compiled). Skipped is not
+blocked and not a pass: the ledger says which precondition was missing instead of implying the
+capability does not exist.
 
 Every stage writes exactly one job event whose ``phase`` is the stage id, in stage order, so
 ``Job.current_step``/``jobs.get(...).phase`` and the timeline show the same chain. A produced
-artifact is linked (``kind="build"``) rather than pasted into a message, so the job alone is enough
-to reconstruct what happened.
+artifact is linked (``kind="build"``/``kind="deploy"``) rather than pasted into a message, so the job
+alone is enough to reconstruct what happened.
 """
 from __future__ import annotations
 
 from pathlib import Path
 
-from s2docs import builds, jobs
+from s2docs import builds, deploys, hosts, jobs
 from s2docs import models as m
 from s2docs.config import get_settings
 
 #: The chain, in order. This tuple is the contract: a job's timeline must carry one event per entry.
 STAGES: tuple[str, ...] = ("prompt", "concept", "mesh", "asset", "build", "deploy", "ingame")
 
-#: Stages this slice actually executes.
-REAL_STAGES: tuple[str, ...] = ("asset", "build")
+#: Stages this slice can execute. ``deploy`` executes only when a destination is supplied and the
+#: build succeeded; otherwise it is recorded skipped with the reason (see ``NO_DEST_REASON``).
+REAL_STAGES: tuple[str, ...] = ("asset", "build", "deploy")
 
 STUB_REASON = (
     "no generator is wired for this stage yet: the chain starts from an existing mesh "
     "(docs/HAMMERED.md), so the stage is recorded as intent instead of pretending to produce output"
 )
 
+#: Why ``deploy`` is skipped when the caller gave no destination — a missing argument, not a block.
+NO_DEST_REASON = (
+    "no destination was given (--dest <remote root>), so nothing was copied to a host; the stage is "
+    "skipped rather than blocked, because the deploy path itself works"
+)
+
 BLOCKED_REASONS: dict[str, str] = {
-    "deploy": (
-        "needs a compiled artifact plus a reachable target host; not attempted by this slice "
-        "(pomps-pc sshd flaps for minutes at a time, desktop-pc has no display adapter for map compiles)"
-    ),
     "ingame": (
         "in-game proof is blocked: ent_create never renders a loose model in this client, and the "
         "map-compile route needs a host with an active display adapter (docs/HAMMERED.md 2026-10-24)"
@@ -67,6 +75,46 @@ def _finish_build(db, run: m.BuildRun, *, timeout_sec: int, poll_sec: float) -> 
         return builds.get_run(db, run.id)
 
 
+def _deploy_files(workspace: Path, game: str, addon: str) -> list[m.DeployFile]:
+    """The addon's files as deploy specs — the manifest ``s2docs deploy push <addon>`` builds.
+
+    Built through ``workspace.describe`` rather than a second directory walk so the chain ships the
+    same set of paths a manual push would: one definition of "the addon's content", not two.
+    """
+    from s2docs.build.workspace import describe
+
+    info = describe(workspace, game, addon)
+    root = Path(info.root)
+    return [m.DeployFile(path=f.path, local=str(root / f.path)) for f in info.files]
+
+
+def _deploy_addon(
+    db, *, host_id: str, dest_root: str, addon: str, files: list[m.DeployFile]
+) -> tuple[m.Deployment | None, str | None]:
+    """Push the addon's content to ``dest_root`` and verify the readback: ``(deployment, failure)``.
+
+    This is the deploy service the CLI wraps (``deploy push`` is ``deploys.push``, ``deploy verify``
+    is ``deploys.verify``), reached through its public functions so the push takes the host lease and
+    records the {path, size, md5} manifest exactly as a manual push does.
+
+    ``push`` runs with ``verify=False`` and the readback is a separate ``deploys.verify`` call on
+    purpose: ``push(verify=True)`` raises *after* storing a failed record, so the deployment id —
+    the thing the job has to link — would only survive inside the exception text. Splitting the two
+    keeps one id for every outcome at the same cost of a single ``Get-FileHash`` pass.
+    """
+    try:
+        deployment = deploys.push(db, host_id, dest_root, files, addon=addon, verify=False)
+    except (deploys.DeployError, hosts.HostError) as exc:  # bad target, lock conflict, all copies failed
+        return None, str(exc)
+    if deployment.status == "failed":  # partial copy: the record carries the per-file errors
+        return deployment, "some files did not copy; see the deployment record for the per-file errors"
+    try:
+        deployment = deploys.verify(db, deployment.id)
+    except deploys.DeployError as exc:  # readback could not run: no verdict, but the id still stands
+        return deployment, f"MD5 readback could not run: {exc}"
+    return deployment, None
+
+
 def _summary(*, what: str, why: str, learned: str, next_: str) -> dict[str, str]:
     fields = {"what": what, "why": why, "learned": learned, "next": next_}
     return {k: v[:SUMMARY_MAX] for k, v in fields.items()}
@@ -90,12 +138,17 @@ def run_asset_build_slice(
     build_timeout_sec: int = 300,
     poll_sec: float = 2.0,
     expected: str | None = None,
+    dest: str | None = None,
 ) -> m.Job:
     """Run the chain for one mesh and return the closed-out job.
 
     ``build_command`` is the host-side compile line; without it the build stage is recorded as
-    *not attempted* rather than faked. The returned job is terminal: ``passed`` never happens here,
-    because ``deploy``/``ingame`` are blocked — ``inconclusive`` is the honest close-out.
+    *not attempted* rather than faked. ``dest`` is the remote root the compiled addon is copied to
+    (a Windows/share path, ``D:/...`` — whatever the host's scp accepts): with it, and a successful
+    build, the deploy stage pushes and MD5-verifies the addon content; without it the stage is
+    recorded *skipped* and says no destination was given. The returned job is terminal: ``passed``
+    never happens here, because ``ingame`` is blocked — ``inconclusive`` is the honest close-out, and
+    ``failed`` when the build or the deploy actually failed.
     """
     from s2docs.asset.material import write_vmat
     from s2docs.asset.model import render_model_doc, write_model_doc
@@ -173,17 +226,64 @@ def run_asset_build_slice(
         _stage(db, job.id, "build", message="build not attempted",
                data={"skipped": True, "reason": "no build_command supplied"})
 
-    # ---- deploy / ingame: blocked, recorded as such ------------------------
-    for stage in ("deploy", "ingame"):
-        _stage(db, job.id, stage, message=f"{stage} blocked",
-               data={"blocked": True, "reason": BLOCKED_REASONS[stage]})
+    # ---- deploy: real when a destination is given and the build succeeded ---
+    deploy_id: str | None = None
+    deploy_status: str | None = None
+    if not dest:
+        _stage(db, job.id, "deploy", message="deploy skipped: no destination",
+               data={"skipped": True, "reason": NO_DEST_REASON})
+    elif build_status != "succeeded":
+        _stage(
+            db, job.id, "deploy", message="deploy skipped: no successful build",
+            data={
+                "skipped": True,
+                "reason": (
+                    f"build {'was not attempted' if build_status is None else build_status}; "
+                    "nothing new was compiled, so the addon content was not copied"
+                ),
+            },
+        )
+    else:
+        deployment, failure = _deploy_addon(
+            db, host_id=host_id, dest_root=dest, addon=addon,
+            files=_deploy_files(workspace, game, addon),
+        )
+        if deployment is not None:
+            deploy_id, deploy_status = deployment.id, deployment.status
+            # The artifact is linked, not pasted into the message — same as the build above.
+            jobs.link(db, job.id, kind="deploy", ref_id=deployment.id)
+        else:
+            deploy_status = "failed"
+        data: dict = {"host_id": host_id, "dest_root": dest, "deploy": deploy_id, "status": deploy_status}
+        if deployment is not None:
+            data["files"] = len(deployment.entries)
+            data["verified"] = sum(1 for entry in deployment.entries if entry.verified)
+        if failure:
+            data["error"] = failure
+        _stage(
+            db, job.id, "deploy",
+            level="milestone" if deploy_status == "verified" else "error",
+            message=f"deploy {deploy_status}", data=data,
+        )
 
-    failed = build_status in ("failed", "cancelled", "interrupted")
+    # ---- ingame: still blocked, recorded as such ---------------------------
+    _stage(db, job.id, "ingame", message="ingame blocked",
+           data={"blocked": True, "reason": BLOCKED_REASONS["ingame"]})
+
+    # A deploy that ran and did not come back 'verified' is a failure, including the case where the
+    # MD5 readback could not run: the chain must not close 'inconclusive' on bytes nobody confirmed.
+    deploy_failed = deploy_status is not None and deploy_status != "verified"
+    failed = build_status in ("failed", "cancelled", "interrupted") or deploy_failed
+    if deploy_status is None:
+        deploy_bit = "deploy skipped (no destination)" if not dest else "deploy skipped (no successful build)"
+    else:
+        deploy_bit = f"deploy {deploy_status}" + (f" ({deploy_id})" if deploy_id else "")
     learned_bits = [
         f"asset stage wrote {produced['vmdl']}" + (f" and {produced['vmat']}" if "vmat" in produced else ""),
         "concept/mesh have no generator (stubbed)",
         f"build {'not attempted' if build_status is None else build_status}" + (f" ({build_id})" if build_id else ""),
-        "deploy/ingame blocked",
+        deploy_bit,
+        "ingame blocked",
     ]
     return jobs.finish(
         db, job.id,
@@ -194,13 +294,14 @@ def run_asset_build_slice(
                 f"stages {', '.join(STAGES)} recorded on one job."
             ),
             why=(
-                "Prove the chain where it exists (asset+build) and record stubs/blocks honestly "
-                "instead of a green status that hides them."
+                "Prove the chain where it exists (asset+build+deploy) and record stubs/blocks/skips "
+                "honestly instead of a green status that hides them."
             ),
             learned="; ".join(learned_bits),
             next_=(
-                "Unblock ingame by compiling a map that references the model on a host with an "
-                "active display adapter, then wire concept/mesh generators."
+                "Pass --dest to copy a compiled addon to a host; unblock ingame by compiling a map "
+                "that references the model on a host with an active display adapter, then wire "
+                "concept/mesh generators."
             ),
         ),
     )

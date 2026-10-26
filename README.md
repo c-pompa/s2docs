@@ -43,6 +43,7 @@ Other commands:
 uv run s2docs sync --game cs2         # one game
 uv run s2docs sync --no-fetch         # re-index the existing checkout (e.g. after parser changes)
 uv run s2docs sync --docs-only        # only refresh source2.wiki   (--skip-docs to skip it)
+uv run s2docs sync --check            # is the index older than the checkout? (read-only; --fail-if-stale exits 6)
 uv run s2docs load cs2 /path/to/GameTracking-CS2   # index a full local clone
 uv run s2docs stats
 uv run s2docs prompt cs2_script task="teleport players who touch the lava"
