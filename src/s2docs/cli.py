@@ -166,6 +166,44 @@ def _cmd_stats(_: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_surfaces(args: argparse.Namespace) -> int:
+    """`s2docs surfaces`: which operations exist, and which surface (CLI, API, MCP) exposes each.
+
+    Read-only and database-free: it prints the declarative table in `s2docs.surfaces` plus whatever
+    that module's verifier found against the parser, the FastAPI app and the MCP tool registry.
+    `--gaps` prints only the disagreements and exits 1 when there is one, so CI can gate on it; the
+    same verdict is the `surfaces_list` MCP tool, for a session that only speaks MCP.
+    """
+    from s2docs import surfaces
+
+    mismatches = surfaces.verify()
+    if args.gaps:
+        if getattr(args, "json", False):
+            print(json.dumps({"schema": "s2docs/v1", "gaps": [m.as_dict() for m in mismatches]}))
+        elif mismatches:
+            for m in mismatches:
+                print(f"{m.operation:24} {m.surface:5} {m.kind:10} {m.detail}")
+            print(f"{len(mismatches)} gap(s): the declared table and the code disagree")
+        else:
+            print("no gaps: every declared surface exists and no undeclared surface exposes an operation")
+        return EXIT_ERROR if mismatches else EXIT_OK
+    if getattr(args, "json", False):
+        print(json.dumps({
+            "schema": "s2docs/v1",
+            "operations": [op.as_dict() for op in surfaces.OPERATIONS],
+            "mismatches": [m.as_dict() for m in mismatches],
+        }))
+        return EXIT_OK
+    width = max(len(op.id) for op in surfaces.OPERATIONS) + 2
+    print(f"{'operation':{width}} {'surfaces':18} {'cli':26} {'api':44} mcp")
+    for op in surfaces.OPERATIONS:
+        exposed = ",".join(s for s in surfaces.SURFACES if s in op.surfaces)
+        api = f"{op.api[0]} {op.api[1]}" if op.api else "-"
+        print(f"{op.id:{width}} {exposed:18} {' '.join(op.cli) or '-':26} {api:44} {op.mcp or '-'}")
+    print(f"\n{len(surfaces.OPERATIONS)} operations, {len(mismatches)} mismatch(es); `s2docs surfaces --gaps`")
+    return EXIT_OK
+
+
 def _cmd_review(args: argparse.Namespace) -> int:
     """Scope a branch diff into per-area reviewer briefs (read-only git client)."""
     from s2docs import review
@@ -1123,7 +1161,13 @@ def _cmd_live(args: argparse.Namespace) -> int:
     return _fail(f"unknown live command {args.live_cmd!r}", EXIT_ERROR)
 
 
-def main(argv: list[str] | None = None) -> int:
+def build_parser() -> argparse.ArgumentParser:
+    """Build the whole command parser.
+
+    Kept separate from `main()` so the command tree is introspectable: `s2docs.surfaces` walks the
+    returned parser to prove that a declared CLI handle really is a command — and that a capability
+    it calls API/MCP-only has not quietly grown a CLI door.
+    """
     parser = argparse.ArgumentParser(prog="s2docs", description="Source 2 docs index, API and MCP server")
     parser.add_argument("-v", "--verbose", action="store_true")
     parser.add_argument(
@@ -1159,6 +1203,13 @@ def main(argv: list[str] | None = None) -> int:
     p.set_defaults(fn=_cmd_mcp)
 
     sub.add_parser("stats", help="Show indexed counts").set_defaults(fn=_cmd_stats)
+
+    p = sub.add_parser("surfaces", help="Which named operations exist, and where (CLI/API/MCP) each is exposed")
+    p.add_argument("--gaps", action="store_true",
+                   help="Only disagreements between the declared table and the code; exits 1 when any")
+    # SUPPRESS so `s2docs --json surfaces` (the global flag) is not reset to False by this default.
+    p.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="Machine-readable output")
+    p.set_defaults(fn=_cmd_surfaces)
 
     p = sub.add_parser("validate-script", help="Type-check a cs_script .js against point_script.d.ts")
     p.add_argument("file")
@@ -1533,7 +1584,11 @@ def main(argv: list[str] | None = None) -> int:
     q.add_argument("--evidence", required=True, help="The readback/answer/artifact that proves it")
     p.set_defaults(fn=_cmd_live)
 
-    args = parser.parse_args(argv)
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
     # stdout is the MCP stdio channel: logs must go to stderr.
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.INFO,
