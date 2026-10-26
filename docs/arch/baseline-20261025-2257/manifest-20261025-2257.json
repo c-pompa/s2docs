@@ -1,0 +1,14 @@
+{
+  "suffix": "20261025-2257",
+  "commit": "7026ee4",
+  "counts": {
+    "routes": "97",
+    "commands": "76",
+    "tools": "81",
+    "migrations": "16"
+  },
+  "files": [
+    "docs/arch/baseline-20261025-2257/s2docs-data-plane-20261025-2257.svg",
+    "docs/arch/baseline-20261025-2257/s2docs-control-plane-20261025-2257.svg"
+  ]
+}
