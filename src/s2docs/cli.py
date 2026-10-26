@@ -371,7 +371,8 @@ def _emit_chain(args: argparse.Namespace, job) -> int:
 
 
 def _cmd_pipeline(args: argparse.Namespace) -> int:
-    """`s2docs pipeline run`: the chain as one job — asset+build real, concept/mesh stubbed, deploy/ingame blocked."""
+    """`s2docs pipeline run`: the chain as one job — asset+build real, deploy real with --dest,
+    concept/mesh stubbed, ingame blocked."""
     from s2docs import pipeline
 
     db = Database(get_settings().db_path)
@@ -386,6 +387,7 @@ def _cmd_pipeline(args: argparse.Namespace) -> int:
         project_id=args.project,
         build_command=args.build_command,
         build_timeout_sec=args.build_timeout,
+        dest=args.dest,
     )
     return _emit_chain(args, job)
 
@@ -1273,6 +1275,11 @@ def main(argv: list[str] | None = None) -> int:
     q.add_argument("--color", help="baked colour .png (its _normal/_ao siblings wire automatically)")
     q.add_argument("--build-command", help="host-side compile line; omit to record the build as not attempted")
     q.add_argument("--build-timeout", type=int, default=300, help="seconds to wait for the build")
+    q.add_argument(
+        "--dest",
+        help="Remote destination root; with a successful build the addon content is pushed and "
+        "MD5-verified there (omit to record deploy as skipped)",
+    )
     q.add_argument("--project", help="ledger project id to attach the chain to")
     q.set_defaults(fn=_cmd_pipeline)
 
