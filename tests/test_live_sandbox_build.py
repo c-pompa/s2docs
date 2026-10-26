@@ -97,6 +97,12 @@ def test_build_writes_the_addon_deploys_the_sources_then_starts_the_compile(db, 
     assert script.count("resourcecompiler.exe") == 2 and " -nop4 -i " in script
     assert script.index(r"maps\scripts\hermes_sandbox.js") < script.index(r"\maps\hermes_sandbox.vmap")
     assert "hermes_sandbox_rc.done" in script and "exit " in script
+    # a crashed map pass must FAIL the build (live 2026-10-25: the NTSTATUS exit code is negative, so taking
+    # the max of the two passes reported 0, and a stale vpk was pulled back as if it were new)
+    assert "Math]::Max" not in script
+    assert "Map build finished" in script and "LastWriteTime" in script, "require a fresh vpk + the build line"
+    # a Disc(onnected) RDP session gives resourcecompiler no display adapter either: refuse up front
+    assert "query user" in script and "Active" in script
     assert started["kind"] == "compile" and "map=hermes_sandbox" in started["notes"]
 
 

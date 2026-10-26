@@ -100,19 +100,29 @@ def compile_script(cs2: str) -> str:
     js = content + "\\maps\\scripts\\hermes_sandbox.js"
     vmap = content + "\\maps\\hermes_sandbox.vmap"
     log, done, ps1 = (f"{WORK_DIR}\\{TASK_NAME}.{ext}" for ext in ("log", "done", "ps1"))
+    vpk = f"{base}\\game\\csgo_addons\\{ADDON}\\maps\\hermes_sandbox.vpk"
     inner = (
         "$ErrorActionPreference = 'Continue'\n"
         f"& {_ps_literal(rc)} -nop4 -i {_ps_literal(js)} *> {_ps_literal(log)}\n"
         "$a = $LASTEXITCODE\n"
         f"& {_ps_literal(rc)} -nop4 -i {_ps_literal(vmap)} *>> {_ps_literal(log)}\n"
         "$b = $LASTEXITCODE\n"
-        f"\"exit $([Math]::Max([int]$a, [int]$b))\" | Set-Content -LiteralPath {_ps_literal(done)}\n"
+        # first NON-ZERO code wins: a crash's NTSTATUS is negative, so max(0, crash) would read as success
+        "$code = if ($a -ne 0) { $a } elseif ($b -ne 0) { $b } else { 0 }\n"
+        f"\"$code\" | Set-Content -LiteralPath {_ps_literal(done)}\n"
     )
     return "\n".join([
         "$ErrorActionPreference = 'Stop'",
+        # resourcecompiler gets a display adapter only in an ACTIVE logged-on session: measured Active (RDP)
+        # = compiles, Disc(onnected) RDP = 'No display adapters found' + access violation (2026-10-25).
+        "$sessions = @(query user 2>&1)",
+        "if (-not ($sessions | Where-Object { \"$_\" -match '\\sActive\\s' })) {",
+        "  Write-Output ('NO ACTIVE SESSION on this host (resourcecompiler needs one for the map pass; reconnect '"
+        " + 'RDP or log on at the console): ' + ($sessions -join ' | ')); exit 4 }",
         f"New-Item -ItemType Directory -Force -Path {_ps_literal(WORK_DIR)} | Out-Null",
         f"Remove-Item -LiteralPath {_ps_literal(done)},{_ps_literal(log)} -ErrorAction SilentlyContinue",
         f"Set-Content -LiteralPath {_ps_literal(ps1)} -Encoding UTF8 -Value {_ps_literal(inner)}",
+        "$started = Get-Date",
         "$act = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument "
         + _ps_literal(f"-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File \"{ps1}\""),
         "$who = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive",
@@ -124,10 +134,18 @@ def compile_script(cs2: str) -> str:
         f"while (-not (Test-Path -LiteralPath {_ps_literal(done)})) {{",
         "  if ((Get-Date) -gt $deadline) { Write-Output 'TIMEOUT waiting for the compile task'; exit 124 }",
         "  Start-Sleep -Seconds 2 }",
-        f"$bytes = [IO.File]::ReadAllBytes({_ps_literal(log)})",
-        "Write-Output ([Text.Encoding]::Unicode.GetString($bytes))",
-        f"$code = [int](((Get-Content -LiteralPath {_ps_literal(done)}) -join '') -replace '[^0-9]', '')",
-        "exit $code",
+        f"$text = [Text.Encoding]::Unicode.GetString([IO.File]::ReadAllBytes({_ps_literal(log)}))",
+        "Write-Output $text",
+        f"$code = [int](((Get-Content -LiteralPath {_ps_literal(done)}) -join '').Trim())",
+        # exit 1 rather than the raw code: a negative NTSTATUS can reach ssh's exit status as 0 in its low byte
+        "if ($code -ne 0) { Write-Output \"resourcecompiler exit $code\"; exit 1 }",
+        # rc can also exit 0 after an access violation: trust only the build line AND a vpk written by THIS run
+        f"$vpkPath = {_ps_literal(vpk)}",
+        "if (-not ($text -match 'Map build finished') -or -not (Test-Path -LiteralPath $vpkPath) -or "
+        "((Get-Item -LiteralPath $vpkPath).LastWriteTime -lt $started)) {",
+        "  Write-Output 'MAP PASS DID NOT PRODUCE A FRESH VPK (no Map build finished, or the vpk predates this run)'",
+        "  exit 3 }",
+        "exit 0",
     ])
 
 
