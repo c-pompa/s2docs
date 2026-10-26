@@ -591,6 +591,15 @@ def _cmd_build(args: argparse.Namespace) -> int:
         if args.build_cmd == "cancel":
             run = builds.cancel(db, args.run_id)
             return _emit(args, {"run": run.model_dump()}, _human_run(run))
+        if args.build_cmd == "recover":
+            interrupted = builds.recover(db)
+            if not interrupted:
+                return _emit(args, {"interrupted": []}, ["no stale build runs: nothing to recover"])
+            return _emit(
+                args,
+                {"interrupted": interrupted},
+                [f"interrupted {len(interrupted)} build run(s): {', '.join(interrupted)}"],
+            )
         if args.build_cmd == "list":
             runs = builds.list_runs(db, host_id=args.host, active=args.active)
             human = [f"{r.id}  {r.host_id}  {r.status:9}  {r.kind}  {r.summary}" for r in runs] or ["no runs"]
@@ -1367,6 +1376,10 @@ def main(argv: list[str] | None = None) -> int:
     q.add_argument("--strict-materials", action="store_true", help="Exit 8 when the material guard flagged warnings")
     q = bc.add_parser("cancel", help="Cancel a run and release its host lease")
     q.add_argument("run_id")
+    bc.add_parser(
+        "recover",
+        help="Interrupt runs whose owning process is gone (asks the OS; safe to re-run)",
+    )
     q = bc.add_parser("list", help="List runs (newest first)")
     q.add_argument("--host")
     q.add_argument("--active", action="store_true", help="Only queued/running runs")

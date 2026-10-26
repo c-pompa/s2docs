@@ -67,6 +67,12 @@ WRITES_WORKSPACE = ToolAnnotations(read_only_hint=False, destructive_hint=False,
 
 def create_mcp_server(db: Database, workspace: Path | None = None) -> MCPServer:
     workspace = workspace or get_settings().workspace_dir
+    # A run started before this process existed must not stay 'running' forever. A build is launched
+    # detached, so it may still be compiling: recover asks the OS about the recorded pid instead of
+    # assuming that this process's missing watcher means the run died. Guarded like the app lifespan —
+    # a probe against a missing db must not create one.
+    if db.path.exists():
+        builds.recover(db)
     server = MCPServer(name="s2docs", title="Source 2 Docs", instructions=INSTRUCTIONS, version="0.1.0")
 
     def run(fn: Callable[[Repository], T]) -> T:
