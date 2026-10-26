@@ -8,6 +8,7 @@ Two rules this file pins:
 
 from __future__ import annotations
 
+import base64
 import json
 from pathlib import Path
 
@@ -84,10 +85,18 @@ def test_build_writes_the_addon_deploys_the_sources_then_starts_the_compile(db, 
     assert [f["path"] for f in pushed["files"]] == ["maps/hermes_sandbox.vmap", "maps/scripts/hermes_sandbox.js"]
     assert all(f["local"].startswith(str(staging)) for f in pushed["files"])
 
-    # 2. one PowerShell line, script first then the map (iso_hud_build.ps1 shape)
+    # 2. the compile runs INSIDE the logged-in session: in ssh's session 0 resourcecompiler finds no
+    #    display adapter and the vmap compile access-violates (measured 2026-10-25 on desktop-pc), so the
+    #    command is an EncodedCommand whose script runs both rc passes from a one-shot Interactive task
     command = started["command"]
-    assert command.count("resourcecompiler.exe") == 2 and " -nop4 -i " in command
-    assert command.index(r"maps\scripts\hermes_sandbox.js") < command.index(r"\maps\hermes_sandbox.vmap")
+    assert command.startswith("powershell -NoProfile -ExecutionPolicy Bypass -EncodedCommand ")
+    script = sandbox_build.compile_script(CS2)
+    assert command.endswith(base64.b64encode(script.encode("utf-16-le")).decode())
+    assert "-LogonType Interactive" in script and "Register-ScheduledTask" in script
+    assert "Unregister-ScheduledTask" in script, "the one-shot task never outlives the compile"
+    assert script.count("resourcecompiler.exe") == 2 and " -nop4 -i " in script
+    assert script.index(r"maps\scripts\hermes_sandbox.js") < script.index(r"\maps\hermes_sandbox.vmap")
+    assert "hermes_sandbox_rc.done" in script and "exit " in script
     assert started["kind"] == "compile" and "map=hermes_sandbox" in started["notes"]
 
 

@@ -19,6 +19,7 @@ inside :mod:`s2docs.deploys`), so the destination can never become an option.
 
 from __future__ import annotations
 
+import base64
 import subprocess
 from pathlib import Path
 
@@ -75,18 +76,66 @@ def staging_dir() -> Path:
     return get_settings().data_dir / "live_sandbox"
 
 
-def _ps_quote(value: str) -> str:
-    return '"' + value.replace("`", "``").replace('"', '`"') + '"'
+def _ps_literal(value: str) -> str:
+    """A PowerShell single-quoted literal (no expansion; ' doubled)."""
+    return "'" + value.replace("'", "''") + "'"
+
+
+TASK_NAME = "hermes_sandbox_rc"
+WORK_DIR = "C:\\iso_build"
+
+
+def compile_script(cs2: str) -> str:
+    """The PowerShell the compile host runs: both rc passes from a one-shot **Interactive** task.
+
+    In ssh's session 0 resourcecompiler sees no display adapter ("nAdapterCount=0 ... software
+    rasterizer") and the vmap pass access-violates — measured on desktop-pc 2026-10-25; the same run from
+    an Interactive-principal task found the RTX 3080 and compiled 14/0. So this registers a hidden task
+    running a generated .ps1 (log + done marker), deletes the task at once, waits for the marker, prints
+    the log for the build record and exits with resourcecompiler's exit code. iso-spectate's
+    compile_map.py uses the same session rule ('/IT').
+    """
+    base = cs2.rstrip("\\/")
+    rc = base + "\\game\\bin\\win64\\resourcecompiler.exe"
+    content = f"{base}\\content\\csgo_addons\\{ADDON}"
+    js = content + "\\maps\\scripts\\hermes_sandbox.js"
+    vmap = content + "\\maps\\hermes_sandbox.vmap"
+    log, done, ps1 = (f"{WORK_DIR}\\{TASK_NAME}.{ext}" for ext in ("log", "done", "ps1"))
+    inner = (
+        "$ErrorActionPreference = 'Continue'\n"
+        f"& {_ps_literal(rc)} -nop4 -i {_ps_literal(js)} *> {_ps_literal(log)}\n"
+        "$a = $LASTEXITCODE\n"
+        f"& {_ps_literal(rc)} -nop4 -i {_ps_literal(vmap)} *>> {_ps_literal(log)}\n"
+        "$b = $LASTEXITCODE\n"
+        f"\"exit $([Math]::Max([int]$a, [int]$b))\" | Set-Content -LiteralPath {_ps_literal(done)}\n"
+    )
+    return "\n".join([
+        "$ErrorActionPreference = 'Stop'",
+        f"New-Item -ItemType Directory -Force -Path {_ps_literal(WORK_DIR)} | Out-Null",
+        f"Remove-Item -LiteralPath {_ps_literal(done)},{_ps_literal(log)} -ErrorAction SilentlyContinue",
+        f"Set-Content -LiteralPath {_ps_literal(ps1)} -Encoding UTF8 -Value {_ps_literal(inner)}",
+        "$act = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument "
+        + _ps_literal(f"-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File \"{ps1}\""),
+        "$who = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive",
+        f"Register-ScheduledTask -TaskName {_ps_literal(TASK_NAME)} -Action $act -Principal $who -Force | Out-Null",
+        f"Start-ScheduledTask -TaskName {_ps_literal(TASK_NAME)}",
+        "Start-Sleep -Seconds 3",
+        f"Unregister-ScheduledTask -TaskName {_ps_literal(TASK_NAME)} -Confirm:$false",
+        f"$deadline = (Get-Date).AddSeconds({COMPILE_TIMEOUT_SEC - 60})",
+        f"while (-not (Test-Path -LiteralPath {_ps_literal(done)})) {{",
+        "  if ((Get-Date) -gt $deadline) { Write-Output 'TIMEOUT waiting for the compile task'; exit 124 }",
+        "  Start-Sleep -Seconds 2 }",
+        f"$bytes = [IO.File]::ReadAllBytes({_ps_literal(log)})",
+        "Write-Output ([Text.Encoding]::Unicode.GetString($bytes))",
+        f"$code = [int](((Get-Content -LiteralPath {_ps_literal(done)}) -join '') -replace '[^0-9]', '')",
+        "exit $code",
+    ])
 
 
 def compile_command(cs2: str) -> str:
-    """One PowerShell line, iso_hud_build.ps1's shape: compile the script first, then the map."""
-    base = cs2.rstrip("\\/")
-    rc = _ps_quote(f"{base}\\game\\bin\\win64\\resourcecompiler.exe")
-    content = f"{base}\\content\\csgo_addons\\{ADDON}"
-    script = _ps_quote(content + "\\maps\\scripts\\hermes_sandbox.js")
-    vmap = _ps_quote(content + "\\maps\\hermes_sandbox.vmap")
-    return f"& {rc} -nop4 -i {script}; & {rc} -nop4 -i {vmap}"
+    """``compile_script`` as one ``-EncodedCommand`` argument: no quoting survives to be re-split by ssh."""
+    encoded = base64.b64encode(compile_script(cs2).encode("utf-16-le")).decode()
+    return f"powershell -NoProfile -ExecutionPolicy Bypass -EncodedCommand {encoded}"
 
 
 # ------------------------------------------------------------------ preflight
