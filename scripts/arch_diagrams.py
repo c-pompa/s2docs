@@ -137,9 +137,10 @@ def data_plane(c: dict[str, str]) -> tuple[list[Band], list]:
         Band("1 · SOURCES — read-only, on disk", "source", [
             Node("a1", "Valve game data: VPK, dump files, FGD, .d.ts, game events, KV3"),
             Node("a2", "Source2Wiki pages")]),
-        Band("2 · INGESTION — s2docs sync / load", "ingest", [
+        Band("2 · INGESTION — s2docs sync / load, plus a read-only staleness check", "ingest", [
             Node("b1", "ingest/sources.py — parsers"), Node("b2", "ingest/wiki.py"),
-            Node("b3", "ingest/loader.py")]),
+            Node("b3", "ingest/loader.py"),
+            Node("b4", "ingest/hygiene.py — sync --check, read-only")]),
         Band("3 · STORE — one SQLite file in S2DOCS_DATA_DIR", "store", [
             Node("c1", "content tables: convars, entities, schema, events, pulse, script symbols, docs"),
             Node("c2", "search_fts — FTS5"),
@@ -149,7 +150,8 @@ def data_plane(c: dict[str, str]) -> tuple[list[Band], list]:
             Node("d1", "db/repository.py + fts.py"),
             Node("d2", "domain stores — builds, deploys, hosts, jobs, evidence, assets"),
             Node("d3", "orchestration/engine.py + workflows.py"),
-            Node("d4", "build/ + asset/ writers — model, material, validate")]),
+            Node("d4", "build/ + asset/ writers — model, material, validate"),
+            Node("d5", "surfaces.py — operation registry, verified against all three surfaces")]),
         Band("5 · SURFACES — all read the same DB — "
              f"{c['commands']} CLI · {c['routes']} routes · {c['tools']} tools", "surface", [
             Node("e1", f"CLI — {c['commands']} commands"),
@@ -158,10 +160,11 @@ def data_plane(c: dict[str, str]) -> tuple[list[Band], list]:
             Node("e4", f"MCP stdio — {c['tools']} tools")]),
     ]
     edges = [("a1", "b1"), ("a2", "b2"), ("b1", "b3"), ("b2", "b3"), ("b3", "c1"), ("b3", "c2"),
+             ("c1", "b4", "check"),
              ("c1", "d1"), ("c2", "d1"), ("c3", "d2"),
              ("d1", "e1"), ("d1", "e2"), ("d1", "e4"),
              ("d2", "e1"), ("d2", "e2"), ("d2", "e4"),
-             ("d3", "e2"), ("d4", "e1"), ("e2", "e3")]
+             ("d3", "e2"), ("d4", "e1"), ("d5", "e1"), ("d5", "e2"), ("d5", "e4"), ("e2", "e3")]
     return bands, edges
 
 
@@ -173,10 +176,11 @@ def control_plane(c: dict[str, str]) -> tuple[list[Band], list]:
             Node("s", "CLI · HTTP :8812 · MCP tool")]),
         Band("3 · RECORD AND QUEUE — in-process", "exec", [
             Node("j", "jobs.py — queue, events, human-confirm verdict windows"),
-            Node("p", "projects / steps + gates")]),
+            Node("p", "projects / steps + gates"),
+            Node("r", "builds.recover() at startup — asks the OS about every running pid")]),
         Band("4 · EXECUTE ON A HOST — in-process, inside whichever surface started it", "exec", [
             Node("h", "hosts.py — registry, lease, heartbeat"),
-            Node("b", "builds.py — ssh + resourcecompiler, log captured"),
+            Node("b", "builds.py — detached launch, pid persisted, status+lease in one transaction"),
             Node("d", "deploys.py — scp + MD5 readback")]),
         Band("5 · LIVE — drive a running game", "live", [
             Node("lv", "live/service.py — act() / status(), the one entry all three surfaces call"),
@@ -190,7 +194,8 @@ def control_plane(c: dict[str, str]) -> tuple[list[Band], list]:
     ]
     edges = [("u", "s"),
              ("s", "j"), ("s", "p"), ("s", "h"), ("s", "b"), ("s", "d"), ("s", "lv"),
-             ("j", "db"), ("p", "db"), ("h", "db"), ("b", "db"), ("d", "db"), ("lv", "db"),
+             ("j", "db"), ("p", "db"), ("r", "db"), ("h", "db"), ("b", "db"), ("d", "db"), ("lv", "db"),
+             ("s", "r"),
              ("h", "w", "ssh"), ("b", "w", "ssh"), ("d", "w", "scp"),
              ("lv", "nc"), ("cap", "lv", "gate"), ("nc", "cs", "netcon"),
              ("w", "rc"), ("rc", "cs"), ("cs", "v"), ("v", "j"), ("v", "db")]
