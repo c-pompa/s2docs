@@ -108,6 +108,20 @@ def create_mcp_server(db: Database, workspace: Path | None = None) -> MCPServer:
         return m.ServerInfo(**server_identity())
 
     @server.tool(annotations=READ_ONLY)
+    def surfaces_list() -> dict:
+        """Which named operations exist and which surfaces expose them (CLI, HTTP API, MCP).
+
+        Read-only inventory: the declarative table in `s2docs.surfaces`, each row naming the domain
+        function behind the operation and the exact handle on every surface, plus `mismatches` — the
+        rows where that table and the shipped code disagree. An empty list is the server's claim that
+        a capability is reachable exactly where the table says. Use it before telling a user that
+        something cannot be done here: a `missing` row names a declared door that has no code, an
+        `undeclared` row a capability that leaked onto a surface nobody documented."""
+        from s2docs import surfaces
+
+        return surfaces.report()
+
+    @server.tool(annotations=READ_ONLY)
     def search_docs(
         query: Annotated[str, Field(description="Free text or identifier, e.g. 'round time', 'OnTrigger'")],
         game: Annotated[str | None, Field(description="Restrict to one game id")] = None,
