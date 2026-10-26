@@ -437,7 +437,8 @@ class Host(BaseModel):
     ssh_key: str | None = None
     shell: Literal["cmd", "powershell"] | None = None
     os: str | None = None
-    facts: dict = Field(default_factory=dict, description="Probed facts; `s2docs host probe` writes them under "probe" (gpu, ram, processes, cs2.path, ...)")
+    facts: dict = Field(default_factory=dict,
+                        description="Probed facts, under 'probe' (gpu, ram, processes, cs2.path, ...)")
     probed_at: str | None = None
     notes: str | None = None
     lock: HostLock | None = None
