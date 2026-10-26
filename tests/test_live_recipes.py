@@ -29,7 +29,7 @@ def test_follow_chickens_need_sandbox():
     with pytest.raises(LiveUnavailable):
         compile_plan(e, STOCK, sandbox=False)
     plan = compile_plan(e, STOCK, sandbox=True)
-    assert plan.lines == ["sv_cheats 1", "hs_spawn chicken 4 line 48 1"]
+    assert plan.lines == ["sv_cheats 1", "hs_spawn chicken 4 line 48 1", *recipes.SAFE_TEST_LINES]
     assert plan.expect == [{"check": "reply", "pattern": r"\[hs\] spawned 4 chicken"}]
 
 
@@ -56,7 +56,7 @@ def test_console_spawn_uses_pose_when_proven(monkeypatch):
     plan = compile_plan(env({"action": "spawn", "what": "chicken", "count": 2}), proven, sandbox=False,
                         pose=Pose(0.0, 0.0, 0.0, 0.0))
     assert plan.lines[1:] == ['ent_create chicken {"origin" "-48.0 0.0 0.0"}',
-                              'ent_create chicken {"origin" "-96.0 0.0 0.0"}']
+                              'ent_create chicken {"origin" "-96.0 0.0 0.0"}', *recipes.SAFE_TEST_LINES]
 
 
 @pytest.mark.parametrize("raw", [
@@ -98,3 +98,30 @@ def test_clear_expects_a_readback_in_both_modes():
 
     everything = compile_plan(env({"action": "clear"}), STOCK, sandbox=True)
     assert everything.expect == [{"check": "reply", "pattern": r"\[hs\] cleared \d+"}]
+
+
+# While we test, bots must not kill the player: live on pomps-pc 2026-10-25 a bot killed the user right after
+# a test. A round end also wipes everything spawned, so bots killing each other must not end it either.
+SAFE = ["bot_ignore_players 1", "bot_dont_shoot 1", "god 1", "mp_ignore_round_win_conditions 1"]
+
+
+def test_bots_plan_ends_in_safe_test_mode_after_the_restart_settles():
+    plan = compile_plan(env({"action": "bots", "team_size": 5, "me": "t"}), STOCK, sandbox=True)
+    assert tuple(SAFE) == recipes.SAFE_TEST_LINES
+    # god is per player and the restart respawns the player, so the safe lines come after it settles
+    restart = plan.lines.index("mp_restartgame 1")
+    assert plan.lines[-len(SAFE) - 1:] == ["sleep 3", *SAFE] and restart < len(plan.lines) - len(SAFE) - 1
+    assert "sv_cheats 1" in plan.lines[: len(plan.lines) - len(SAFE)], "every safe line is a cheat"
+
+
+def test_spawn_plan_is_safe_once_and_clear_alone_is_unchanged():
+    plan = compile_plan(env({"action": "bots", "t": 2, "ct": 2, "restart": False},
+                            {"action": "spawn", "what": "chicken", "count": 4, "follow": True}), STOCK, sandbox=True)
+    assert plan.lines[-len(SAFE):] == SAFE and plan.lines.count("god 1") == 1
+    cleared = compile_plan(env({"action": "clear"}), STOCK, sandbox=True)
+    assert "god 1" not in cleared.lines
+
+
+def test_safe_lines_are_allowlisted():
+    for line in SAFE:
+        assert ALLOWED.fullmatch(line), line

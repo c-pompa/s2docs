@@ -18,7 +18,7 @@ SANDBOX = "hermes_sandbox"
 # The one file whose absence makes `spawn_group_load` kick the client and kill the server.
 SANDBOX_VPK = "maps/hermes_sandbox.vpk"
 # What "load the sandbox" sends: cheats on, the group streamed in, then the readback round trip.
-LOAD_LINES = ["sv_cheats 1", f"spawn_group_load {SANDBOX}", "sleep 3", "status", "hs_ping"]
+LOAD_LINES = ["sv_cheats 1", *recipes.SAFE_TEST_LINES, f"spawn_group_load {SANDBOX}", "sleep 3", "status", "hs_ping"]
 # `getpos_exact`, measured 2026-10-25 on pomps-pc (CS2 1.41.9.2/14192):
 #   setpos_exact -428.000000 -843.000000 95.296288;setang_exact 0.000000 133.500031 0.000000
 # That z is the FEET. Plain `getpos` prints the eye at 156.874420 for the same standing sample, so its line

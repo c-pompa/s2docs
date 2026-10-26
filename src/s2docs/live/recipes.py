@@ -31,7 +31,12 @@ ALLOWED = re.compile(
     r"|ent_remove_all [a-z_]+"
     rf'|ent_create [a-z_]+ \{{"origin" "{_NUM} {_NUM} {_NUM}"\}}'
     r"|say Hermes: [A-Za-z0-9 .,:'()/+-]{0,120}"
+    r"|bot_ignore_players 1|bot_dont_shoot 1|god 1|mp_ignore_round_win_conditions 1"
 )
+
+# While Hermes drives a test, nothing may kill the player and nothing may end the round (a round end wipes
+# every spawned entity). All four are in the s2docs index for CS2; the first three are cheats.
+SAFE_TEST_LINES = ("bot_ignore_players 1", "bot_dont_shoot 1", "god 1", "mp_ignore_round_win_conditions 1")
 
 
 class LiveUnavailable(ValueError):
@@ -139,6 +144,14 @@ def compile_plan(env: IntentEnvelope, spawnables: dict[str, Spawnable], *, sandb
             plan.summary.append(f"clear: {intent.what or 'everything spawned'}")
     if env.say:
         plan.lines.append(f"say Hermes: {_sanitise(env.say)}")
+    if any(isinstance(i, (BotsIntent, SpawnIntent)) for i in env.intents):
+        # Safe test mode, LAST: `god` is per player and a round restart respawns the player, so it goes after
+        # the restart has settled. Live 2026-10-25 a bot killed the user right after a test.
+        cheat()
+        if restarted:
+            plan.lines.append("sleep 3")
+        plan.lines += list(SAFE_TEST_LINES)
+        plan.summary.append("safe test mode: bots ignore you and hold fire, you can't die, rounds don't end")
     for line in plan.lines:
         if not ALLOWED.fullmatch(line):
             raise AssertionError(f"recipe produced a line outside the allowlist: {line!r}")
