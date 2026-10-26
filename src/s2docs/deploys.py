@@ -75,6 +75,28 @@ def _hash_remote(host: m.Host, paths: list[str], *, timeout: int = SSH_TIMEOUT_S
     return out
 
 
+def _ensure_remote_dirs(host: m.Host, remotes: list[str], *, timeout: int = SSH_TIMEOUT_SEC) -> None:
+    """Create every parent directory of ``remotes`` in one PowerShell pass (scp never creates them).
+
+    ``[System.IO.Directory]::CreateDirectory`` is idempotent and takes the path literally (no wildcard
+    expansion, unlike ``New-Item -Path``), so an existing tree is a no-op.
+    """
+    parents = sorted({r.rsplit("/", 1)[0] for r in remotes if "/" in r})
+    if not parents:
+        return
+    targets = ",".join(_pwsh_literal(p) for p in parents)
+    script = f"$t = @({targets}); foreach ($p in $t) {{ [void][System.IO.Directory]::CreateDirectory($p) }}"
+    encoded = base64.b64encode(script.encode("utf-16-le")).decode()
+    argv = hosts.ssh_argv(host) + [f"powershell -NoProfile -ExecutionPolicy Bypass -EncodedCommand {encoded}"]
+    try:
+        proc = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        raise DeployError(f"creating remote directories on {host.id} timed out after {timeout}s") from exc
+    if proc.returncode != 0:
+        raise DeployError(f"creating remote directories on {host.id} failed (rc={proc.returncode}): "
+                          f"{proc.stderr.strip()[:300]}")
+
+
 def remote_md5(host: m.Host, paths: list[str]) -> dict[str, str]:
     """The MD5 each path has *on the host* (one Get-FileHash pass), or ``'missing'``.
 
@@ -235,6 +257,7 @@ def push(
     effective_owner, took_lease = _take_lease(db, host, host_id, owner, did)
     try:
         errors: list[str] = []
+        _ensure_remote_dirs(host, [remote for _, remote, _ in resolved])
 
         def _copy(item: tuple[m.DeployFile, str, m.DeployEntry]) -> None:
             spec, remote, _ = item
