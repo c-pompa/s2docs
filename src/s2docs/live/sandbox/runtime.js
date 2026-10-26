@@ -21,11 +21,28 @@ function human() {
   return undefined;
 }
 
-function place(group, pawn) {
-  const o = pawn.GetAbsOrigin(), yaw = pawn.GetEyeAngles().yaw;
+function place(group, pawn, yawOverride) {
+  const o = pawn.GetAbsOrigin(), yaw = yawOverride ?? pawn.GetEyeAngles().yaw;
   const pts = positions([o.x, o.y, o.z], yaw, group.ents.length, group.formation, group.spacing, HEIGHT[group.id] ?? 32);
   group.ents.forEach((e, i) => { if (e && e.IsValid()) e.Teleport({ position: { x: pts[i][0], y: pts[i][1], z: pts[i][2] } }); });
   return pts;
+}
+
+// Followers walk the player's PATH (trailPush/trailPoint/trailHeading, inlined from formation.mjs). Placing
+// them from the VIEW yaw turned the line with the camera, so it was never visible in first person (live,
+// pomps-pc 2026-10-25). A camera turn adds no breadcrumb, so turning around now shows them.
+/** @type {number[][]} */
+const trail = [];
+
+function follow(group, pawn) {
+  if (group.formation === "line" && trail.length >= 2) {
+    group.ents.forEach((e, i) => {
+      const p = trailPoint(trail, group.spacing * (i + 1));
+      if (e && e.IsValid() && p) e.Teleport({ position: { x: p[0], y: p[1], z: p[2] } });
+    });
+    return;
+  }
+  place(group, pawn, trailHeading(trail) ?? undefined);
 }
 
 Instance.RegisterCheatCommand("hs_ping", () => {
@@ -88,7 +105,9 @@ function pumpModels() {
         ent.SetModel(p.vmdl);
         ent.SetModelScale(p.scale);
         /** @type {{id: string, ents: any[], follow: boolean, formation: string, spacing: number}} */
-        const g = { id: "prop", ents: [ent], follow: false, formation: "grid", spacing: 64 };
+        // spacing 160 -> grid puts it 320 u ahead: at 64 (128 ahead) a runtime-loaded bus spawned on top of
+        // the player, who was clipped inside it (live, pomps-pc 2026-10-25). Models of unknown size go far out.
+        const g = { id: "prop", ents: [ent], follow: false, formation: "grid", spacing: 160 };
         place(g, pawn);
         groups.push(g);
         Instance.Msg(`[hs] model ${p.vmdl} spawned name=${ent.GetModelName()}`);
@@ -111,7 +130,11 @@ Instance.OnPlayerChat((event) => {
 Instance.SetThink(() => {
   pumpModels();
   const pawn = human();
-  if (pawn) for (const g of groups) if (g.follow) place(g, pawn);
+  if (pawn) {
+    const o = pawn.GetAbsOrigin();
+    trailPush(trail, [o.x, o.y, o.z]);
+    for (const g of groups) if (g.follow) follow(g, pawn);
+  }
   Instance.SetNextThink(Instance.GetGameTime() + 0.1);
 });
 Instance.OnActivate(() => Instance.SetNextThink(Instance.GetGameTime()));
