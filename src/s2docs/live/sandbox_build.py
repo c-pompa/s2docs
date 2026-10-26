@@ -19,7 +19,6 @@ inside :mod:`s2docs.deploys`), so the destination can never become an option.
 
 from __future__ import annotations
 
-import base64
 import subprocess
 from pathlib import Path
 
@@ -134,8 +133,7 @@ def compile_script(cs2: str) -> str:
 
 def compile_command(cs2: str) -> str:
     """``compile_script`` as one ``-EncodedCommand`` argument: no quoting survives to be re-split by ssh."""
-    encoded = base64.b64encode(compile_script(cs2).encode("utf-16-le")).decode()
-    return f"powershell -NoProfile -ExecutionPolicy Bypass -EncodedCommand {encoded}"
+    return hosts.powershell_command(compile_script(cs2))
 
 
 # ------------------------------------------------------------------ preflight

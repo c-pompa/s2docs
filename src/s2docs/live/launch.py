@@ -12,7 +12,6 @@ anything, so ``+map`` cannot carry a second command.
 
 from __future__ import annotations
 
-import base64
 import re
 import subprocess
 import time
@@ -97,11 +96,10 @@ def launch(
     exe = _cs2_exe(db, host_id)
     host = hosts.get_host(db, host_id)
 
-    # -EncodedCommand, never `-Command -` with the script on stdin: stdin is parsed line by line, so the
-    # try/finally below fails to parse, the task is registered but never started or removed, and ssh still
-    # exits 0 (live on pomps-pc 2026-10-25). The encoded form is parsed whole, like hosts.probe_host's.
-    encoded = base64.b64encode(script(exe, map_name).encode("utf-16-le")).decode()
-    argv = hosts.ssh_argv(host) + [f"powershell -NoProfile -ExecutionPolicy Bypass -EncodedCommand {encoded}"]
+    # hosts.powershell_argv (-EncodedCommand), never `-Command -` with the script on stdin: stdin is parsed line
+    # by line, so the try/finally below failed to parse, the task was registered but never started or removed,
+    # and ssh still exited 0 (live on pomps-pc 2026-10-25). Hence also the 'launched' check below.
+    argv = hosts.powershell_argv(host, script(exe, map_name))
     try:
         proc = subprocess.run(argv, capture_output=True, text=True, timeout=SSH_TIMEOUT_SEC)
     except subprocess.TimeoutExpired as exc:

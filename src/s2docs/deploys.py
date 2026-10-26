@@ -12,7 +12,6 @@ documented invocation, faked in tests.
 
 from __future__ import annotations
 
-import base64
 import contextlib
 import json
 import re
@@ -59,8 +58,7 @@ def _hash_remote(host: m.Host, paths: list[str], *, timeout: int = SSH_TIMEOUT_S
         'Write-Output ($h + "|" + $p) } '
         'else { Write-Output ("missing|" + $p) } }'
     )
-    encoded = base64.b64encode(script.encode("utf-16-le")).decode()
-    argv = hosts.ssh_argv(host) + [f"powershell -NoProfile -ExecutionPolicy Bypass -EncodedCommand {encoded}"]
+    argv = hosts.powershell_argv(host, script)
     try:
         proc = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
     except subprocess.TimeoutExpired as exc:
@@ -86,8 +84,7 @@ def _ensure_remote_dirs(host: m.Host, remotes: list[str], *, timeout: int = SSH_
         return
     targets = ",".join(_pwsh_literal(p) for p in parents)
     script = f"$t = @({targets}); foreach ($p in $t) {{ [void][System.IO.Directory]::CreateDirectory($p) }}"
-    encoded = base64.b64encode(script.encode("utf-16-le")).decode()
-    argv = hosts.ssh_argv(host) + [f"powershell -NoProfile -ExecutionPolicy Bypass -EncodedCommand {encoded}"]
+    argv = hosts.powershell_argv(host, script)
     try:
         proc = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
     except subprocess.TimeoutExpired as exc:
