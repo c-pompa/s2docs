@@ -491,23 +491,34 @@ def _finalize(
             # 'succeeded' — but the summary now carries the warnings for build_status/build_log/CLI.
             summary["material_guard"] = guard
     merged_notes = "\n".join(x for x in (run.notes, notes) if x) or None
+    # The status flip and the lease release are ONE transaction on purpose: a watcher that sees a
+    # terminal run must also see the host free. Doing the UPDATE first and releasing after left a
+    # window where `builds.wait` (and every reader behind it) could return "failed" while the host
+    # was still locked, so the very next deploy or build on that host answered 409 — CI's slower
+    # timing hit it on test_builds_deploys::test_api_build_and_deploy_routes.
     with db.writer() as conn, conn:
         conn.execute(
             "UPDATE build_runs SET status = ?, exit_code = ?, summary = ?, notes = ?, "
             "updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE id = ?",
             (status, exit_code, json.dumps(summary), merged_notes, rid),
         )
-    if release_lease:
-        _release(db, host_id, owner)
+        if release_lease:
+            _release_in_tx(conn, host_id, owner)
 
 
-def _release(db: Database, host_id: str, owner: str) -> None:
-    """Free the lease iff it is still ours — releasing clears the lock (and its phase). Never deletes
-    another owner's lock: on a takeover the run is finalized without touching the new owner's lease."""
-    with contextlib.suppress(hosts.HostError):
-        lock = hosts.get_host(db, host_id).lock
-        if lock is not None and lock.owner == owner:
-            hosts.release_host(db, host_id, owner)
+def _release_in_tx(conn: sqlite3.Connection, host_id: str, owner: str) -> None:
+    """Free the lease iff it is still ours, inside the caller's transaction.
+
+    Shared by `_finalize` and `_interrupt` so a run never reaches a terminal state while still
+    holding a lock: both write the new status and drop the lock atomically.
+    """
+    lock = conn.execute("SELECT owner FROM host_locks WHERE host_id = ?", (host_id,)).fetchone()
+    if lock is not None and lock["owner"] == owner:
+        conn.execute("DELETE FROM host_locks WHERE host_id = ? AND owner = ?", (host_id, owner))
+        conn.execute(
+            "INSERT INTO host_lock_events (host_id, owner, event, detail) VALUES (?, ?, 'released', ?)",
+            (host_id, owner, "released: the run no longer owns it"),
+        )
 
 
 def _terminate(proc: subprocess.Popen) -> None:
@@ -554,17 +565,18 @@ def cancel(db: Database, run_id: str) -> m.BuildRun:
     run = get_run(db, run_id)
     if run.status in m.TERMINAL_BUILD_STATUSES:
         return run
+    # Status and lease together: whoever sees 'cancelled' must also see the host free.
     with db.writer() as conn, conn:
         conn.execute(
             "UPDATE build_runs SET status = 'cancelled', updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') "
             "WHERE id = ?",
             (run_id,),
         )
+        _release_in_tx(conn, run.host_id, run.owner)
     with _RUNNERS_LOCK:
         entry = _RUNNERS.get(run_id)
     if entry is not None:
         _terminate(entry[0])  # the watcher notices the cancelled record and finalizes
-    _release(db, run.host_id, run.owner)  # the run is terminal: free its own lease now
     return get_run(db, run_id)
 
 
@@ -646,13 +658,7 @@ def _interrupt(conn: sqlite3.Connection, rid: str, host_id: str, owner: str, not
         "updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE id = ?",
         (note, note, rid),
     )
-    lock = conn.execute("SELECT owner FROM host_locks WHERE host_id = ?", (host_id,)).fetchone()
-    if lock is not None and lock["owner"] == owner:
-        conn.execute("DELETE FROM host_locks WHERE host_id = ? AND owner = ?", (host_id, owner))
-        conn.execute(
-            "INSERT INTO host_lock_events (host_id, owner, event, detail) VALUES (?, ?, 'released', ?)",
-            (host_id, owner, "released: interrupted run no longer owns it"),
-        )
+    _release_in_tx(conn, host_id, owner)
 
 
 def record_artifacts(db: Database, run_id: str, paths: list[str]) -> m.BuildRun:

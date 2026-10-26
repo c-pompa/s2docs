@@ -10,7 +10,6 @@ import base64
 import hashlib
 import re
 import threading
-import time
 
 import anyio
 import pytest
@@ -86,13 +85,14 @@ def _start(bdb, tmp_path, **kw):
 
 
 # ------------------------------------------------------------------- build runs
-def _lease_released(db, host_id: str, timeout_sec: float = 5) -> bool:
-    """True once the host lease is gone. The watcher commits a run's terminal status first and
-    releases the lease right after, so builds.wait() can return inside that window: poll briefly
-    instead of racing it (the race was lost under load)."""
-    deadline = time.monotonic() + timeout_sec
-    while hosts.get_host(db, host_id).lock is not None and time.monotonic() < deadline:
-        time.sleep(0.02)
+def _lease_released(db, host_id: str) -> bool:
+    """The host must be free the instant the run reads terminal.
+
+    Status and lease are written in one transaction (builds._release_in_tx), so there is no window
+    to poll for. This deliberately does NOT sleep: if it ever needs a grace period again, the
+    atomicity in builds._finalize / builds.cancel has been lost, and the failure mode is the next
+    build or deploy on that host answering 409.
+    """
     return hosts.get_host(db, host_id).lock is None
 
 
