@@ -128,12 +128,23 @@ one and the scans never flag their own fixtures.
 
 `ci/fixtures/as-reviewed-531a24c7.patch` restores `hosts.py`, `deploys.py` and `builds.py` to the
 reviewed code. It is the reviewer's own counterexample, and HPF-001 to HPF-004 and HPF-008 reject it.
-If those files change and the patch stops applying, regenerate it:
+
+If those files change and the patch stops applying, do **not** regenerate it with a whole-file
+`git diff HEAD 531a24c7 -- <files>`: those files have gained code the rest of the tree depends on
+(detached build launches and the pid column in `builds.py`, `powershell_command`/`powershell_argv`
+and `scp_argv(pull=)` in `hosts.py`), so a wholesale revert plants a tree that cannot even import,
+and the checks would report ERROR instead of the exit 1 the falsification needs. Re-plant the
+counterexample and re-emit the patch instead:
 
 ```sh
-git diff --no-color HEAD 531a24c7b698b97434048d9f37928f9419a272af -- \
-    src/s2docs/hosts.py src/s2docs/deploys.py src/s2docs/builds.py > ci/fixtures/as-reviewed-531a24c7.patch
+uv run python scripts/ci/refresh_as_reviewed.py
 ```
+
+It applies the current patch with fuzz, rewrites the blocks that drifted (keeping the newer
+constructs the counterexample does not target), re-emits the patch with today's context, and fails
+unless `git apply --check` then passes. Verify with
+`bash scripts/ci/run.sh falsify hermes-pr-feedback-ci HPF-001 HPF-002 HPF-003 HPF-004 HPF-008`:
+every `reject-as-reviewed` case must report HOLDS.
 
 Two fixtures depend on PyPI as of the snapshot (`[tool.uv] exclude-newer`). HPF-006
 `reject-floor-fails-suite` assumes fastapi 0.110.0 fails the suite, and `reject-floor-cannot-install`
