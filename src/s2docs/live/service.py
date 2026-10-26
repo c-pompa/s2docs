@@ -7,7 +7,7 @@ import re
 import secrets
 import sqlite3
 
-from s2docs import hosts
+from s2docs import deploys, hosts
 from s2docs import models as m
 from s2docs.db.connection import Database
 from s2docs.live import capabilities, recipes, spawnables
@@ -15,7 +15,15 @@ from s2docs.live.intent import IntentEnvelope
 from s2docs.live.netcon import NetconClient, NetconError
 
 SANDBOX = "hermes_sandbox"
-_POSE = re.compile(r"setpos (-?[\d.]+) (-?[\d.]+) (-?[\d.]+);setang (-?[\d.]+) (-?[\d.]+)")
+# The one file whose absence makes `spawn_group_load` kick the client and kill the server.
+SANDBOX_VPK = "maps/hermes_sandbox.vpk"
+# What "load the sandbox" sends: cheats on, the group streamed in, then the readback round trip.
+LOAD_LINES = ["sv_cheats 1", *recipes.SAFE_TEST_LINES, f"spawn_group_load {SANDBOX}", "sleep 3", "status", "hs_ping"]
+# `getpos_exact`, measured 2026-10-25 on pomps-pc (CS2 1.41.9.2/14192):
+#   setpos_exact -428.000000 -843.000000 95.296288;setang_exact 0.000000 133.500031 0.000000
+# That z is the FEET. Plain `getpos` prints the eye at 156.874420 for the same standing sample, so its line
+# is deliberately NOT matched here: a +61.58 offset is not the +64 the old recipe assumed.
+_POSE = re.compile(r"setpos_exact (-?[\d.]+) (-?[\d.]+) (-?[\d.]+);setang_exact (-?[\d.]+) (-?[\d.]+)")
 _SPAWNGROUP = re.compile(r"loaded spawngroup\(\s*\d+\)\s*:\s*SV:\s*\[\d+:\s*([A-Za-z0-9_]+)")
 # One `status` PLAYER ROW of a bot, fitted to S0 (cache/scratch/live/s0.out):
 # `  10      BOT    0    0     active      0 'Colin'` -- BOT is the 2nd column, the quoted name is last.
@@ -61,6 +69,19 @@ def _sandbox_live(client) -> bool:
     return "[hs] pong" in client.run(["hs_ping"], drain=0.8, settle=0.3)
 
 
+def parse_pose(text: str) -> recipes.Pose | None:
+    """The player's FEET and yaw from a `getpos_exact` reply, or None when the line is not there.
+
+    `getpos` must not be accepted: it reports the eye (z 156.87 against the feet's 95.30 in the measured
+    sample), and subtracting a guessed eye height put every console spawn ~2.4 units underground.
+    """
+    hit = _POSE.search(text)
+    if not hit:
+        return None
+    x, y, z, _pitch, yaw = (float(v) for v in hit.groups())
+    return recipes.Pose(x, y, z, yaw)
+
+
 def _check(expect: list[dict], reply: str, readback: str) -> tuple[bool, str]:
     """Bot/entity counts are judged on the readback round trip only; reply patterns on the action's own output."""
     for e in expect:
@@ -69,7 +90,24 @@ def _check(expect: list[dict], reply: str, readback: str) -> tuple[bool, str]:
             if n != e["total"]:
                 return False, f"expected {e['total']} bots in status, saw {n}"
         elif e["check"] == "reply" and not re.search(e["pattern"], reply):
-            return False, f"no console line matching {e['pattern']!r}"
+            # Say what the game actually answered: `[hs] error no human player` is the useful part of a
+            # failure, and it used to be buried in `readback` only.
+            said = next((ln.strip() for ln in reply.splitlines() if ln.strip().startswith("[hs]")), "")
+            wextra = f"; the console said: {said[:200]}" if said else ""
+            return False, f"no console line matching {e['pattern']!r}{wextra}"
+        elif e["check"] == "clear":
+            # Verified by the removal count when it is >= 1 (`Removed 3 chickens` / `[hs] cleared 4`);
+            # otherwise nothing was removed (or the line is absent), so the entity rows must be gone.
+            hit = re.search(e["count"], reply)
+            if hit and int(hit.group(1)) >= 1:
+                continue
+            classname = e.get("classname")
+            if not classname:
+                return False, f"no removal count line matching {e['count']!r}"
+            row = re.compile(rf"^\s*'{re.escape(classname)}'\s*:", re.M)
+            n = len(row.findall(readback))
+            if n != 0:
+                return False, f"ent_find still lists {n} {classname} after the clear"
         elif e["check"] == "ent_count":
             # Count ENTITY ROWS (`   'chicken' : '' (entindex 354)`, measured in S1), never the bare class name:
             # ent_find's header line `...containing substrings: "chicken"` contains it even when nothing exists.
@@ -81,10 +119,13 @@ def _check(expect: list[dict], reply: str, readback: str) -> tuple[bool, str]:
 
 
 def _readback_lines(expect: list[dict]) -> list[str]:
+    """The second round trip: player rows, and `ent_find` for anything judged by entity rows."""
     out = []
     if any(e["check"] == "bot_count" for e in expect):
         out += ["sleep 3", "status"]
-    out += [f"ent_find {e['classname']}" for e in expect if e["check"] == "ent_count"]
+    classes = [e["classname"] for e in expect
+               if e["check"] == "ent_count" or (e["check"] == "clear" and e.get("classname"))]
+    out += [f"ent_find {c}" for c in dict.fromkeys(classes)]  # one line per class, in order
     return out
 
 
@@ -110,10 +151,7 @@ def act(db: Database, host_id: str, env: IntentEnvelope, *, source: str, text: s
         sandbox = _sandbox_live(client)
         pose = None
         if recipes.needs_pose(env, stock, sandbox=sandbox):
-            hit = _POSE.search(client.run(["sv_cheats 1", "getpos"], drain=0.8))
-            if hit:
-                x, y, z, _pitch, yaw = (float(v) for v in hit.groups())
-                pose = recipes.Pose(x, y, z, yaw)
+            pose = parse_pose(client.run(["sv_cheats 1", "getpos_exact"], drain=0.8))
         plan = recipes.compile_plan(env, stock, sandbox=sandbox, pose=pose)
     except recipes.LiveUnavailable as exc:
         return _insert(db, host_id, source=source, text=text, env=env, lines=[], status="refused",
@@ -132,6 +170,38 @@ def act(db: Database, host_id: str, env: IntentEnvelope, *, source: str, text: s
     return _insert(db, host_id, source=source, text=text, env=env, lines=plan.lines, status=status,
                    detail="; ".join(plan.summary + plan.warnings + [why]),
                    readback=(reply + "\n--- readback ---\n" + readback), request_id=request_id)
+
+
+def load_sandbox(db: Database, host_id: str, deploy_id: str, *, client=None) -> dict:
+    """Stream the helper map onto the running game, from a verified deployment that carries its vpk.
+
+    The deployment is checked before a single line is sent: a missing `maps/hermes_sandbox.vpk` makes
+    `spawn_group_load` kick the client and kill the server. The verdict is the readback (`status`
+    spawngroups plus `[hs] pong`), never the fact that the lines went out.
+    """
+    _check_lease(db, host_id)
+    dep = deploys.get_deployment(db, deploy_id)
+    if dep.host_id != host_id:
+        raise LiveError(f"deployment {deploy_id} is on {dep.host_id}, not {host_id}")
+    if dep.status != "verified":
+        raise LiveError(f"deployment {deploy_id} is not verified ({dep.status}): push and verify it first")
+    if SANDBOX_VPK not in {e.path for e in dep.entries}:
+        raise LiveError(f"deployment {deploy_id} has no {SANDBOX_VPK}: a missing vpk makes "
+                        "spawn_group_load kick the client and kill the server")
+    client = client or client_for(db, host_id)
+    try:
+        reply = client.run(LOAD_LINES, drain=0.8, settle=0.3)
+    except NetconError as exc:
+        raise LiveError(str(exc)) from exc
+    groups = _SPAWNGROUP.findall(reply)
+    if SANDBOX in groups and "[hs] pong" in reply:
+        status, detail = "verified", f"spawngroup {SANDBOX} loaded and [hs] pong answered"
+    elif SANDBOX not in groups:
+        status, detail = "failed", f"{SANDBOX} is not in the loaded spawngroups ({', '.join(groups) or 'none'})"
+    else:
+        status, detail = "failed", f"spawngroup {SANDBOX} loaded but no [hs] pong (the script did not run)"
+    return {"host_id": host_id, "deploy_id": dep.id, "status": status, "detail": detail,
+            "spawngroups": groups, "lines": list(LOAD_LINES), "readback": reply[-READBACK_MAX:]}
 
 
 def plan_only(env: IntentEnvelope, *, sandbox: bool = True) -> dict:

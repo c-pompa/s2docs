@@ -67,6 +67,12 @@ WRITES_WORKSPACE = ToolAnnotations(read_only_hint=False, destructive_hint=False,
 
 def create_mcp_server(db: Database, workspace: Path | None = None) -> MCPServer:
     workspace = workspace or get_settings().workspace_dir
+    # A run started before this process existed must not stay 'running' forever. A build is launched
+    # detached, so it may still be compiling: recover asks the OS about the recorded pid instead of
+    # assuming that this process's missing watcher means the run died. Guarded like the app lifespan —
+    # a probe against a missing db must not create one.
+    if db.path.exists():
+        builds.recover(db)
     server = MCPServer(name="s2docs", title="Source 2 Docs", instructions=INSTRUCTIONS, version="0.1.0")
 
     def run(fn: Callable[[Repository], T]) -> T:
@@ -100,6 +106,20 @@ def create_mcp_server(db: Database, workspace: Path | None = None) -> MCPServer:
         Compare it against the other server's `GET /api/health` before writing so two servers pointed
         at different data dirs (a split store) are caught instead of silently diverging."""
         return m.ServerInfo(**server_identity())
+
+    @server.tool(annotations=READ_ONLY)
+    def surfaces_list() -> dict:
+        """Which named operations exist and which surfaces expose them (CLI, HTTP API, MCP).
+
+        Read-only inventory: the declarative table in `s2docs.surfaces`, each row naming the domain
+        function behind the operation and the exact handle on every surface, plus `mismatches` — the
+        rows where that table and the shipped code disagree. An empty list is the server's claim that
+        a capability is reachable exactly where the table says. Use it before telling a user that
+        something cannot be done here: a `missing` row names a declared door that has no code, an
+        `undeclared` row a capability that leaked onto a surface nobody documented."""
+        from s2docs import surfaces
+
+        return surfaces.report()
 
     @server.tool(annotations=READ_ONLY)
     def search_docs(

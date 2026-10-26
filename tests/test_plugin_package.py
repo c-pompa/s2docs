@@ -99,23 +99,24 @@ def _registered_tool_names() -> set[str]:
 
 
 def test_tool_table_covers_every_registered_tool():
-    """A table naming a tool the server does not have is a lie the model acts on.
+    """The table and the registry must name exactly the same tools, in both directions.
 
-    The failure mode this must catch is a rename or a removal: the agent calls a tool from the table
-    and gets "unknown tool". A tool that exists in un-released source but is not yet in the table is
-    the normal state between a code commit and its pin bump (the table describes the PINNED server),
-    so additions are allowed here and fixed by the release step, not by this test.
+    A table naming a tool the server does not have is a lie the model acts on (it calls the tool and
+    gets "unknown tool"), and a tool the server ships but the table never names is the same lie
+    upside down: the agent cannot find a capability that exists, which is how the MCP surface fell
+    five tools behind the CLI without anyone noticing. So this is equality, not a subset — when a
+    tool is added or renamed, `tools.md` moves in the same commit. Regenerate it with
+    `uv run python scripts/plugin_tools_md.py`; never hand-edit it, it is a capture of a live
+    `tools/list`.
     """
     documented = set(re.findall(r"^\| `([a-z0-9_]+)` \|", TABLE.read_text(encoding="utf-8"), re.MULTILINE))
     registered = _registered_tool_names()
     assert registered, "no tools found in mcp_server.py — the AST scan is broken, not the server"
-    assert not (documented - registered), (
-        f"tools.md documents tools that do not exist: {sorted(documented - registered)}"
-        " — regenerate with `python scripts/plugin_tools_md.py`"
-    )
-    unreleased = sorted(registered - documented)
-    assert not any(name in TABLE.read_text(encoding="utf-8") for name in unreleased if len(name) > 3), (
-        "a tool is mentioned in the table without a row"
+    assert documented == registered, (
+        "tools.md and mcp_server.py disagree — "
+        f"shipped but undocumented: {sorted(registered - documented)}; "
+        f"documented but not registered: {sorted(documented - registered)}. "
+        "Regenerate with `uv run python scripts/plugin_tools_md.py`"
     )
 
 

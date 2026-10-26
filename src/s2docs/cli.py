@@ -14,7 +14,7 @@ import time
 from pathlib import Path
 
 from s2docs.config import GAMES, get_game, get_settings
-from s2docs.db.connection import Database
+from s2docs.db.connection import Database, DatabaseNotInitialized, schema_version
 
 # Stable exit-code contract (docs/CLI_PLAN.md §2). 2 = locked matches the Phase 1 host commands.
 EXIT_OK = 0
@@ -86,9 +86,60 @@ def _emit(args: argparse.Namespace, payload: dict, human: list[str]) -> int:
     return EXIT_OK
 
 
+def _table(header: tuple[str, ...], rows: list[tuple[str, ...]]) -> list[str]:
+    """Columns padded to the widest cell with a two-space gutter — the layout `_human_job` hand-rolls inline."""
+    widths = [max(len(line[i]) for line in (header, *rows)) for i in range(len(header))]
+    return ["  ".join(cell.ljust(w) for cell, w in zip(line, widths, strict=True)).rstrip() for line in (header, *rows)]
+
+
+def _cmd_sync_check(args: argparse.Namespace) -> int:
+    """`sync --check`: is the index older than the checkout it describes? Read-only, never rewrites.
+
+    Compares the recorded build per game (`builds.source_commit`, `builds.ingested_at`) with the
+    checkout under data/sources (see ingest/hygiene.py), so it opens the store with the read-only
+    `Database.reader()` and is safe to run against the database a live server is serving.
+
+    With --fail-if-stale the exit is 6 (EXIT_PARTIAL): the report itself succeeded, so 1 (EXIT_ERROR)
+    would claim the check broke, and 3 (EXIT_NOT_FOUND) would claim a record is missing. A non-current
+    game is also named on stderr, so the JSON on stdout stays a clean single object.
+    """
+    from s2docs.ingest.hygiene import check_index
+
+    settings = get_settings()
+    games = [get_game(args.game)] if args.game else None
+    try:
+        with Database(settings.db_path).reader() as conn:
+            report = check_index(conn, sources_dir=settings.sources_dir, games=games)
+            version = schema_version(conn)
+    except DatabaseNotInitialized as exc:
+        return _fail(str(exc), EXIT_ERROR)
+
+    rows = [
+        (
+            g.game,
+            str(g.build_number) if g.build_number is not None else "-",
+            g.patch_version or "-",
+            g.ingested_at or "-",
+            g.verdict,
+        )
+        for g in report.games
+    ]
+    header = ("game", "build", "patch", "indexed", "verdict")
+    lines = [f"index: {settings.db_path}  schema v{version}", *_table(header, rows)]
+    lines += [f"  {g.game}: {g.detail}" for g in report.stale_games]
+    _emit(args, {"db": str(settings.db_path), "schema_version": version, **report.as_dict()}, lines)
+    if report.all_current:
+        return EXIT_OK
+    print(f"STALE: {', '.join(g.game for g in report.stale_games)} — run `s2docs sync`", file=sys.stderr)
+    return EXIT_PARTIAL if args.fail_if_stale else EXIT_OK
+
+
 def _cmd_sync(args: argparse.Namespace) -> int:
     from s2docs.ingest.loader import load_build
     from s2docs.ingest.sources import sync_source
+
+    if args.check:
+        return _cmd_sync_check(args)
 
     settings = get_settings()
     db = Database(settings.db_path)
@@ -164,6 +215,44 @@ def _cmd_stats(_: argparse.Namespace) -> int:
     with Database(get_settings().db_path).reader() as conn:
         print(Repository(conn).stats().model_dump_json(indent=2))
     return 0
+
+
+def _cmd_surfaces(args: argparse.Namespace) -> int:
+    """`s2docs surfaces`: which operations exist, and which surface (CLI, API, MCP) exposes each.
+
+    Read-only and database-free: it prints the declarative table in `s2docs.surfaces` plus whatever
+    that module's verifier found against the parser, the FastAPI app and the MCP tool registry.
+    `--gaps` prints only the disagreements and exits 1 when there is one, so CI can gate on it; the
+    same verdict is the `surfaces_list` MCP tool, for a session that only speaks MCP.
+    """
+    from s2docs import surfaces
+
+    mismatches = surfaces.verify()
+    if args.gaps:
+        if getattr(args, "json", False):
+            print(json.dumps({"schema": "s2docs/v1", "gaps": [m.as_dict() for m in mismatches]}))
+        elif mismatches:
+            for m in mismatches:
+                print(f"{m.operation:24} {m.surface:5} {m.kind:10} {m.detail}")
+            print(f"{len(mismatches)} gap(s): the declared table and the code disagree")
+        else:
+            print("no gaps: every declared surface exists and no undeclared surface exposes an operation")
+        return EXIT_ERROR if mismatches else EXIT_OK
+    if getattr(args, "json", False):
+        print(json.dumps({
+            "schema": "s2docs/v1",
+            "operations": [op.as_dict() for op in surfaces.OPERATIONS],
+            "mismatches": [m.as_dict() for m in mismatches],
+        }))
+        return EXIT_OK
+    width = max(len(op.id) for op in surfaces.OPERATIONS) + 2
+    print(f"{'operation':{width}} {'surfaces':18} {'cli':26} {'api':44} mcp")
+    for op in surfaces.OPERATIONS:
+        exposed = ",".join(s for s in surfaces.SURFACES if s in op.surfaces)
+        api = f"{op.api[0]} {op.api[1]}" if op.api else "-"
+        print(f"{op.id:{width}} {exposed:18} {' '.join(op.cli) or '-':26} {api:44} {op.mcp or '-'}")
+    print(f"\n{len(surfaces.OPERATIONS)} operations, {len(mismatches)} mismatch(es); `s2docs surfaces --gaps`")
+    return EXIT_OK
 
 
 def _cmd_review(args: argparse.Namespace) -> int:
@@ -320,7 +409,8 @@ def _emit_chain(args: argparse.Namespace, job) -> int:
 
 
 def _cmd_pipeline(args: argparse.Namespace) -> int:
-    """`s2docs pipeline run`: the chain as one job — asset+build real, concept/mesh stubbed, deploy/ingame blocked."""
+    """`s2docs pipeline run`: the chain as one job — asset+build real, deploy real with --dest,
+    concept/mesh stubbed, ingame blocked."""
     from s2docs import pipeline
 
     db = Database(get_settings().db_path)
@@ -335,6 +425,7 @@ def _cmd_pipeline(args: argparse.Namespace) -> int:
         project_id=args.project,
         build_command=args.build_command,
         build_timeout_sec=args.build_timeout,
+        dest=args.dest,
     )
     return _emit_chain(args, job)
 
@@ -538,6 +629,15 @@ def _cmd_build(args: argparse.Namespace) -> int:
         if args.build_cmd == "cancel":
             run = builds.cancel(db, args.run_id)
             return _emit(args, {"run": run.model_dump()}, _human_run(run))
+        if args.build_cmd == "recover":
+            interrupted = builds.recover(db)
+            if not interrupted:
+                return _emit(args, {"interrupted": []}, ["no stale build runs: nothing to recover"])
+            return _emit(
+                args,
+                {"interrupted": interrupted},
+                [f"interrupted {len(interrupted)} build run(s): {', '.join(interrupted)}"],
+            )
         if args.build_cmd == "list":
             runs = builds.list_runs(db, host_id=args.host, active=args.active)
             human = [f"{r.id}  {r.host_id}  {r.status:9}  {r.kind}  {r.summary}" for r in runs] or ["no runs"]
@@ -1123,7 +1223,13 @@ def _cmd_live(args: argparse.Namespace) -> int:
     return _fail(f"unknown live command {args.live_cmd!r}", EXIT_ERROR)
 
 
-def main(argv: list[str] | None = None) -> int:
+def build_parser() -> argparse.ArgumentParser:
+    """Build the whole command parser.
+
+    Kept separate from `main()` so the command tree is introspectable: `s2docs.surfaces` walks the
+    returned parser to prove that a declared CLI handle really is a command — and that a capability
+    it calls API/MCP-only has not quietly grown a CLI door.
+    """
     parser = argparse.ArgumentParser(prog="s2docs", description="Source 2 docs index, API and MCP server")
     parser.add_argument("-v", "--verbose", action="store_true")
     parser.add_argument(
@@ -1139,6 +1245,16 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--keep", type=int, default=5, help="Builds to keep per game (for diffs)")
     p.add_argument("--skip-docs", action="store_true", help="Don't refresh community docs (source2.wiki)")
     p.add_argument("--docs-only", action="store_true", help="Only refresh community docs")
+    p.add_argument(
+        "--check",
+        action="store_true",
+        help="Read-only staleness report: is the index older than the checkout it was built from?",
+    )
+    p.add_argument(
+        "--fail-if-stale",
+        action="store_true",
+        help="With --check: exit 6 when any game is not current (a cron/CI gate)",
+    )
     p.set_defaults(fn=_cmd_sync)
 
     p = sub.add_parser("load", help="Load a local GameTracking checkout")
@@ -1159,6 +1275,13 @@ def main(argv: list[str] | None = None) -> int:
     p.set_defaults(fn=_cmd_mcp)
 
     sub.add_parser("stats", help="Show indexed counts").set_defaults(fn=_cmd_stats)
+
+    p = sub.add_parser("surfaces", help="Which named operations exist, and where (CLI/API/MCP) each is exposed")
+    p.add_argument("--gaps", action="store_true",
+                   help="Only disagreements between the declared table and the code; exits 1 when any")
+    # SUPPRESS so `s2docs --json surfaces` (the global flag) is not reset to False by this default.
+    p.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="Machine-readable output")
+    p.set_defaults(fn=_cmd_surfaces)
 
     p = sub.add_parser("validate-script", help="Type-check a cs_script .js against point_script.d.ts")
     p.add_argument("file")
@@ -1212,6 +1335,11 @@ def main(argv: list[str] | None = None) -> int:
     q.add_argument("--color", help="baked colour .png (its _normal/_ao siblings wire automatically)")
     q.add_argument("--build-command", help="host-side compile line; omit to record the build as not attempted")
     q.add_argument("--build-timeout", type=int, default=300, help="seconds to wait for the build")
+    q.add_argument(
+        "--dest",
+        help="Remote destination root; with a successful build the addon content is pushed and "
+        "MD5-verified there (omit to record deploy as skipped)",
+    )
     q.add_argument("--project", help="ledger project id to attach the chain to")
     q.set_defaults(fn=_cmd_pipeline)
 
@@ -1299,6 +1427,10 @@ def main(argv: list[str] | None = None) -> int:
     q.add_argument("--strict-materials", action="store_true", help="Exit 8 when the material guard flagged warnings")
     q = bc.add_parser("cancel", help="Cancel a run and release its host lease")
     q.add_argument("run_id")
+    bc.add_parser(
+        "recover",
+        help="Interrupt runs whose owning process is gone (asks the OS; safe to re-run)",
+    )
     q = bc.add_parser("list", help="List runs (newest first)")
     q.add_argument("--host")
     q.add_argument("--active", action="store_true", help="Only queued/running runs")
@@ -1533,7 +1665,15 @@ def main(argv: list[str] | None = None) -> int:
     q.add_argument("--evidence", required=True, help="The readback/answer/artifact that proves it")
     p.set_defaults(fn=_cmd_live)
 
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
     args = parser.parse_args(argv)
+    if getattr(args, "fail_if_stale", False) and not getattr(args, "check", False):
+        # Usage error (argparse's own code 2, docs/CLI_PLAN.md §2): a gate flag on its own would do nothing.
+        parser.error("--fail-if-stale requires --check")
     # stdout is the MCP stdio channel: logs must go to stderr.
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.INFO,

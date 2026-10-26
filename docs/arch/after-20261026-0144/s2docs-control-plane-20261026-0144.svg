@@ -1,0 +1,135 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1500" height="2096" viewBox="0 0 1500 2096" font-family="ui-sans-serif,-apple-system,Segoe UI,Helvetica,Arial">
+<rect width="1500" height="2096" fill="#ffffff"/>
+<text x="26" y="52" font-size="30" font-weight="700" fill="#1f2328">s2docs · B — control plane: what happens when it runs something</text>
+<text x="26" y="80" font-size="17" fill="#57606a">AFTER the seam pass · commit 0dc6cbf · surfaces registry · durable builds · atomic status+lease · read-only staleness check · deploy real</text>
+<text x="26" y="104" font-size="15" fill="#57606a">boxes = real modules · arrows = the direction data or control actually flows</text>
+<rect x="13.0" y="132" width="1474" height="105" rx="16" fill="#eef6ff" stroke="#d8dee4"/>
+<text x="26" y="162" font-size="18" font-weight="700" fill="#57606a" letter-spacing="0.6">1 · WHO ASKS</text>
+<rect x="13.0" y="323" width="1474" height="130" rx="16" fill="#fdeef2" stroke="#d8dee4"/>
+<text x="26" y="353" font-size="18" font-weight="700" fill="#57606a" letter-spacing="0.6">2 · ANY SURFACE — 78 CLI commands · 97 routes · 82 MCP tools</text>
+<rect x="13.0" y="539" width="1474" height="155" rx="16" fill="#eaf4f8" stroke="#d8dee4"/>
+<text x="26" y="569" font-size="18" font-weight="700" fill="#57606a" letter-spacing="0.6">3 · RECORD AND QUEUE — in-process</text>
+<rect x="13.0" y="780" width="1474" height="180" rx="16" fill="#eaf4f8" stroke="#d8dee4"/>
+<text x="26" y="810" font-size="18" font-weight="700" fill="#57606a" letter-spacing="0.6">4 · EXECUTE ON A HOST — in-process, inside whichever surface started it</text>
+<rect x="13.0" y="1046" width="1474" height="155" rx="16" fill="#e9f7f1" stroke="#d8dee4"/>
+<text x="26" y="1076" font-size="18" font-weight="700" fill="#57606a" letter-spacing="0.6">5 · LIVE — drive a running game</text>
+<rect x="13.0" y="1287" width="1474" height="105" rx="16" fill="#fff6e5" stroke="#d8dee4"/>
+<text x="26" y="1317" font-size="18" font-weight="700" fill="#57606a" letter-spacing="0.6">6 · STATE + FAR SIDE</text>
+<rect x="13.0" y="1478" width="1474" height="130" rx="16" fill="#e8f5ec" stroke="#d8dee4"/>
+<text x="26" y="1508" font-size="18" font-weight="700" fill="#57606a" letter-spacing="0.6">7 · COMPILER</text>
+<rect x="13.0" y="1694" width="1474" height="155" rx="16" fill="#f3eefc" stroke="#d8dee4"/>
+<text x="26" y="1724" font-size="18" font-weight="700" fill="#57606a" letter-spacing="0.6">8 · GAME</text>
+<rect x="13.0" y="1935" width="1474" height="105" rx="16" fill="#fdeef2" stroke="#d8dee4"/>
+<text x="26" y="1965" font-size="18" font-weight="700" fill="#57606a" letter-spacing="0.6">9 · VERDICT</text>
+<path d="M750,223 C750,293 750,293 750,363" fill="none" stroke="#8c959f" stroke-width="2.2"/>
+<polygon points="750,363 743,352 757,352" fill="#8c959f"/>
+<path d="M750,439 C750,509 404,509 404,579" fill="none" stroke="#8c959f" stroke-width="2.2"/>
+<polygon points="404,579 396,568 410,568" fill="#8c959f"/>
+<path d="M750,439 C750,509 756,509 756,579" fill="none" stroke="#8c959f" stroke-width="2.2"/>
+<polygon points="756,579 748,568 762,568" fill="#8c959f"/>
+<path d="M750,439 C750,630 420,630 420,820" fill="none" stroke="#8c959f" stroke-width="2.2"/>
+<polygon points="420,820 413,809 427,809" fill="#8c959f"/>
+<path d="M750,439 C750,630 739,630 739,820" fill="none" stroke="#8c959f" stroke-width="2.2"/>
+<polygon points="739,820 732,809 746,809" fill="#8c959f"/>
+<path d="M750,439 C750,630 1069,630 1069,820" fill="none" stroke="#8c959f" stroke-width="2.2"/>
+<polygon points="1069,820 1062,809 1076,809" fill="#8c959f"/>
+<path d="M750,439 C750,762 442,762 442,1086" fill="none" stroke="#8c959f" stroke-width="2.2"/>
+<polygon points="442,1086 435,1075 449,1075" fill="#8c959f"/>
+<path d="M404,680 C404,1004 633,1004 633,1327" fill="none" stroke="#8c959f" stroke-width="2.2"/>
+<polygon points="633,1327 626,1316 640,1316" fill="#8c959f"/>
+<path d="M756,630 C756,978 633,978 633,1327" fill="none" stroke="#8c959f" stroke-width="2.2"/>
+<polygon points="633,1327 626,1316 640,1316" fill="#8c959f"/>
+<path d="M1102,680 C1102,1004 633,1004 633,1327" fill="none" stroke="#8c959f" stroke-width="2.2"/>
+<polygon points="633,1327 626,1316 640,1316" fill="#8c959f"/>
+<path d="M420,896 C420,1112 633,1112 633,1327" fill="none" stroke="#8c959f" stroke-width="2.2"/>
+<polygon points="633,1327 626,1316 640,1316" fill="#8c959f"/>
+<path d="M739,946 C739,1136 633,1136 633,1327" fill="none" stroke="#8c959f" stroke-width="2.2"/>
+<polygon points="633,1327 626,1316 640,1316" fill="#8c959f"/>
+<path d="M1069,896 C1069,1112 633,1112 633,1327" fill="none" stroke="#8c959f" stroke-width="2.2"/>
+<polygon points="633,1327 626,1316 640,1316" fill="#8c959f"/>
+<path d="M442,1187 C442,1257 633,1257 633,1327" fill="none" stroke="#8c959f" stroke-width="2.2"/>
+<polygon points="633,1327 626,1316 640,1316" fill="#8c959f"/>
+<path d="M750,439 C750,509 1102,509 1102,579" fill="none" stroke="#8c959f" stroke-width="2.2"/>
+<polygon points="1102,579 1095,568 1109,568" fill="#8c959f"/>
+<path d="M420,896 C420,1112 932,1112 932,1327" fill="none" stroke="#8c959f" stroke-width="2.2"/>
+<polygon points="932,1327 924,1316 938,1316" fill="#8c959f"/>
+<rect x="629.75" y="1098.5" width="92" height="24" rx="6" fill="#ffffff"/>
+<text x="675.75" y="1115.5" font-size="15" fill="#57606a" text-anchor="middle">ssh</text>
+<path d="M739,946 C739,1136 932,1136 932,1327" fill="none" stroke="#8c959f" stroke-width="2.2"/>
+<polygon points="932,1327 924,1316 938,1316" fill="#8c959f"/>
+<rect x="789.25" y="1123.5" width="92" height="24" rx="6" fill="#ffffff"/>
+<text x="835.25" y="1140.5" font-size="15" fill="#57606a" text-anchor="middle">ssh</text>
+<path d="M1069,896 C1069,1112 932,1112 932,1327" fill="none" stroke="#8c959f" stroke-width="2.2"/>
+<polygon points="932,1327 924,1316 938,1316" fill="#8c959f"/>
+<rect x="954.25" y="1098.5" width="92" height="24" rx="6" fill="#ffffff"/>
+<text x="1000.25" y="1115.5" font-size="15" fill="#57606a" text-anchor="middle">scp</text>
+<path d="M442,1187 C442,1136 756,1136 756,1086" fill="none" stroke="#8c959f" stroke-width="2.2"/>
+<polygon points="756,1086 748,1097 762,1097" fill="#8c959f"/>
+<path d="M1064,1162 C1064,1124 442,1124 442,1086" fill="none" stroke="#8c959f" stroke-width="2.2"/>
+<polygon points="442,1086 435,1097 449,1097" fill="#8c959f"/>
+<rect x="706.75" y="1111.0" width="92" height="24" rx="6" fill="#ffffff"/>
+<text x="752.75" y="1128.0" font-size="15" fill="#57606a" text-anchor="middle">gate</text>
+<path d="M756,1162 C756,1448 750,1448 750,1734" fill="none" stroke="#8c959f" stroke-width="2.2"/>
+<polygon points="750,1734 743,1723 757,1723" fill="#8c959f"/>
+<rect x="706.75" y="1435.0" width="92" height="24" rx="6" fill="#ffffff"/>
+<text x="752.75" y="1452.0" font-size="15" fill="#57606a" text-anchor="middle">netcon</text>
+<path d="M932,1378 C932,1448 750,1448 750,1518" fill="none" stroke="#8c959f" stroke-width="2.2"/>
+<polygon points="750,1518 743,1507 757,1507" fill="#8c959f"/>
+<path d="M750,1594 C750,1664 750,1664 750,1734" fill="none" stroke="#8c959f" stroke-width="2.2"/>
+<polygon points="750,1734 743,1723 757,1723" fill="#8c959f"/>
+<path d="M750,1835 C750,1905 750,1905 750,1975" fill="none" stroke="#8c959f" stroke-width="2.2"/>
+<polygon points="750,1975 743,1964 757,1964" fill="#8c959f"/>
+<path d="M750,1975 C750,1328 404,1328 404,680" fill="none" stroke="#8c959f" stroke-width="2.2"/>
+<polygon points="404,680 396,691 410,691" fill="#8c959f"/>
+<path d="M750,1975 C750,1676 633,1676 633,1378" fill="none" stroke="#8c959f" stroke-width="2.2"/>
+<polygon points="633,1378 626,1389 640,1389" fill="#8c959f"/>
+<rect x="655" y="172" width="190" height="51" rx="11" fill="#ffffff" stroke="#57606a" stroke-width="2"/>
+<text x="750" y="204" font-size="19" fill="#1f2328" text-anchor="middle">User or agent</text>
+<rect x="607" y="363" width="286" height="76" rx="11" fill="#ffffff" stroke="#57606a" stroke-width="2"/>
+<text x="750" y="395" font-size="19" fill="#1f2328" text-anchor="middle">CLI · HTTP :8812 · MCP</text>
+<text x="750" y="420" font-size="19" fill="#1f2328" text-anchor="middle">tool</text>
+<rect x="250" y="579" width="308" height="101" rx="11" fill="#ffffff" stroke="#57606a" stroke-width="2"/>
+<text x="404" y="610" font-size="19" fill="#1f2328" text-anchor="middle">jobs.py — queue, events,</text>
+<text x="404" y="636" font-size="19" fill="#1f2328" text-anchor="middle">human-confirm verdict</text>
+<text x="404" y="662" font-size="19" fill="#1f2328" text-anchor="middle">windows</text>
+<rect x="602" y="579" width="308" height="51" rx="11" fill="#ffffff" stroke="#57606a" stroke-width="2"/>
+<text x="756" y="611" font-size="19" fill="#1f2328" text-anchor="middle">projects / steps + gates</text>
+<rect x="954" y="579" width="297" height="101" rx="11" fill="#ffffff" stroke="#57606a" stroke-width="2"/>
+<text x="1102" y="610" font-size="19" fill="#1f2328" text-anchor="middle">builds.recover() at</text>
+<text x="1102" y="636" font-size="19" fill="#1f2328" text-anchor="middle">startup — asks the OS</text>
+<text x="1102" y="662" font-size="19" fill="#1f2328" text-anchor="middle">about every running pid</text>
+<rect x="288" y="820" width="264" height="76" rx="11" fill="#ffffff" stroke="#57606a" stroke-width="2"/>
+<text x="420" y="852" font-size="19" fill="#1f2328" text-anchor="middle">hosts.py — registry,</text>
+<text x="420" y="877" font-size="19" fill="#1f2328" text-anchor="middle">lease, heartbeat</text>
+<rect x="596" y="820" width="286" height="126" rx="11" fill="#ffffff" stroke="#57606a" stroke-width="2"/>
+<text x="739" y="851" font-size="19" fill="#1f2328" text-anchor="middle">builds.py — detached</text>
+<text x="739" y="877" font-size="19" fill="#1f2328" text-anchor="middle">launch, pid persisted,</text>
+<text x="739" y="902" font-size="19" fill="#1f2328" text-anchor="middle">status+lease in one</text>
+<text x="739" y="928" font-size="19" fill="#1f2328" text-anchor="middle">transaction</text>
+<rect x="926" y="820" width="286" height="76" rx="11" fill="#ffffff" stroke="#57606a" stroke-width="2"/>
+<text x="1069" y="852" font-size="19" fill="#1f2328" text-anchor="middle">deploys.py — scp + MD5</text>
+<text x="1069" y="877" font-size="19" fill="#1f2328" text-anchor="middle">readback</text>
+<rect x="282" y="1086" width="319" height="101" rx="11" fill="#ffffff" stroke="#57606a" stroke-width="2"/>
+<text x="442" y="1117" font-size="19" fill="#1f2328" text-anchor="middle">live/service.py — act() /</text>
+<text x="442" y="1143" font-size="19" fill="#1f2328" text-anchor="middle">status(), the one entry</text>
+<text x="442" y="1169" font-size="19" fill="#1f2328" text-anchor="middle">all three surfaces call</text>
+<rect x="646" y="1086" width="220" height="76" rx="11" fill="#ffffff" stroke="#57606a" stroke-width="2"/>
+<text x="756" y="1118" font-size="19" fill="#1f2328" text-anchor="middle">live/netcon.py +</text>
+<text x="756" y="1143" font-size="19" fill="#1f2328" text-anchor="middle">live/launch.py</text>
+<rect x="910" y="1086" width="308" height="76" rx="11" fill="#ffffff" stroke="#57606a" stroke-width="2"/>
+<text x="1064" y="1118" font-size="19" fill="#1f2328" text-anchor="middle">live/capabilities.py —</text>
+<text x="1064" y="1143" font-size="19" fill="#1f2328" text-anchor="middle">per-CS2-build proof gate</text>
+<rect x="474" y="1327" width="319" height="51" rx="11" fill="#ffffff" stroke="#57606a" stroke-width="2"/>
+<text x="633" y="1359" font-size="19" fill="#1f2328" text-anchor="middle">SQLite DB — the same file</text>
+<rect x="836" y="1327" width="190" height="51" rx="11" fill="#ffffff" stroke="#57606a" stroke-width="2"/>
+<text x="932" y="1359" font-size="19" fill="#1f2328" text-anchor="middle">Windows host</text>
+<rect x="607" y="1518" width="286" height="76" rx="11" fill="#ffffff" stroke="#57606a" stroke-width="2"/>
+<text x="750" y="1550" font-size="19" fill="#1f2328" text-anchor="middle">resourcecompiler →</text>
+<text x="750" y="1575" font-size="19" fill="#1f2328" text-anchor="middle">.vmdl_c, .vmat_c, .vpk</text>
+<rect x="590" y="1734" width="319" height="101" rx="11" fill="#ffffff" stroke="#57606a" stroke-width="2"/>
+<text x="750" y="1765" font-size="19" fill="#1f2328" text-anchor="middle">CS2 — netcon, interactive</text>
+<text x="750" y="1791" font-size="19" fill="#1f2328" text-anchor="middle">scheduled task, in-game</text>
+<text x="750" y="1817" font-size="19" fill="#1f2328" text-anchor="middle">frame</text>
+<rect x="607" y="1975" width="286" height="51" rx="11" fill="#ffffff" stroke="#57606a" stroke-width="2"/>
+<text x="750" y="2007" font-size="19" fill="#1f2328" text-anchor="middle">verdict + evidence row</text>
+</svg>

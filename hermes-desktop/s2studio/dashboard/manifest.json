@@ -1,0 +1,10 @@
+{
+  "name": "s2studio",
+  "label": "Source 2 Studio",
+  "description": "Catalog, test runs and live CS2 actions from s2docs",
+  "icon": "Box",
+  "version": "0.1.0",
+  "tab": { "path": "/s2studio", "hidden": true },
+  "entry": "dist/index.js",
+  "api": "plugin_api.py"
+}

@@ -1,0 +1,14 @@
+{
+  "suffix": "20261026-0144",
+  "commit": "0dc6cbf",
+  "counts": {
+    "routes": "97",
+    "commands": "78",
+    "tools": "82",
+    "migrations": "17"
+  },
+  "files": [
+    "docs/arch/after-20261026-0144/s2docs-data-plane-20261026-0144.svg",
+    "docs/arch/after-20261026-0144/s2docs-control-plane-20261026-0144.svg"
+  ]
+}

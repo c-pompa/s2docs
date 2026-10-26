@@ -246,7 +246,10 @@ host lease that does not exist — so the CLI remaps gate `2` to **6** (`EXIT_PA
   `uv sync && .venv/bin/s2docs ...` (or `uv tool install .`) as the hot path; `uv run` is fine for
   one-offs. CI should install once and call the entry point directly.
 - **Long-running builds are server-owned, not CLI-owned.** `build start` is a thin client: the
-  run record (id, host, status, log location, exit) lives in the DB/serve process. `--wait` and
+  run record (id, host, status, log location, exit) lives in the DB/serve process. The child is
+  launched detached (own session / process group) and its pid recorded, so a `serve` restart no
+  longer decides a running compile's fate; `build recover` (also run at `serve`/`mcp` startup) asks
+  the OS about every still-running pid and finalizes the ones whose owner is gone. `--wait` and
   `build wait <id>` block with backoff server-side; `build log --follow` streams. There is no
   hand-rolled `sleep`-poll anymore — the failure that motivated this plan (50-min compiles babysat
   by polling scripts).
@@ -322,9 +325,10 @@ Matches the parallel service work; each phase ships service → MCP tool → CLI
 2. **Native MCP registration.** Register s2docs (`stdio: s2docs mcp` and `http: /mcp`) as a Hermes
    MCP server; verify subagents inherit the toolset. Harden + deprecate the HTTP client (§5).
 3. **Build + deploy tools.** *(implemented)* `builds.py` / `deploys.py` writing run records
-   (migration `0005`); `build start|status|log|wait|cancel|list`; `deploy push|verify|list` incl.
-   `--manifest`/`--parallel`; build runs acquire the host lease server-side, deploys verify MD5s
-   server-side. Retired `sleep`-poll babysitting.
+   (migration `0005`); `build start|status|log|wait|cancel|recover|list`; `deploy push|verify|list`
+   incl. `--manifest`/`--parallel`; build runs acquire the host lease server-side, deploys verify MD5s
+   server-side. Retired `sleep`-poll babysitting. Migration `0017` adds `build_runs.pid`, so a run
+   outlives the process that launched it (detached child) and `recover` can ask the OS about it.
 4. **Evidence records.** *(implemented)* `Evidence` model + store (migration `0006`); `evidence
    add|list|show`; the `evidence` gate now reads structured records (linked to project/step, with
    artifact hashes) instead of transcription notes — notes alone no longer pass.

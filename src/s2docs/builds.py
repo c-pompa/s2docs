@@ -17,10 +17,14 @@ Design notes (the plan left these to the build service):
   caller supplies the command; making it detach/hide on the host ("hidden-launch") is the caller's
   concern, so nothing here hardcodes a scheduler. The server holds the ssh for the run's duration
   and tees its output to `log_path`.
-- **Who owns the run.** `start` runs the process in the calling process (the long-lived `s2docs
-  serve`, or a CLI that stays alive, e.g. with `--wait`). The run record is in SQLite, so readers
-  in *other* processes see the same state; a `cancel` from any process flips the record to
-  `cancelled`, which the watcher notices and acts on.
+- **Who owns the run.** `start` launches the command in its own session (POSIX) or process group
+  (Windows) and records its pid, so the run survives the death of whatever process launched it — the
+  CLI, `s2docs mcp`, or `s2docs serve`. The run record in SQLite is the authority: readers in *other*
+  processes see the same state, and a `cancel` from any process flips the record, which the watcher
+  notices and acts on. The module-level `_RUNNERS` map is only a fast path for a cancel issued in the
+  same process; it is never evidence that a run is alive. A process that starts up later calls
+  `recover`, which asks the OS about every still-'running' run's pid instead of guessing from its own
+  memory (`reconcile_orphans` is the old, this-process-only rule and is superseded by it).
 - **UTF-16 logs.** resourcecompiler writes its log as UTF-16 (with or without a BOM). `_read_log`
   detects the encoding instead of assuming UTF-8 — naive probes broke the log twice.
 """
@@ -28,7 +32,9 @@ Design notes (the plan left these to the build service):
 from __future__ import annotations
 
 import contextlib
+import csv
 import hashlib
+import io
 import json
 import os
 import re
@@ -38,7 +44,7 @@ import subprocess
 import threading
 import time
 from pathlib import Path
-from typing import IO
+from typing import IO, Any
 
 from s2docs import hosts, weburls
 from s2docs import models as m
@@ -74,7 +80,8 @@ _MAP_NOTE_RE = re.compile(r"\bmap=(?P<name>[A-Za-z0-9_-]+)", re.IGNORECASE)
 MAX_GUARD_PATHS = 5
 _MATERIAL_KINDS = ("missing_material", "failed_compile", "reserved_path")
 
-# run id → live process + its open log handle, for cancels issued in this process.
+# run id → live process + its open log handle, for cancels issued in this process. Deliberately not a
+# liveness registry: a detached run outlives this dict, which is why `recover` asks the OS instead.
 _RUNNERS: dict[str, tuple[subprocess.Popen, IO[bytes]]] = {}
 _RUNNERS_LOCK = threading.Lock()
 
@@ -226,6 +233,70 @@ def _status_of(db: Database, run_id: str) -> str | None:
     return row["status"] if row else None
 
 
+# ---------------------------------------------------------- process ownership
+# CREATE_NEW_PROCESS_GROUP only exists on Windows; the literal is its documented value (0x00000200),
+# kept so the Windows launch path is expressible (and testable) from any platform.
+WINDOWS_NEW_PROCESS_GROUP = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
+
+
+def _detach_kwargs() -> dict[str, Any]:
+    """Popen flags that make the child independent of the process that launches it.
+
+    The server's lifetime must not decide a build's fate. A detached child gets its own session
+    (POSIX) or process group (Windows), so a restart, a Ctrl-C or a closed terminal leaves a running
+    compile alone; the pid is persisted next to the run, so `recover` can find it again afterwards.
+    """
+    if os.name == "nt":
+        return {"creationflags": WINDOWS_NEW_PROCESS_GROUP}
+    return {"start_new_session": True}
+
+
+def _windows_pid_alive(pid: int) -> bool:
+    """Best-effort Windows probe: `tasklist` filtered to the pid, matched on its PID field.
+
+    `os.kill(pid, 0)` is *not* an existence probe on Windows — it calls TerminateProcess, i.e. it
+    would kill the very run being asked about. tasklist reports no start time and cannot tell a
+    recycled pid from the original one; that is accepted rather than pulling in psutil for one probe.
+    If the probe itself fails we answer "alive": a broken check must never interrupt a running compile.
+    """
+    try:
+        out = subprocess.run(
+            ["tasklist", "/FI", f"PID eq {pid}", "/NH", "/FO", "CSV"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return True
+    return any(len(row) > 1 and row[1].strip() == str(pid) for row in csv.reader(io.StringIO(out.stdout)))
+
+
+def pid_alive(pid: int) -> bool:
+    """True when `pid` is a live process.
+
+    POSIX: `os.kill(pid, 0)` is a pure existence probe — EPERM means the pid exists and belongs to
+    another user, which still counts as alive. Windows: see `_windows_pid_alive` (best-effort).
+    Unknown platforms answer True: refusing to invent a death is always safer than interrupting a run.
+
+    A recycled pid reads as alive; that is the one false-positive this accepts. It costs a late
+    recovery (and `build cancel` is the escape hatch), whereas the opposite mistake would kill a
+    compile someone is waiting on.
+    """
+    if pid <= 0:
+        return False
+    if os.name == "nt":
+        return _windows_pid_alive(pid)
+    if os.name != "posix":
+        return True
+    try:
+        os.kill(pid, 0)
+    except PermissionError:
+        return True
+    except OSError:  # ESRCH (gone) or EINVAL (not a signalable pid): not a run of ours either way
+        return False
+    return True
+
+
 # -------------------------------------------------------------------- start
 def start(
     db: Database,
@@ -301,10 +372,13 @@ def start(
 
     log_fh = log_path.open("wb")
     try:
-        kwargs: dict = {"stdout": log_fh, "stderr": subprocess.STDOUT}
-        if os.name == "posix":
-            kwargs["start_new_session"] = True  # detach from the server's process group
-        proc = subprocess.Popen(argv, **kwargs)
+        proc = subprocess.Popen(
+            argv,
+            stdout=log_fh,
+            stderr=subprocess.STDOUT,
+            stdin=subprocess.DEVNULL,  # a detached child must not inherit (and block on) our stdin
+            **_detach_kwargs(),
+        )
     except OSError as exc:
         log_fh.close()
         _finalize(db, rid, host_id, owner, "failed", None, notes=f"launch failed: {exc}")
@@ -312,8 +386,13 @@ def start(
 
     with _RUNNERS_LOCK:
         _RUNNERS[rid] = (proc, log_fh)
+    # The pid is what lets a *later* process find this run again: `recover` asks the OS whether it is
+    # still alive instead of trusting this process's memory of it.
     with db.writer() as conn, conn:
-        conn.execute("UPDATE build_runs SET handle = ? WHERE id = ?", (str(proc.pid), rid))
+        conn.execute(
+            "UPDATE build_runs SET handle = ?, pid = ? WHERE id = ?",
+            (str(proc.pid), proc.pid, rid),
+        )
     threading.Thread(
         target=_watch,
         args=(db, rid, host_id, owner, proc, log_fh, timeout_sec, poll_sec),
@@ -412,23 +491,34 @@ def _finalize(
             # 'succeeded' — but the summary now carries the warnings for build_status/build_log/CLI.
             summary["material_guard"] = guard
     merged_notes = "\n".join(x for x in (run.notes, notes) if x) or None
+    # The status flip and the lease release are ONE transaction on purpose: a watcher that sees a
+    # terminal run must also see the host free. Doing the UPDATE first and releasing after left a
+    # window where `builds.wait` (and every reader behind it) could return "failed" while the host
+    # was still locked, so the very next deploy or build on that host answered 409 — CI's slower
+    # timing hit it on test_builds_deploys::test_api_build_and_deploy_routes.
     with db.writer() as conn, conn:
         conn.execute(
             "UPDATE build_runs SET status = ?, exit_code = ?, summary = ?, notes = ?, "
             "updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE id = ?",
             (status, exit_code, json.dumps(summary), merged_notes, rid),
         )
-    if release_lease:
-        _release(db, host_id, owner)
+        if release_lease:
+            _release_in_tx(conn, host_id, owner)
 
 
-def _release(db: Database, host_id: str, owner: str) -> None:
-    """Free the lease iff it is still ours — releasing clears the lock (and its phase). Never deletes
-    another owner's lock: on a takeover the run is finalized without touching the new owner's lease."""
-    with contextlib.suppress(hosts.HostError):
-        lock = hosts.get_host(db, host_id).lock
-        if lock is not None and lock.owner == owner:
-            hosts.release_host(db, host_id, owner)
+def _release_in_tx(conn: sqlite3.Connection, host_id: str, owner: str) -> None:
+    """Free the lease iff it is still ours, inside the caller's transaction.
+
+    Shared by `_finalize` and `_interrupt` so a run never reaches a terminal state while still
+    holding a lock: both write the new status and drop the lock atomically.
+    """
+    lock = conn.execute("SELECT owner FROM host_locks WHERE host_id = ?", (host_id,)).fetchone()
+    if lock is not None and lock["owner"] == owner:
+        conn.execute("DELETE FROM host_locks WHERE host_id = ? AND owner = ?", (host_id, owner))
+        conn.execute(
+            "INSERT INTO host_lock_events (host_id, owner, event, detail) VALUES (?, ?, 'released', ?)",
+            (host_id, owner, "released: the run no longer owns it"),
+        )
 
 
 def _terminate(proc: subprocess.Popen) -> None:
@@ -475,53 +565,100 @@ def cancel(db: Database, run_id: str) -> m.BuildRun:
     run = get_run(db, run_id)
     if run.status in m.TERMINAL_BUILD_STATUSES:
         return run
+    # Status and lease together: whoever sees 'cancelled' must also see the host free.
     with db.writer() as conn, conn:
         conn.execute(
             "UPDATE build_runs SET status = 'cancelled', updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') "
             "WHERE id = ?",
             (run_id,),
         )
+        _release_in_tx(conn, run.host_id, run.owner)
     with _RUNNERS_LOCK:
         entry = _RUNNERS.get(run_id)
     if entry is not None:
         _terminate(entry[0])  # the watcher notices the cancelled record and finalizes
-    _release(db, run.host_id, run.owner)  # the run is terminal: free its own lease now
     return get_run(db, run_id)
 
 
-def reconcile_orphans(db: Database) -> list[str]:
-    """Finalize build runs that lost their watcher (e.g. the server restarted).
+def recover(db: Database) -> list[str]:
+    """Finalize build runs whose owning process is gone, so a restart leaves no stale 'running' row.
 
-    Any run still 'queued'/'running' whose watcher is not alive in *this* process is set
-    'interrupted', and its ``build:<id>`` lease is released only if that run still owns it. Returns
-    the run ids that were interrupted. Called once at app startup and by the periodic reaper.
+    Why the OS and not `_RUNNERS`: a run is launched detached, so it can still be compiling happily
+    while the process that started it is long gone (or while a *different* process — the CLI, the MCP
+    server — owns it). The old rule, "not in this process's `_RUNNERS`, therefore dead", would
+    interrupt a live 38-minute compile. So the question is put to the kernel: is the recorded pid
+    still a live process?
+
+    Safe to call repeatedly: only 'queued'/'running' rows are considered and 'interrupted' is
+    terminal, so a second pass changes nothing and appends nothing. Never interrupts a live run: an
+    alive pid, an unprobeable pid, or a run registered in this process all leave the row untouched.
+    The log is never deleted or moved — the note names the pid that vanished and keeps ``log_path``
+    readable, so the tail of a dead compile can still be inspected.
+
+    Returns the ids that were interrupted (empty when there was nothing to do). Called at startup by
+    `s2docs serve` and `s2docs mcp`, by the periodic reaper, and by `s2docs build recover`.
     """
+    return _recover(db, trust_live_pid=True)
+
+
+def reconcile_orphans(db: Database) -> list[str]:
+    """Legacy pid-blind sweep: any run without a live watcher in *this* process is interrupted.
+
+    Only correct for processes that know every run was launched by them — i.e. never after a restart,
+    when a detached run legitimately outlives its launcher. Kept for the in-process repair case; new
+    code must call `recover`.
+    """
+    return _recover(db, trust_live_pid=False)
+
+
+def _recover(db: Database, *, trust_live_pid: bool) -> list[str]:
     with _RUNNERS_LOCK:
         live = set(_RUNNERS)
     interrupted: list[str] = []
-    note = "interrupted: no live watcher for this run in the current server process"
     with db.writer() as conn, conn:
         rows = conn.execute(
-            "SELECT id, host_id, owner FROM build_runs WHERE status IN ('queued', 'running')"
+            "SELECT id, host_id, owner, pid, handle, log_path FROM build_runs "
+            "WHERE status IN ('queued', 'running')"
         ).fetchall()
         for r in rows:
             if r["id"] in live:
                 continue
-            conn.execute(
-                "UPDATE build_runs SET status = 'interrupted', "
-                "notes = CASE WHEN notes IS NULL OR notes = '' THEN ? ELSE notes || char(10) || ? END, "
-                "updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE id = ?",
-                (note, note, r["id"]),
-            )
-            lock = conn.execute("SELECT owner FROM host_locks WHERE host_id = ?", (r["host_id"],)).fetchone()
-            if lock is not None and lock["owner"] == r["owner"]:
-                conn.execute("DELETE FROM host_locks WHERE host_id = ? AND owner = ?", (r["host_id"], r["owner"]))
-                conn.execute(
-                    "INSERT INTO host_lock_events (host_id, owner, event, detail) VALUES (?, ?, 'released', ?)",
-                    (r["host_id"], r["owner"], "released: orphaned run interrupted at startup"),
-                )
+            pid = _recorded_pid(r)
+            if trust_live_pid and pid is not None and pid_alive(pid):
+                continue
+            _interrupt(conn, r["id"], r["host_id"], r["owner"], _interrupt_note(pid, r["log_path"]))
             interrupted.append(r["id"])
     return interrupted
+
+
+def _recorded_pid(row: sqlite3.Row) -> int | None:
+    """The owning pid: the typed `pid` column, else a numeric `handle` (rows from before 0017, whose
+    handle was always written as ``str(proc.pid)``); None when the row never recorded one."""
+    if row["pid"] is not None:
+        return int(row["pid"])
+    handle = (row["handle"] or "").strip()
+    return int(handle) if handle.isdigit() else None
+
+
+def _interrupt_note(pid: int | None, log_path: str | None) -> str:
+    """The reason recorded on an interrupted run: which process vanished, and where its log still is."""
+    if pid is None:
+        return "interrupted: no pid was recorded, so the process that owned this run cannot be checked"
+    note = f"interrupted: the process that owned this run (pid {pid}) disappeared"
+    if log_path:
+        note += f"; its log is kept at {log_path}"
+    return note
+
+
+def _interrupt(conn: sqlite3.Connection, rid: str, host_id: str, owner: str, note: str) -> None:
+    """Mark a run 'interrupted' (terminal) with the reason, and free its lease iff it is still ours."""
+    conn.execute(
+        "UPDATE build_runs SET status = 'interrupted', "
+        "notes = CASE WHEN notes IS NULL OR notes = '' THEN ? ELSE notes || char(10) || ? END, "
+        "updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE id = ?",
+        (note, note, rid),
+    )
+    _release_in_tx(conn, host_id, owner)
 
 
 def record_artifacts(db: Database, run_id: str, paths: list[str]) -> m.BuildRun:

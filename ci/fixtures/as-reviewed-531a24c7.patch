@@ -1,8 +1,8 @@
 diff --git a/src/s2docs/builds.py b/src/s2docs/builds.py
-index 542f4ac..8183a13 100644
+index 83e14a7..9cb6d6e 100644
 --- a/src/s2docs/builds.py
 +++ b/src/s2docs/builds.py
-@@ -256,9 +256,6 @@ def start(
+@@ -327,9 +327,6 @@ def start(
      if not command.strip():
          raise BuildError("command is required")
      host = hosts.get_host(db, host_id)  # raises HostError if unknown
@@ -12,19 +12,19 @@ index 542f4ac..8183a13 100644
      rid = "b-" + secrets.token_hex(4)
      owner = f"build:{rid}"
      phase = kind.strip() or None  # e.g. 'compile' — settable per-run via kind, allowlisted per phase
-@@ -299,6 +296,7 @@ def start(
+@@ -370,6 +367,7 @@ def start(
              (rid, host_id, kind, command, owner, str(log_path), notes),
          )
  
 +    argv = hosts.ssh_argv(host) + [command]
      log_fh = log_path.open("wb")
      try:
-         kwargs: dict = {"stdout": log_fh, "stderr": subprocess.STDOUT}
+         proc = subprocess.Popen(
 diff --git a/src/s2docs/deploys.py b/src/s2docs/deploys.py
-index f278721..7e29151 100644
+index b9ca34b..f6e54d1 100644
 --- a/src/s2docs/deploys.py
 +++ b/src/s2docs/deploys.py
-@@ -76,7 +76,10 @@ def _hash_remote(host: m.Host, paths: list[str], *, timeout: int = SSH_TIMEOUT_S
+@@ -104,7 +104,10 @@ def remote_md5(host: m.Host, paths: list[str]) -> dict[str, str]:
  
  
  def _copy_file(host: m.Host, local: Path, remote: str, *, timeout: int = SSH_TIMEOUT_SEC) -> None:
@@ -36,7 +36,7 @@ index f278721..7e29151 100644
      try:
          proc = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
      except subprocess.TimeoutExpired as exc:
-@@ -201,9 +204,6 @@ def push(
+@@ -229,9 +232,6 @@ def push(
      if not dest_root.strip():
          raise DeployError("dest_root is required")
      host = hosts.get_host(db, host_id)  # raises HostError if unknown
@@ -47,7 +47,7 @@ index f278721..7e29151 100644
  
      did = "d-" + secrets.token_hex(4)
 diff --git a/src/s2docs/hosts.py b/src/s2docs/hosts.py
-index acb8b2c..2596b85 100644
+index c435f7c..ae4b14e 100644
 --- a/src/s2docs/hosts.py
 +++ b/src/s2docs/hosts.py
 @@ -25,7 +25,6 @@ import re
@@ -108,7 +108,7 @@ index acb8b2c..2596b85 100644
  def _check_id(host_id: str) -> None:
      if not HOST_ID_RE.match(host_id):
          raise HostError(f"invalid host id {host_id!r}: lowercase [a-z0-9-], e.g. 'build-pc'")
-@@ -166,42 +129,18 @@ def _load(conn: sqlite3.Connection, host_id: str) -> m.Host:
+@@ -166,28 +129,17 @@ def _load(conn: sqlite3.Connection, host_id: str) -> m.Host:
      return _row_to_host(row, lock)
  
  
@@ -131,36 +131,51 @@ index acb8b2c..2596b85 100644
 -    option parsing right before the destination: nothing after it — the destination or the remote
 -    command — can be read as an option (OpenSSH otherwise re-parses the words after the host).
 -    The remote command is passed as one argv element; ssh hands it to the remote shell.
--    """
--    target = parse_ssh_target(host.ssh_target)
--    return ["ssh", *_connection_options(host, target, port_flag="-p"), "--", target.destination]
--
 +    """Base ssh argv for a host (connection timeout + identity file when set).
- 
--def scp_argv(host: m.Host, local: Path, remote: str) -> list[str]:
--    """scp argv copying ``local`` to ``remote`` on the host, hardened like :func:`ssh_argv`.
--
--    ``--`` precedes both operands; the ``host:path`` operand starts with the validated destination,
--    so it can never start with '-'; and the local path is made absolute, so it can neither look like
--    an option nor be mistaken for a ``host:path`` operand.
++
 +    Start with this and append the remote command; the build and deploy services use it so a
 +    single place owns the ssh flags. The remote command is passed as one argv element — ssh
 +    joins the remaining arguments and hands them to the remote shell.
      """
 -    target = parse_ssh_target(host.ssh_target)
--    operand = f"{target.destination}:{remote}"
--    if operand.startswith("-"):  # unreachable for a validated destination; kept as the invariant
--        raise HostError(f"refusing an scp operand that starts with '-': {operand!r}")
--    return ["scp", *_connection_options(host, target, port_flag="-P"), "--", str(Path(local).resolve()), operand]
+-    return ["ssh", *_connection_options(host, target, port_flag="-p"), "--", target.destination]
 +    argv = ["ssh", "-o", "ConnectTimeout=15"]
 +    if host.ssh_key:
 +        argv += ["-i", host.ssh_key, "-o", "IdentitiesOnly=yes"]
-+    argv.append(host.ssh_target)
-+    return argv
++    return argv + [host.ssh_target]
  
  
- def _record_lock_event(
-@@ -298,7 +237,6 @@ def register_host(
+ POWERSHELL = "powershell -NoProfile -ExecutionPolicy Bypass -EncodedCommand"
+@@ -216,20 +168,16 @@ def powershell_argv(host: m.Host, script: str) -> list[str]:
+ 
+ 
+ def scp_argv(host: m.Host, local: Path, remote: str, *, pull: bool = False) -> list[str]:
+-    """scp argv copying ``local`` to ``remote`` on the host (``pull=True``: ``remote`` down to ``local``),
+-    hardened like :func:`ssh_argv`. The ONLY place an scp argv is built (CI rule HPF-003).
++    """scp argv copying ``local`` to ``remote`` on the host (``pull=True``: the reverse).
+ 
+-    ``--`` precedes both operands; the ``host:path`` operand starts with the validated destination,
+-    so it can never start with '-'; and the local path is made absolute, so it can neither look like
+-    an option nor be mistaken for a ``host:path`` operand.
++    The ONLY place an scp argv is built (CI rule HPF-003).
+     """
+-    target = parse_ssh_target(host.ssh_target)
+-    operand = f"{target.destination}:{remote}"
+-    if operand.startswith("-"):  # unreachable for a validated destination; kept as the invariant
+-        raise HostError(f"refusing an scp operand that starts with '-': {operand!r}")
+-    local_path = str(Path(local).resolve())
+-    pair = [operand, local_path] if pull else [local_path, operand]
+-    return ["scp", *_connection_options(host, target, port_flag="-P"), "--", *pair]
++    argv = ["scp", "-o", "ConnectTimeout=15"]
++    if host.ssh_key:
++        argv += ["-i", host.ssh_key, "-o", "IdentitiesOnly=yes"]
++    operand = f"{host.ssh_target}:{remote}"
++    pair = [operand, str(local)] if pull else [str(local), operand]
++    return argv + pair
+ 
+ 
+ def cs2_install_path(host: m.Host) -> str:
+@@ -356,7 +304,6 @@ def register_host(
      notes: str | None = None,
  ) -> m.Host:
      _check_id(host_id)
@@ -168,15 +183,3 @@ index acb8b2c..2596b85 100644
      if shell is not None and shell not in ("cmd", "powershell"):
          raise HostError("shell must be 'cmd' or 'powershell'")
      with db.writer() as conn, conn:
-@@ -452,7 +390,10 @@ def probe_host(db: Database, host_id: str, *, timeout: int = 90) -> m.Host:
-     if not PROBE_SCRIPT.exists():
-         raise HostError(f"probe script missing at {PROBE_SCRIPT}")
-     encoded = base64.b64encode(PROBE_SCRIPT.read_bytes().decode("utf-8").encode("utf-16-le")).decode()
--    cmd = ssh_argv(host) + [f"powershell -NoProfile -ExecutionPolicy Bypass -EncodedCommand {encoded}"]
-+    cmd = ["ssh", "-o", "ConnectTimeout=15"]
-+    if host.ssh_key:
-+        cmd += ["-i", host.ssh_key, "-o", "IdentitiesOnly=yes"]
-+    cmd += [host.ssh_target, f"powershell -NoProfile -ExecutionPolicy Bypass -EncodedCommand {encoded}"]
-     try:
-         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
-     except subprocess.TimeoutExpired as exc:
