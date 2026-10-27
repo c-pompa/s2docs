@@ -112,11 +112,16 @@ which stages are real, so read the timeline rather than assuming every stage ran
   verdict, so the job still closes `inconclusive` and asks for one unless you pass `--verdict pass`.
   `concept` and `mesh` are recorded **stubbed** because no text-to-3D generator is wired into this
   repo (the chain starts from a mesh that exists).
-- `s2docs pipeline script --prompt … --addon <name> --name <script> [--script file.js]` —
+- `s2docs pipeline script --prompt … --addon <name> --name <script> [--script file.js] [--compile] [--deploy-host <id>]` —
   text → cs_script. `generate` writes the `--script` text you supply (the caller is the
   generator, so the stage never invents code it cannot attribute) and `validate` type-checks it
-  through the same `validate_cs_script`; a missing TypeScript toolchain is **blocked**, never a
-  pass and never a failure.
+  through the same `validate_cs_script`; a missing TypeScript toolchain (or a data dir with no
+  ingested script API) is **blocked**, never a pass and never a failure. With `--compile` the
+  `build` stage is real: the `.js` is pushed to `--host` and one `resourcecompiler` run turns it
+  into `scripts/<name>.vjs_c`, pulled back MD5-checked and attached to the run; a failed
+  `validate` never compiles. `--deploy-host` then copies the `.vjs_c` **loose** to that host's
+  `<CS2>/game/csgo/scripts/`. `verdict` stays **blocked**: running the script needs a map whose
+  `point_script` references it.
 
 Both return the job; `job_get`/`get_project` show the same chain. A produced artifact is linked
 to the job, not pasted into a message. Two things that bite: `--name` must be addon-safe
