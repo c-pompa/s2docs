@@ -54,6 +54,15 @@ SCRIPT_SUFFIX = ".vjs_c"
 #: only file the compiler can ever be pointed at.
 SCRIPT_NAME_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 
+#: The ONE target outside ``scripts/`` this path compiles: the hermes_sandbox runtime script. Its compiled
+#: vpk carries the world/entity lumps and NO script — its ``point_script`` names
+#: ``maps/scripts/hermes_sandbox.vjs``, which the engine reads from the LOOSE ``.vjs_c``. That is what makes
+#: a script run possible on a host with no Active session, where a ``.vmap`` compile cannot run at all
+#: (measured 2026-10-27). ``rel`` is a path WITHOUT a suffix, relative to the addon's
+#: ``content/csgo_addons/<addon>`` and ``game/csgo_addons/<addon>`` roots.
+SANDBOX_ADDON = "hermes_sandbox"
+SANDBOX_REL = "maps/scripts/hermes_sandbox"
+
 #: Printed by the remote PowerShell only when rc exited 0 AND the ``.vjs_c`` is fresh. Exit status alone
 #: is not proof: a crashed compiler can still exit 0.
 SUCCESS_TOKEN = "SCRIPT COMPILE OK"
@@ -136,12 +145,29 @@ def _posix(path: str) -> str:
     return path.replace("\\", "/").rstrip("/")
 
 
-def source_rel(name: str) -> str:
-    return f"scripts/{name}.js"
+def check_target(addon: str, name: str, rel: str | None) -> str:
+    """The ``rel`` (no suffix) one compile writes to: ``scripts/<name>``, or the ONE fixed sandbox target.
+
+    Nothing else is reachable — a caller cannot walk this into ``maps/`` and turn the cheap script pass into
+    the expensive map pass, which is the policy this module exists to keep.
+    """
+    default = f"scripts/{name}"
+    if rel is None or rel == default:
+        return default
+    if (addon, rel) != (SANDBOX_ADDON, SANDBOX_REL):
+        raise ScriptCompileError(
+            f"refusing script target {addon}/{rel}.js: the only target outside scripts/ is "
+            f"{SANDBOX_ADDON}/{SANDBOX_REL}.js (its point_script loads the loose .vjs_c)"
+        )
+    return rel
 
 
-def compiled_rel(name: str) -> str:
-    return f"scripts/{name}{SCRIPT_SUFFIX}"
+def source_rel(name: str, rel: str | None = None) -> str:
+    return f"{rel if rel is not None else f'scripts/{name}'}.js"
+
+
+def compiled_rel(name: str, rel: str | None = None) -> str:
+    return f"{rel if rel is not None else f'scripts/{name}'}{SCRIPT_SUFFIX}"
 
 
 def content_dir(cs2: str, addon: str) -> str:
@@ -170,7 +196,7 @@ def _ps_literal(value: str) -> str:
 
 
 # -------------------------------------------------------------------- compile
-def compile_script(cs2: str, addon: str, name: str) -> str:
+def compile_script(cs2: str, addon: str, name: str, rel: str | None = None) -> str:
     """The PowerShell the compile host runs: one ``rc -nop4 -i <the .js>`` plus a freshness gate.
 
     No scheduled task and no display check: a script compile needs neither (measured on pomps-pc
@@ -178,11 +204,13 @@ def compile_script(cs2: str, addon: str, name: str) -> str:
     after an access violation, and an unchanged ``.vjs_c`` from an earlier compile would otherwise be
     pulled back as if this run produced it.
     """
+    rel = check_target(addon, name, rel)
+    win = rel.replace("/", "\\")
     base = cs2.rstrip("\\/")
     rc = base + "\\game\\bin\\win64\\resourcecompiler.exe"
-    js = f"{base}\\content\\csgo_addons\\{addon}\\scripts\\{name}.js"
-    out = f"{base}\\game\\csgo_addons\\{addon}\\scripts\\{name}{SCRIPT_SUFFIX}"
-    log = f"{base}\\game\\csgo_addons\\{addon}\\scripts\\{name}.rc.log"
+    js = f"{base}\\content\\csgo_addons\\{addon}\\{win}.js"
+    out = f"{base}\\game\\csgo_addons\\{addon}\\{win}{SCRIPT_SUFFIX}"
+    log = f"{base}\\game\\csgo_addons\\{addon}\\{win}.rc.log"
     return "\n".join([
         "$ErrorActionPreference = 'Continue'",
         f"$rc = {_ps_literal(rc)}",
@@ -220,9 +248,9 @@ def compile_script(cs2: str, addon: str, name: str) -> str:
     ])
 
 
-def compile_command(cs2: str, addon: str, name: str) -> str:
+def compile_command(cs2: str, addon: str, name: str, rel: str | None = None) -> str:
     """``compile_script`` as one ``-EncodedCommand`` argument (the only PowerShell builder)."""
-    return hosts.powershell_command(compile_script(cs2, addon, name))
+    return hosts.powershell_command(compile_script(cs2, addon, name, rel))
 
 
 def _cs2(host: m.Host) -> str:
@@ -238,16 +266,17 @@ def _log_text(db: Database, run: m.BuildRun) -> str:
 
 
 def push_source(db: Database, host_id: str, *, addon: str, name: str, source: Path,
-                owner: str | None = None) -> m.Deployment:
+                rel: str | None = None, owner: str | None = None) -> m.Deployment:
     """Copy the ``.js`` to the compile host's content tree, MD5-verified before anything compiles."""
     source = check_script_source(source)
+    rel = check_target(addon, name, rel)
     host = hosts.get_host(db, host_id)
     cs2 = _cs2(host)
     try:
         deployment = deploys.push(
             db, host_id, content_dir(cs2, addon),
-            [m.DeployFile(path=source_rel(name), local=str(source.resolve()))],
-            addon=addon, notes=f"cs_script source for {addon}/scripts/{name}.js", owner=owner,
+            [m.DeployFile(path=source_rel(name, rel), local=str(source.resolve()))],
+            addon=addon, notes=f"cs_script source for {addon}/{rel}.js", owner=owner,
         )
     except (deploys.DeployError, hosts.HostError) as exc:
         raise ScriptCompileError(f"pushing {name}.js to {host_id} failed: {exc}") from exc
@@ -260,35 +289,36 @@ def push_source(db: Database, host_id: str, *, addon: str, name: str, source: Pa
 
 
 def pull_compiled(db: Database, host_id: str, *, addon: str, name: str,
-                  dest: Path | None = None) -> tuple[Path, str, str]:
+                  dest: Path | None = None, rel: str | None = None) -> tuple[Path, str, str]:
     """Bring the ``.vjs_c`` back, checking it against the host's MD5: ``(local, md5, remote)``."""
+    rel = check_target(addon, name, rel)
     host = hosts.get_host(db, host_id)
-    remote = f"{addon_game_dir(_cs2(host), addon)}/{compiled_rel(name)}"
+    remote = f"{addon_game_dir(_cs2(host), addon)}/{compiled_rel(name, rel)}"
     on_host = deploys.remote_md5(host, [remote])
     want = on_host.get(remote, "missing")
     if want == "missing":
         raise ScriptNotFresh(
-            f"{compiled_rel(name)} is missing on {host_id}: the compile produced no artifact (read the build log)"
+            f"{compiled_rel(name, rel)} is missing on {host_id}: the compile produced no artifact (read the build log)"
         )
     out_dir = Path(dest) if dest else pull_dir(addon)
     out_dir.mkdir(parents=True, exist_ok=True)
-    local = out_dir / f"{name}{SCRIPT_SUFFIX}"
+    local = out_dir / Path(compiled_rel(name, rel)).name
     argv = hosts.scp_pull_argv(host, remote, local)
     try:
         proc = subprocess.run(argv, capture_output=True, text=True, timeout=SSH_TIMEOUT_SEC)
     except subprocess.TimeoutExpired as exc:
-        raise ScriptCompileError(f"scp pull of {compiled_rel(name)} from {host_id} timed out") from exc
+        raise ScriptCompileError(f"scp pull of {compiled_rel(name, rel)} from {host_id} timed out") from exc
     if proc.returncode != 0:
         raise ScriptCompileError(
-            f"scp pull of {compiled_rel(name)} from {host_id} failed (rc={proc.returncode}): "
+            f"scp pull of {compiled_rel(name, rel)} from {host_id} failed (rc={proc.returncode}): "
             f"{proc.stderr.strip()[:300]}"
         )
     if not local.is_file():
-        raise ScriptCompileError(f"scp pull of {compiled_rel(name)} reported success but wrote no file")
+        raise ScriptCompileError(f"scp pull of {compiled_rel(name, rel)} reported success but wrote no file")
     got = md5_file(local)
     if got != want:
         raise ScriptCompileError(
-            f"{compiled_rel(name)}: pulled md5 {got} != the host's {want} (a truncated copy is not a build)"
+            f"{compiled_rel(name, rel)}: pulled md5 {got} != the host's {want} (a truncated copy is not a build)"
         )
     return local, got, remote
 
@@ -300,11 +330,15 @@ def compile_js(
     addon: str,
     name: str,
     source: Path,
+    rel: str | None = None,
     timeout_sec: int = 120,
     poll_sec: float = 1.0,
     owner: str | None = None,
 ) -> CompiledScript:
     """Push, compile, prove fresh, pull and record one ``.js`` — the build half of the script chain.
+
+    ``rel`` names the target without a suffix: ``scripts/<name>`` by default, or
+    :data:`SANDBOX_REL` for hermes_sandbox's own map script (the only other target this path accepts).
 
     Raises :class:`ScriptCompileError` (or :class:`ScriptNotFresh`) instead of returning a run that did
     not produce a fresh artifact; the caller records what happened, it does not have to guess.
@@ -312,15 +346,16 @@ def compile_js(
     source = check_script_source(source)
     check_name(name)
     check_host(host_id)
+    rel = check_target(addon, name, rel)
     host = hosts.get_host(db, host_id)
     cs2 = _cs2(host)
 
-    push_source(db, host_id, addon=addon, name=name, source=source, owner=owner)
+    push_source(db, host_id, addon=addon, name=name, source=source, rel=rel, owner=owner)
 
     try:
         run = builds.start(
-            db, host_id, compile_command(cs2, addon, name), kind="compile", timeout_sec=timeout_sec,
-            notes=f"script={addon}/{source_rel(name)}",
+            db, host_id, compile_command(cs2, addon, name, rel), kind="compile", timeout_sec=timeout_sec,
+            notes=f"script={addon}/{source_rel(name, rel)}",
         )
     except (builds.BuildError, hosts.HostError) as exc:
         raise ScriptCompileError(f"the compile run could not start on {host_id}: {exc}") from exc
@@ -336,7 +371,7 @@ def compile_js(
 
     if run.status != "succeeded":
         raise ScriptCompileError(
-            f"resourcecompiler on {host_id} failed for scripts/{name}.js (run {run.id}, "
+            f"resourcecompiler on {host_id} failed for {source_rel(name, rel)} (run {run.id}, "
             f"exit {run.exit_code}); log: {run.log_path}",
             run_id=run.id,
         )
@@ -349,7 +384,7 @@ def compile_js(
         )
 
     try:
-        local, digest, remote = pull_compiled(db, host_id, addon=addon, name=name)
+        local, digest, remote = pull_compiled(db, host_id, addon=addon, name=name, rel=rel)
     except ScriptCompileError as exc:
         raise type(exc)(str(exc), run_id=run.id) from exc
     builds.record_artifacts(db, run.id, [str(local)])
@@ -364,24 +399,29 @@ def deploy_loose(
     addon: str,
     name: str,
     compiled: Path,
+    rel: str | None = None,
     owner: str | None = None,
 ) -> m.Deployment:
-    """Copy the ``.vjs_c`` LOOSE to ``<CS2>/game/csgo/scripts/<name>.vjs_c`` and MD5-verify it.
+    """Copy the ``.vjs_c`` LOOSE under ``<CS2>/game/csgo`` and MD5-verify it.
 
-    Loose, not addon-mounted: an addon-mounted script did not load in iso-spectate, and the engine's
-    script path is ``scripts/<name>.vjs`` under ``game/csgo``.
+    Default target: ``game/csgo/scripts/<name>.vjs_c``. Loose, not addon-mounted: an addon-mounted script
+    did not load in iso-spectate, and the engine's script path is ``scripts/<name>.vjs`` under ``game/csgo``.
+    The one other target is :data:`SANDBOX_REL`, i.e. ``game/csgo/maps/scripts/hermes_sandbox.vjs_c`` — the
+    file hermes_sandbox's own ``point_script`` loads.
     """
     check_name(name)
+    rel = check_target(addon, name, rel)
+    target = compiled_rel(name, rel)
     path = Path(compiled)
     if not path.is_file():
-        raise ScriptCompileError(f"no compiled {name}{SCRIPT_SUFFIX} at {path}: compile and pull it first")
+        raise ScriptCompileError(f"no compiled {target} at {path}: compile and pull it first")
     host = hosts.get_host(db, host_id)
     cs2 = _cs2(host)
     try:
         return deploys.push(
             db, host_id, loose_root(cs2),
-            [m.DeployFile(path=compiled_rel(name), local=str(path.resolve()))],
-            addon=addon, notes=f"cs_script {name}{SCRIPT_SUFFIX} (loose: game/csgo/scripts)", owner=owner,
+            [m.DeployFile(path=target, local=str(path.resolve()))],
+            addon=addon, notes=f"cs_script {target} (loose: game/csgo)", owner=owner,
         )
     except (deploys.DeployError, hosts.HostError) as exc:
-        raise ScriptCompileError(f"deploying {name}{SCRIPT_SUFFIX} to {host_id} failed: {exc}") from exc
+        raise ScriptCompileError(f"deploying {target} to {host_id} failed: {exc}") from exc

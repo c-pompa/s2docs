@@ -293,3 +293,37 @@ def test_deploy_loose_refuses_when_nothing_was_compiled(db, monkeypatch, tmp_pat
     with pytest.raises(script_compile.ScriptCompileError, match="compile and pull it first"):
         script_compile.deploy_loose(db, "desktop-pc", addon=ADDON, name=NAME,
                                     compiled=tmp_path / "nope.vjs_c")
+
+# ------------------------------------------------- the one sandbox target
+def test_the_only_target_outside_scripts_is_the_sandbox_map_script(db, tmp_path):
+    """hermes_sandbox's vpk carries no script: its point_script loads the loose maps/scripts `.vjs_c`."""
+    with pytest.raises(script_compile.ScriptCompileError, match="only target outside scripts"):
+        script_compile.check_target(ADDON, NAME, "maps/hermes_sandbox")
+    with pytest.raises(script_compile.ScriptCompileError, match="only target outside scripts"):
+        script_compile.check_target("other_addon", NAME, script_compile.SANDBOX_REL)
+    assert script_compile.check_target(ADDON, NAME, None) == f"scripts/{NAME}"
+    assert script_compile.check_target(script_compile.SANDBOX_ADDON, "hermes_sandbox",
+                                       script_compile.SANDBOX_REL) == "maps/scripts/hermes_sandbox"
+
+    rel = script_compile.SANDBOX_REL
+    assert script_compile.source_rel("hermes_sandbox", rel) == "maps/scripts/hermes_sandbox.js"
+    assert script_compile.compiled_rel("hermes_sandbox", rel) == "maps/scripts/hermes_sandbox.vjs_c"
+    script = script_compile.compile_script(CS2, script_compile.SANDBOX_ADDON, "hermes_sandbox", rel)
+    assert r"content\csgo_addons\hermes_sandbox\maps\scripts\hermes_sandbox.js" in script
+    assert r"game\csgo_addons\hermes_sandbox\maps\scripts\hermes_sandbox.vjs_c" in script
+
+
+def test_deploy_loose_sends_the_bundle_to_game_csgo_maps_scripts(db, monkeypatch, tmp_path):
+    seen: dict = {}
+    _patch_push(monkeypatch, seen)
+    compiled = tmp_path / "hermes_sandbox.vjs_c"
+    compiled.write_bytes(b"vjs_c")
+
+    dep = script_compile.deploy_loose(
+        db, "pomps-pc", addon=script_compile.SANDBOX_ADDON, name="hermes_sandbox", compiled=compiled,
+        rel=script_compile.SANDBOX_REL,
+    )
+
+    assert dep.status == "verified"
+    assert seen["push"]["dest_root"] == CS2.replace("\\", "/") + "/game/csgo"
+    assert [f["path"] for f in seen["push"]["files"]] == ["maps/scripts/hermes_sandbox.vjs_c"]

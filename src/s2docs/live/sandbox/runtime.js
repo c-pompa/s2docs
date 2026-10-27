@@ -21,6 +21,43 @@ function human() {
   return undefined;
 }
 
+// ---- the api object a bundled user module gets (s2docs.live.sandbox_user) -----------------------
+// A user module never touches Instance: it is handed this object and nothing else. Chat subscribers are
+// kept here and called from the runtime's ONE OnPlayerChat registration below — a second registration
+// would overwrite the first, which is why the module cannot register its own.
+/** @type {((event: any) => void)[]} */
+const userChat = [];
+
+function hsUserText(e) {
+  if (e && typeof e === "object" && "message" in e) return String(e.message);
+  return String(e);
+}
+
+function hsUserApi(tag, nonce) {
+  return {
+    tag,
+    nonce,
+    msg(text) { Instance.Msg("[user:" + tag + "] " + String(text)); },
+    command(name, fn) {
+      const n = String(name == null ? "" : name);
+      if (!/^[a-z][a-z0-9_]{0,31}$/.test(n) || typeof fn !== "function") {
+        Instance.Msg("[user:" + tag + "] error command needs (name, fn): " + n);
+        return false;
+      }
+      Instance.RegisterCheatCommand("hu_" + n, (args) => {
+        try { fn(String(args == null ? "" : args)); }
+        catch (e) { Instance.Msg("[user:" + tag + "] error " + hsUserText(e)); }
+      });
+      return true;
+    },
+    onChat(fn) {
+      if (typeof fn !== "function") { Instance.Msg("[user:" + tag + "] error onChat needs a function"); return false; }
+      userChat.push(fn);
+      return true;
+    },
+  };
+}
+
 function place(group, pawn, yawOverride) {
   const o = pawn.GetAbsOrigin(), yaw = yawOverride ?? pawn.GetEyeAngles().yaw;
   const pts = positions([o.x, o.y, o.z], yaw, group.ents.length, group.formation, group.spacing, HEIGHT[group.id] ?? 32);
@@ -125,6 +162,11 @@ function pumpModels() {
 Instance.OnPlayerChat((event) => {
   const text = String(event.text || "");
   if (/^!h(ermes)?\s/i.test(text)) Instance.Msg(`[hs] chat ${event.player ? event.player.GetPlayerSlot() : -1} ${text.replace(/^!h(ermes)?\s+/i, "")}`);
+  // ... and the one fan-out a bundled user module's api.onChat lands in.
+  for (const fn of userChat) {
+    try { fn({ text, player: event.player }); }
+    catch (e) { Instance.Msg(`[user] error ${hsUserText(e)}`); }
+  }
 });
 
 Instance.SetThink(() => {
@@ -138,3 +180,5 @@ Instance.SetThink(() => {
   Instance.SetNextThink(Instance.GetGameTime() + 0.1);
 });
 Instance.OnActivate(() => Instance.SetNextThink(Instance.GetGameTime()));
+
+/*USER*/

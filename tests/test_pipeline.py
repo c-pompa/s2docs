@@ -63,7 +63,7 @@ def _addon(tmp_path, monkeypatch, name="probe_addon"):
     monkeypatch.setenv("S2DOCS_WORKSPACE", str(tmp_path / "ws"))
     get_settings.cache_clear()
     root = addon_root(get_settings().workspace_dir, "cs2", name)
-    root.mkdir(parents=True)
+    root.mkdir(parents=True, exist_ok=True)
     return root
 
 
@@ -908,3 +908,476 @@ def test_cli_passes_the_ingame_flags_through(tmp_path, monkeypatch, capsys):
     ingame = next(e for e in payload["events"] if e["phase"] == "ingame")
     assert ingame["data"]["verdict"] == "pass"
     assert seen["model"] == "models/bridge/bridge.vmdl" and seen["clear"] is True
+
+
+# ------------------------------------------------- the look at the screen (`pipeline verdict`)
+# The chain closes `inconclusive` the moment the readback verifies, because a console line is not a
+# look at the screen. The look happens AFTER that, so the verdict is its own command on a closed job:
+# `inconclusive -> passed|failed`, recorded as a human-confirm evidence row + a `verdict` stage event,
+# never by re-running the chain (which would spawn a second model nobody judged).
+
+
+def _verified_chain(db, tmp_path, monkeypatch, **kw):
+    """A real asset-chain job that closed `inconclusive` on a verified readback (the measured case)."""
+    _addon(tmp_path, monkeypatch)
+    _host(db)
+    _host(db, "pomps-pc")
+    _patch_build(monkeypatch, tmp_path)
+    _patch_ingame(monkeypatch, **kw)
+    return _run(db, build_command="rc -i bridge.vmdl -nop4", ingame_host="pomps-pc")
+
+
+def _human_confirms(db, job_id):
+    from s2docs import evidence
+
+    return [row for row in evidence.list_evidence(db, kind="human-confirm") if row.ref == job_id]
+
+
+def test_verdict_pass_closes_a_verified_inconclusive_job_and_records_evidence(db, tmp_path, monkeypatch):
+    job = _verified_chain(db, tmp_path, monkeypatch)
+    assert job.status == "inconclusive"
+
+    closed = pipeline.record_verdict(db, job.id, "pass", notes="the bridge spawned at the right scale")
+
+    assert closed.status == "passed"
+    # the chain's seven stages, then the one stage the human added — no re-run, no second spawn
+    assert [e.phase for e in closed.events if e.phase] == [*pipeline.STAGES, pipeline.VERDICT_STAGE]
+    verdict_event = closed.events[-1]
+    assert verdict_event.phase == "verdict" and verdict_event.level == "milestone"
+    assert verdict_event.data["verdict"] == "pass" and verdict_event.data["source"] == "coordinator"
+    assert verdict_event.data["from"] == "inconclusive" and verdict_event.data["to"] == "passed"
+
+    # durable, not just a status: a human-confirm row anchored to the job, linked from it
+    rows = _human_confirms(db, job.id)
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.kind == "human-confirm" and row.data["verdict"] == "pass"
+    assert row.data["notes"] == "the bridge spawned at the right scale"
+    assert row.data["job_id"] == job.id and row.data["stage"] == "ingame"
+    assert row.id == verdict_event.data["evidence_id"]
+    assert any(link.kind == "evidence" and link.ref_id == row.id for link in closed.links)
+
+    # the close-out says what a human saw, and does not claim the console line was the proof
+    assert "visual verdict pass" in closed.summary.learned
+    assert "looked right" in closed.summary.learned
+    assert "human look at the screen" in closed.summary.next
+    # …and the confirm push channel fired, so a waiting agent sees it without polling the API
+    from s2docs import confirms
+
+    assert row.id in confirms.confirms_jsonl_path().read_text(encoding="utf-8")
+
+
+def test_verdict_fail_closes_the_job_failed(db, tmp_path, monkeypatch):
+    job = _verified_chain(db, tmp_path, monkeypatch)
+
+    closed = pipeline.record_verdict(db, job.id, "fail", notes="the material was untextured grey")
+
+    assert closed.status == "failed"
+    assert "visual verdict fail" in closed.summary.learned
+    assert "did NOT look right" in closed.summary.learned
+    assert "fix what was seen" in closed.summary.next
+    assert closed.events[-1].data["to"] == "failed"
+
+
+def test_verdict_is_idempotent_for_the_same_call_and_a_conflict_for_a_different_one(db, tmp_path, monkeypatch):
+    job = _verified_chain(db, tmp_path, monkeypatch)
+
+    first = pipeline.record_verdict(db, job.id, "pass", notes="looks right")
+    again = pipeline.record_verdict(db, job.id, "pass", notes="looks right")
+
+    assert again.status == "passed"
+    # a retried command is a no-op: one evidence row, one verdict event, not two
+    assert len(_human_confirms(db, job.id)) == 1
+    assert [e.phase for e in again.events if e.phase] == [*pipeline.STAGES, pipeline.VERDICT_STAGE]
+    assert again.summary.learned == first.summary.learned
+
+    with pytest.raises(pipeline.jobs.JobConflict, match="already passed"):
+        pipeline.record_verdict(db, job.id, "fail", notes="changed my mind")
+    assert len(_human_confirms(db, job.id)) == 1
+
+
+def test_verdict_refuses_a_job_whose_readback_failed(db, tmp_path, monkeypatch):
+    """A verified spawn that then failed is `failed`, and no verdict can rescue it."""
+    _addon(tmp_path, monkeypatch)
+    _host(db)
+    _host(db, "pomps-pc")
+    _patch_build(monkeypatch, tmp_path)
+    _patch_ingame(monkeypatch, status="failed", detail="the runtime spawned name=models/chicken/chicken_roasted.vmdl")
+
+    job = _run(db, build_command="rc -i bridge.vmdl -nop4", ingame_host="pomps-pc")
+    assert job.status == "failed"
+
+    with pytest.raises(pipeline.jobs.JobConflict, match="not verified"):
+        pipeline.record_verdict(db, job.id, "pass", notes="it looked fine to me")
+    assert pipeline.jobs.get(db, job.id).status == "failed"
+    assert _human_confirms(db, job.id) == []
+
+
+def test_verdict_refuses_a_job_with_no_ingame_stage(db, tmp_path, monkeypatch):
+    """Not an asset-chain job: nothing was ever spawned, so there is nothing anybody could have seen."""
+    from s2docs import jobs
+
+    _addon(tmp_path, monkeypatch)
+    _host(db)
+    job = jobs.enqueue(
+        db, kind="test", title="a plain job", target="probe_addon", host_id="desktop-pc",
+        purpose="no chain here", expected="a closed job",
+    )
+    jobs.start(db, job.id, worker="test")
+    jobs.finish(db, job.id, status="inconclusive", summary={
+        "what": "nothing", "why": "test", "learned": "no ingame stage", "next": "none",
+    })
+
+    with pytest.raises(pipeline.jobs.JobConflict, match="no ingame stage"):
+        pipeline.record_verdict(db, job.id, "pass")
+
+
+def test_verdict_refuses_a_job_whose_ingame_stage_was_skipped_or_blocked(db, tmp_path, monkeypatch):
+    """Skipped (no host) and blocked (no netcon) both mean nothing was on screen."""
+    from s2docs.live.service import LiveError
+
+    _addon(tmp_path, monkeypatch)
+    _host(db)
+    skipped = _run(db)  # no --ingame-host
+    with pytest.raises(pipeline.jobs.JobConflict, match="ingame stage was skipped"):
+        pipeline.record_verdict(db, skipped.id, "pass")
+
+    _host(db, "pomps-pc")
+    _patch_build(monkeypatch, tmp_path)
+    _patch_ingame(monkeypatch, show_raises=LiveError("no netcon address for 'pomps-pc'"))
+    blocked = _run(db, build_command="rc -i bridge.vmdl -nop4", ingame_host="pomps-pc")
+    assert blocked.status == "inconclusive"
+    with pytest.raises(pipeline.jobs.JobConflict, match="ingame stage was blocked"):
+        pipeline.record_verdict(db, blocked.id, "fail")
+    assert blocked.id and pipeline.jobs.get(db, blocked.id).status == "inconclusive"
+
+
+def test_verdict_refuses_a_running_job(tmp_path, monkeypatch):
+    """A running job's answer is `s2docs job verdict`; closing it here would skip the chain's close-out."""
+    from s2docs import jobs
+    from s2docs.config import get_settings
+    from s2docs.db.connection import Database
+
+    monkeypatch.setenv("S2DOCS_DATA_DIR", str(tmp_path / "data"))
+    get_settings.cache_clear()
+    db = Database(get_settings().db_path)
+    with db.writer():
+        pass
+    _host(db)
+    job = jobs.enqueue(
+        db, kind="test", title="still going", target="probe_addon", host_id="desktop-pc",
+        purpose="running", expected="finish",
+    )
+    jobs.start(db, job.id, worker="test")
+    # the readback can be recorded before the chain closes out — the status is what gates the verdict
+    jobs.event(db, job.id, level="milestone", message="ingame verified", phase="ingame",
+               data={"status": "verified", "host_id": "desktop-pc", "model": "models/bridge/bridge.vmdl"})
+
+    with pytest.raises(pipeline.jobs.JobConflict, match="is running"):
+        pipeline.record_verdict(db, job.id, "pass")
+    assert jobs.get(db, job.id).status == "running"
+
+
+def test_verdict_refuses_an_unknown_verdict_or_source(db, tmp_path, monkeypatch):
+    job = _verified_chain(db, tmp_path, monkeypatch)
+
+    with pytest.raises(pipeline.PipelineError, match="verdict must be one of pass, fail"):
+        pipeline.record_verdict(db, job.id, "skip")  # `skip` is for steps, not for a look at the screen
+    with pytest.raises(pipeline.PipelineError, match="verdict must be one of pass, fail"):
+        pipeline.record_verdict(db, job.id, "looked fine")
+    with pytest.raises(pipeline.PipelineError, match="source must be one of"):
+        pipeline.record_verdict(db, job.id, "pass", source="vibes")
+    assert pipeline.jobs.get(db, job.id).status == "inconclusive"
+
+
+def test_cli_pipeline_verdict_closes_the_job_and_prints_the_chain(tmp_path, monkeypatch, capsys):
+    import json as _json
+
+    from s2docs import cli
+    from s2docs.config import get_settings
+    from s2docs.db.connection import Database
+
+    monkeypatch.setenv("S2DOCS_DATA_DIR", str(tmp_path / "data"))
+    _addon(tmp_path, monkeypatch)
+    get_settings.cache_clear()
+    db = Database(get_settings().db_path)
+    with db.writer():
+        pass
+    job = _verified_chain(db, tmp_path, monkeypatch)
+
+    code = cli.main(["--json", "pipeline", "verdict", job.id, "pass", "--notes", "spawned, looks right"])
+
+    assert code == 0
+    payload = _json.loads(capsys.readouterr().out)
+    assert payload["status"] == "passed"
+    assert [e["phase"] for e in payload["events"] if e["phase"]] == [*pipeline.STAGES, "verdict"]
+    assert payload["events"][-1]["data"]["verdict"] == "pass"
+    assert payload["events"][-1]["data"]["notes"] == "spawned, looks right"
+
+
+def test_cli_pipeline_verdict_reports_a_conflict_and_an_unknown_job(tmp_path, monkeypatch, capsys):
+    from s2docs import cli
+    from s2docs.config import get_settings
+    from s2docs.db.connection import Database
+
+    monkeypatch.setenv("S2DOCS_DATA_DIR", str(tmp_path / "data"))
+    _addon(tmp_path, monkeypatch)
+    get_settings.cache_clear()
+    db = Database(get_settings().db_path)
+    with db.writer():
+        pass
+    job = _verified_chain(db, tmp_path, monkeypatch)
+    pipeline.record_verdict(db, job.id, "pass")
+    capsys.readouterr()
+
+    conflict = cli.main(["pipeline", "verdict", job.id, "fail"])
+    assert conflict == cli.EXIT_CONFLICT
+    assert "already passed" in capsys.readouterr().err
+
+    missing = cli.main(["pipeline", "verdict", "j-nope", "pass"])
+    assert missing == cli.EXIT_NOT_FOUND
+
+
+# ------------------------------------------------- text -> cs_script: the bundled verdict
+
+
+USER_CODE = """function start(api) { api.msg("hello"); }\n"""
+
+
+class _BundleClient:
+    """The netcon half of the reload: canned console text per phase, and a record of what was sent."""
+
+    def __init__(self, *, map_text: str = "@ Current  :  game\n1: de_dust2\n", load_text: str = ""):
+        self.map_text, self.load_text = map_text, load_text
+        self.sent: list[list[str]] = []
+
+    def poll(self, lines, _probe, ready, *, timeout=90.0, **_kw):
+        self.sent.append(list(lines))
+        text = self.map_text if any(line.startswith("map ") for line in lines) else self.load_text
+        return bool(ready(text)), text
+
+
+def _patch_bundle(monkeypatch, seen: dict, *, deploy_status: str = "verified"):
+    """Fake the two host halves of the bundle (compile + loose deploy); no ssh, no resourcecompiler."""
+    from s2docs.build import script_compile
+
+    def fake_compile(_db, host_id, *, addon, name, source, rel=None, **_kw):
+        seen.setdefault("compile", []).append(
+            {"host_id": host_id, "addon": addon, "name": name, "rel": rel,
+             "source": Path(source).read_text(encoding="utf-8")}
+        )
+        artifact = Path(seen["dir"]) / f"bundle{len(seen['compile'])}.vjs_c"
+        artifact.parent.mkdir(parents=True, exist_ok=True)
+        artifact.write_bytes(b"vjs_c")
+        seen["artifact"] = artifact
+        return script_compile.CompiledScript(
+            run=_build_run(id=f"b-bundle{len(seen['compile'])}", host_id=host_id, status="succeeded",
+                           exit_code=0),
+            path=artifact, md5="b" * 32, size=5,
+            remote="C:/cs2/game/csgo_addons/hermes_sandbox/maps/scripts/hermes_sandbox.vjs_c",
+        )
+
+    def fake_deploy(_db, host_id, *, addon, name, compiled, rel=None, **_kw):
+        seen.setdefault("deploy", []).append({"host_id": host_id, "addon": addon, "rel": rel,
+                                              "compiled": str(compiled)})
+        return _deployment(id=f"d-bundle{len(seen['deploy'])}", status=deploy_status,
+                           verified=deploy_status == "verified")
+
+    monkeypatch.setattr(script_compile, "compile_js", fake_compile)
+    monkeypatch.setattr(script_compile, "deploy_loose", fake_deploy)
+
+
+def test_script_slice_verifies_the_verdict_by_readback_without_a_map_compile(db, tmp_path, monkeypatch):
+    _addon(tmp_path, monkeypatch)
+    _host(db, "pomps-pc")
+    _patch_validate(monkeypatch, result=_fake_validation(ok=True))
+    seen: dict = {"dir": str(tmp_path)}
+    _patch_bundle(monkeypatch, seen)
+    client = _BundleClient(load_text="[user:pinger] ready n0nce\n[hs] pong 0\n")
+
+    job = pipeline.run_script_slice(
+        db, prompt="p", addon="probe_addon", name="pinger", host_id="pomps-pc",
+        script_text=USER_CODE, run_host="pomps-pc", nonce="n0nce", client=client,
+    )
+
+    assert [e.phase for e in job.events if e.phase] == list(pipeline.SCRIPT_STAGES)
+    # build/deploy are the BUNDLE (maps/scripts/hermes_sandbox), not the user's own scripts/pinger.js
+    build = next(e for e in job.events if e.phase == "build")
+    assert build.level == "milestone" and build.data["bundle"] is True
+    assert build.data["target"] == "maps/scripts/hermes_sandbox"
+    assert seen["compile"][0]["rel"] == "maps/scripts/hermes_sandbox"
+    assert seen["compile"][0]["addon"] == "hermes_sandbox"
+    assert '[user:" + "pinger" + "] ready " + "n0nce"' in seen["compile"][0]["source"]
+    deploy = next(e for e in job.events if e.phase == "deploy")
+    assert deploy.data["path"] == "maps/scripts/hermes_sandbox.vjs_c"
+    assert deploy.data["status"] == "verified"
+    verdict = next(e for e in job.events if e.phase == "verdict")
+    assert verdict.level == "milestone" and verdict.data["status"] == "verified"
+    assert verdict.data["nonce"] == "n0nce" and "[hs] pong" in verdict.data["readback"]
+    # a readback is not a visual verdict: the job does not claim a pass
+    assert job.status == "inconclusive" and "human" in job.summary.next
+
+
+def test_script_slice_refuses_a_module_that_touches_instance_before_any_compile(db, tmp_path, monkeypatch):
+    from s2docs.build import script_compile
+
+    _addon(tmp_path, monkeypatch)
+    _host(db, "pomps-pc")
+    monkeypatch.setattr(script_compile, "compile_js", lambda *a, **kw: pytest.fail("must not compile"))
+
+    job = pipeline.run_script_slice(
+        db, prompt="p", addon="probe_addon", name="pinger", host_id="pomps-pc",
+        script_text="function start(api) { Instance.Msg('x'); }\n", run_host="pomps-pc",
+    )
+
+    validate = next(e for e in job.events if e.phase == "validate")
+    assert validate.level == "error" and validate.data["refused"]
+    assert any("Instance" in r for r in validate.data["refused"])
+    build = next(e for e in job.events if e.phase == "build")
+    assert build.data["skipped"] is True and "validate reported" in build.data["reason"]
+    verdict = next(e for e in job.events if e.phase == "verdict")
+    assert verdict.data["status"] == "failed"
+    assert job.status == "failed"
+
+
+def test_script_slice_fails_the_verdict_when_no_ready_line_arrives(db, tmp_path, monkeypatch):
+    _addon(tmp_path, monkeypatch)
+    _host(db, "pomps-pc")
+    _patch_validate(monkeypatch, result=_fake_validation(ok=True))
+    seen: dict = {"dir": str(tmp_path)}
+    _patch_bundle(monkeypatch, seen)
+    client = _BundleClient(load_text="[hs] pong 0\n")
+
+    job = pipeline.run_script_slice(
+        db, prompt="p", addon="probe_addon", name="pinger", host_id="pomps-pc",
+        script_text=USER_CODE, run_host="pomps-pc", nonce="n0nce", client=client,
+    )
+
+    verdict = next(e for e in job.events if e.phase == "verdict")
+    assert verdict.level == "error" and verdict.data["status"] == "failed"
+    assert "bundled module did not" in verdict.data["detail"]
+    assert job.status == "failed"
+
+
+def test_script_slice_blocks_the_verdict_when_the_host_cannot_be_reached(db, tmp_path, monkeypatch):
+    from s2docs.live import sandbox_run
+    from s2docs.live.service import LiveError
+
+    _addon(tmp_path, monkeypatch)
+    _host(db, "pomps-pc")
+    _patch_validate(monkeypatch, result=_fake_validation(ok=True))
+    seen: dict = {"dir": str(tmp_path)}
+    _patch_bundle(monkeypatch, seen)
+
+    def boom(*_a, **_kw):
+        raise LiveError("no netcon address for 'pomps-pc'")
+
+    monkeypatch.setattr(sandbox_run, "reload", boom)
+
+    job = pipeline.run_script_slice(
+        db, prompt="p", addon="probe_addon", name="pinger", host_id="pomps-pc",
+        script_text=USER_CODE, run_host="pomps-pc", nonce="n0nce",
+    )
+
+    verdict = next(e for e in job.events if e.phase == "verdict")
+    assert verdict.data["blocked"] is True and "netcon" in verdict.data["reason"]
+    assert job.status == "inconclusive", "a block is not a failure: nothing was sent"
+
+
+def test_script_slice_restores_the_stock_script_and_reports_it(db, tmp_path, monkeypatch):
+    _addon(tmp_path, monkeypatch)
+    _host(db, "pomps-pc")
+    _patch_validate(monkeypatch, result=_fake_validation(ok=True))
+    seen: dict = {"dir": str(tmp_path)}
+    _patch_bundle(monkeypatch, seen)
+
+    # the restore's own reload sees the stock runtime: pong, no user line
+    calls: list[str] = []
+
+    class Client(_BundleClient):
+        def poll(self, lines, probe, ready, *, timeout=90.0, **kw):
+            calls.append("map" if any(line.startswith("map ") for line in lines) else "load")
+            if len(calls) > 2:  # the restore's second phase: stock script only
+                self.load_text = "[hs] pong 0\n"
+            return super().poll(lines, probe, ready, timeout=timeout, **kw)
+
+    job = pipeline.run_script_slice(
+        db, prompt="p", addon="probe_addon", name="pinger", host_id="pomps-pc",
+        script_text=USER_CODE, run_host="pomps-pc", nonce="n0nce", client=Client(
+            load_text="[user:pinger] ready n0nce\n[hs] pong 1\n"),
+        restore=True,
+    )
+
+    verdict = next(e for e in job.events if e.phase == "verdict")
+    assert verdict.data["status"] == "verified"
+    assert verdict.data["restore"]["status"] == "verified"
+    # the restore compiled the STOCK script: a second build, and no user module in its source
+    assert len(seen["compile"]) == 2
+    assert 'hsUserApi("' not in seen["compile"][1]["source"]
+    assert job.status == "inconclusive" and "restore verified" in job.summary.learned
+
+
+def test_script_slice_without_a_run_host_still_blocks_the_verdict(db, tmp_path, monkeypatch):
+    _addon(tmp_path, monkeypatch)
+    _host(db)
+    _patch_validate(monkeypatch, result=_fake_validation(ok=True))
+
+    job = pipeline.run_script_slice(db, prompt="p", addon="probe_addon", name="pinger",
+                                    host_id="desktop-pc", script_text=USER_CODE)
+
+    verdict = next(e for e in job.events if e.phase == "verdict")
+    assert verdict.data["blocked"] is True
+    assert "point_script" in verdict.data["reason"] and "Failed to load cs_script" in verdict.data["reason"]
+    assert "--run-host" in verdict.data["reason"]
+    assert job.status == "inconclusive"
+
+def test_cli_runs_the_script_chain_against_a_run_host(tmp_path, monkeypatch, capsys):
+    """The flags the coordinator uses: --run-host bundles, reloads and judges the verdict by readback."""
+    import json
+
+    from s2docs import cli
+    from s2docs.config import get_settings
+    from s2docs.db.connection import Database
+
+    data = tmp_path / "data"
+    data.mkdir()
+    monkeypatch.setenv("S2DOCS_DATA_DIR", str(data))
+    _addon(tmp_path, monkeypatch)
+    get_settings.cache_clear()
+    db = Database(get_settings().db_path)
+    with db.writer():
+        pass
+    _host(db, "pomps-pc")
+    _patch_validate(monkeypatch, result=_fake_validation(ok=True))
+    seen: dict = {"dir": str(tmp_path)}
+    _patch_bundle(monkeypatch, seen)
+    # the CLI builds its own client from live_hosts; a fake needs the reload seam, not netcon
+    from s2docs.live import sandbox_run
+
+    real_reload = sandbox_run.reload
+    monkeypatch.setattr(
+        sandbox_run, "reload",
+        lambda db_, host, *, user, client=None, timeout_sec=90: real_reload(
+            db_, host, user=user, timeout_sec=timeout_sec,
+            client=_BundleClient(load_text=f"[user:pinger] ready {user.nonce}\n[hs] pong 0\n"),
+        ),
+    )
+    script = tmp_path / "user.js"
+    script.write_text(USER_CODE, encoding="utf-8")
+
+    code = cli.main([
+        "--json", "pipeline", "script",
+        "--prompt", "a ping/pong script",
+        "--addon", "probe_addon",
+        "--name", "pinger",
+        "--host", "pomps-pc",
+        "--script", str(script),
+        "--run-host", "pomps-pc",
+        "--verdict-timeout", "5",
+    ])
+
+    assert code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == "inconclusive"
+    verdict = next(e for e in payload["events"] if e["phase"] == "verdict")
+    assert verdict["data"]["status"] == "verified" and verdict["data"]["nonce"]
