@@ -37,6 +37,9 @@ ALLOWED = re.compile(
     # saw exactly that). Literal values only: `mp_roundtime 60;quit`, `mp_roundtime 6` and `mp_freezetime 1`
     # are all still rejected, because every alternative is fullmatched.
     r"|mp_roundtime 60|mp_roundtime_defuse 60|mp_freezetime 0"
+    # The script verdict route (s2docs.live.sandbox_run): the ONLY map load in the allowlist, exactly one
+    # map, and the readback + the prefixed user-command surface a bundled module can register.
+    r"|map de_dust2|status|hu_[a-z][a-z0-9_]{0,31}(?: [A-Za-z0-9 .,:_/-]{0,120})?"
 )
 
 # While Hermes drives a test, nothing may kill the player and nothing may end the round (a round end wipes

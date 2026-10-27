@@ -408,7 +408,8 @@ OPERATIONS: tuple[Operation, ...] = (
         surfaces=frozenset({"cli"}),
         cli=("pipeline", "script"), api=("POST", "/api/pipeline/script"), mcp="pipeline_script",
         note="CLI-only by design, like pipeline_run; build/deploy are real with --compile/"
-             "--deploy-host, and only the in-game verdict is still blocked",
+             "--deploy-host, and --run-host bundles the module into the hermes_sandbox runtime and "
+             "judges the verdict by its console readback (no map compile)",
     ),
 )
 

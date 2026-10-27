@@ -15,6 +15,7 @@ import uuid
 from importlib import resources
 from pathlib import Path
 
+from s2docs.live import sandbox_user
 from s2docs.live.spawnables import Spawnable
 
 _NS = uuid.UUID("6f3c2a10-5b1e-4c55-9d0a-48e5c2b1a001")
@@ -104,20 +105,57 @@ def render_vmap(spawnables: dict[str, Spawnable]) -> str:
     return template.replace("{{ENTITIES}}", ",\n".join(blocks))
 
 
-def render_script(spawnables: dict[str, Spawnable]) -> str:
-    """The cs_script: formation.mjs inlined (no imports, no exports) + the spawnable heights."""
+def user_block(user: sandbox_user.UserModule) -> str:
+    """The bundled module: wrapped in its own function scope and invoked with the runtime's `api`.
+
+    It is a function scope, not a module: the runtime already owns `Instance`, the single `OnPlayerChat`
+    registration and the think loop, so the module gets `start(api)` and nothing else (the contract in
+    :mod:`s2docs.live.sandbox_user`). It reports on load either way — `ready <nonce>` after `start()`
+    returns, `error <message>` when it throws — so an in-game readback can prove this build is the one the
+    engine loaded, and a throwing module is a visible failure instead of a silent no-op.
+    """
+    tag = json.dumps(user.name)
+    nonce = json.dumps(user.nonce)
+    lines = [
+        f"// ---- user module {tag} (bundled by s2docs.live.sandbox_map; it is not a point_script of its own) ----",
+        "(function () {",
+        user.code.rstrip(),
+        "",
+        f"  const __hsApi = hsUserApi({tag}, {nonce});",
+        "  try { start(__hsApi); }",
+        f'  catch (e) {{ Instance.Msg("[user:" + {tag} + "] error " + hsUserText(e)); return; }}',
+        f'  Instance.Msg("[user:" + {tag} + "] ready " + {nonce});',
+        '  if (typeof stop === "function") {',
+        '    Instance.RegisterCheatCommand("hu_stop", () => {',
+        "      try { stop(__hsApi); }",
+        f'      catch (e) {{ Instance.Msg("[user:" + {tag} + "] error " + hsUserText(e)); }}',
+        "    });",
+        "  }",
+        "})();",
+    ]
+    return "\n".join(lines)
+
+
+def render_script(spawnables: dict[str, Spawnable], user: sandbox_user.UserModule | None = None) -> str:
+    """The cs_script: formation.mjs inlined (no imports, no exports) + the spawnable heights.
+
+    ``user`` appends the bundled user module (``user_block``) at ``/*USER*/``; with ``None`` the marker is
+    removed and the result is the stock sandbox runtime, so the two differ only by the module's own bytes.
+    """
     formation = (_SRC / "formation.mjs").read_text(encoding="utf-8").replace("export function", "function")
     runtime = (_SRC / "runtime.js").read_text(encoding="utf-8")
     heights = json.dumps({s.id: s.height for s in sorted(spawnables.values(), key=lambda s: s.id)},
                          separators=(", ", ": "))
-    return runtime.replace("/*FORMATION*/", formation).replace("/*HEIGHTS*/{}", heights)
+    rendered = runtime.replace("/*FORMATION*/", formation).replace("/*HEIGHTS*/{}", heights)
+    return rendered.replace("/*USER*/", user_block(user) if user is not None else "")
 
 
-def write_addon(content_root: Path, spawnables: dict[str, Spawnable]) -> list[Path]:
+def write_addon(content_root: Path, spawnables: dict[str, Spawnable],
+                user: sandbox_user.UserModule | None = None) -> list[Path]:
     """content_root = <CS2>/content/csgo_addons/hermes_sandbox (or a local staging copy)."""
     maps, scripts = content_root / "maps", content_root / "maps" / "scripts"
     scripts.mkdir(parents=True, exist_ok=True)
     out = [maps / "hermes_sandbox.vmap", scripts / "hermes_sandbox.js"]
     out[0].write_bytes(render_vmap(spawnables).encode("utf-8"))
-    out[1].write_bytes(render_script(spawnables).encode("utf-8"))
+    out[1].write_bytes(render_script(spawnables, user).encode("utf-8"))
     return out

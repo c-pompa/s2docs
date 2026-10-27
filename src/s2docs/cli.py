@@ -460,7 +460,8 @@ def _cmd_pipeline_verdict(args: argparse.Namespace) -> int:
 
 def _cmd_pipeline_script(args: argparse.Namespace) -> int:
     """`s2docs pipeline script`: text -> cs_script as one job — generate/validate real, and with
-    --compile/--deploy-host the .js is compiled to .vjs_c on the host and copied loose there."""
+    --compile/--deploy-host the .js is compiled to .vjs_c on the host and copied loose there. With
+    --run-host the module is bundled into the hermes_sandbox runtime and the verdict is its readback."""
     from s2docs import pipeline
 
     text = Path(args.script).read_text(encoding="utf-8") if args.script else None
@@ -475,6 +476,9 @@ def _cmd_pipeline_script(args: argparse.Namespace) -> int:
         project_id=args.project,
         compile=args.compile,
         deploy_host_id=args.deploy_host,
+        run_host=args.run_host,
+        restore=args.restore,
+        verdict_timeout_sec=args.verdict_timeout,
         build_timeout_sec=args.build_timeout,
     )
     return _emit_chain(args, job)
@@ -1426,6 +1430,22 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument(
         "--deploy-host",
         help="copy the compiled .vjs_c LOOSE to this host's <CS2>/game/csgo/scripts (needs --compile)",
+    )
+    s.add_argument(
+        "--run-host",
+        help="run the script in game: bundle it into the hermes_sandbox runtime, compile that, copy it "
+             "LOOSE to <CS2>/game/csgo/maps/scripts and reload the map over netcon. The verdict is the "
+             "console readback ([user:<name>] ready <nonce> + [hs] pong), never a map compile",
+    )
+    s.add_argument(
+        "--restore",
+        action="store_true",
+        help="after the run, put the STOCK hermes_sandbox script back on --run-host and report whether the "
+             "restore reload verified",
+    )
+    s.add_argument(
+        "--verdict-timeout", type=int, default=90,
+        help="seconds a reload may take (map spawn + spawngroup load) before the verdict is a failure",
     )
     s.add_argument("--build-timeout", type=int, default=120, help="seconds to wait for the compile")
     s.add_argument("--project", help="ledger project id to attach the chain to")
