@@ -66,6 +66,7 @@ def add(
     ref: str | None = None,
     data: dict | None = None,
     test_run_id: str | None = None,
+    job_id: str | None = None,
 ) -> m.Evidence:
     """Store one evidence row. Validates the kind and caps `ref`/`data` so a caller can't bloat the DB.
 
@@ -75,6 +76,11 @@ def add(
     `project_id` may be omitted when `test_run_id` is given: the project is resolved from that run
     (and stays NULL when the run itself has no project — e.g. a director-driven iso run). This is what
     lets a human-confirm verdict be stored as durable evidence without the caller knowing a project.
+
+    `job_id` is the third anchor, for a record that belongs to a job and neither a test run nor a
+    project step (a pipeline chain: `s2docs pipeline run` then `s2docs pipeline verdict`). The job's
+    project is used when the caller gives none, and the job id is the only anchor such a row needs —
+    the row's `ref` is the job id, so a reader can trace it back without a link table.
     """
     if kind not in EVIDENCE_KINDS:
         raise EvidenceError(f"kind must be one of {EVIDENCE_KINDS}, not {kind!r}")
@@ -85,6 +91,13 @@ def add(
             raise EvidenceError(f"unknown test_run {test_run_id!r}")
         if not (project_id and str(project_id).strip()):
             project_id = run_row["project_id"]  # may still be None
+    elif job_id:
+        with db.reader() as conn:
+            job_row = conn.execute("SELECT project_id FROM jobs WHERE id = ?", (job_id,)).fetchone()
+        if job_row is None:
+            raise EvidenceError(f"unknown job {job_id!r}")
+        if not (project_id and str(project_id).strip()):
+            project_id = job_row["project_id"]  # may still be None
     elif not (project_id and str(project_id).strip()):
         raise EvidenceError("project_id is required (or a test_run_id to resolve it from)")
     if not (project_id and str(project_id).strip()):
@@ -161,6 +174,7 @@ def add_and_publish(
     ref: str | None = None,
     data: dict | None = None,
     test_run_id: str | None = None,
+    job_id: str | None = None,
 ) -> m.Evidence:
     """The one code path that records an evidence row AND fires the confirm push channel for it.
 
@@ -177,6 +191,7 @@ def add_and_publish(
         ref=ref,
         data=data,
         test_run_id=test_run_id,
+        job_id=job_id,
     )
     if row.kind == "human-confirm":
         from s2docs import confirms

@@ -172,8 +172,24 @@ anything unless `status` lists the spawngroup **and** `hs_ping` answers, sends t
 `hs_model`, and returns `verified` only when the reply carries
 `[hs] model <exact path> spawned name=<exact path>` **and** the `[hs] pong` counter rose. A different name
 (`SetModel` lost → roasted chicken), an `[hs] error …` line, or no line at all within the drain is `failed`;
-a host with no sandbox is `blocked`. The readback is mechanical: `s2docs pipeline run` still closes
-`inconclusive` with `next='request a visual verdict'` unless the caller passes `--verdict pass`.
+a host with no sandbox is `blocked`. The readback is mechanical, so `s2docs pipeline run` closes
+`inconclusive` — and that is where the job stops, because the person who judges the spawn has not
+looked yet. The look is a separate, later step:
+
+```
+s2docs pipeline verdict <job-id> pass|fail --notes "the bridge spawned at the right scale"
+```
+
+`pipeline.record_verdict` is the one narrow transition on a closed pipeline job:
+`inconclusive -> passed|failed` (never a reopen). It refuses a job with no `ingame` stage, one whose
+`ingame` stage was skipped (no target host / nothing compiled) or blocked (no netcon/sandbox), one whose
+readback did not verify (a `pass` can never override a `failed` readback), a job that is still running
+(that is `s2docs job verdict`), and a second *contradictory* verdict. Repeating the same verdict is an
+idempotent no-op. The verdict is stored durably as a `human-confirm` evidence row (`ref` = the job id,
+so the confirm push files fire) plus a `milestone` job event with `phase='verdict'` — the chain's
+`STAGES` are untouched, so the timeline of a judged job reads `STAGES + ('verdict',)` — and the job's
+close-out summary is rewritten to say a human looked and what they saw. Nothing is re-run and nothing is
+spawned a second time.
 
 
 ### Building and loading it
@@ -231,7 +247,10 @@ editing the plist is a fleet change). The address must match `host:port`; anythi
 the target host with an MD5 readback, and the stage is `verified` only on the game's own
 `[hs] model <path> spawned name=<path>` line plus a rising `hs_ping` count. It is CLI/pipeline-only for now
 (no REST route): it needs a build run id and a host that is already in a map with the sandbox loaded, which
-is the pipeline's job, not a one-shot action.
+is the pipeline's job, not a one-shot action. The verdict on what the spawn *looked* like is likewise
+CLI-only (`s2docs pipeline verdict <job> pass|fail`, `pipeline.record_verdict`): it is a fact about one
+local job record, and `POST /api/jobs/{id}/verdict` is a different thing — that one answers a *running*
+step and needs a linked test run.
 
 A host that cannot take an action now (no netcon address, unreachable, leased by a test run) is a `409`
 with `conflict: true`; a malformed envelope is `422`.
