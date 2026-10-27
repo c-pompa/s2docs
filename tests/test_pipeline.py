@@ -63,7 +63,7 @@ def _addon(tmp_path, monkeypatch, name="probe_addon"):
     monkeypatch.setenv("S2DOCS_WORKSPACE", str(tmp_path / "ws"))
     get_settings.cache_clear()
     root = addon_root(get_settings().workspace_dir, "cs2", name)
-    root.mkdir(parents=True)
+    root.mkdir(parents=True, exist_ok=True)
     return root
 
 
@@ -908,3 +908,231 @@ def test_cli_passes_the_ingame_flags_through(tmp_path, monkeypatch, capsys):
     ingame = next(e for e in payload["events"] if e["phase"] == "ingame")
     assert ingame["data"]["verdict"] == "pass"
     assert seen["model"] == "models/bridge/bridge.vmdl" and seen["clear"] is True
+
+
+# ------------------------------------------------- the look at the screen (`pipeline verdict`)
+# The chain closes `inconclusive` the moment the readback verifies, because a console line is not a
+# look at the screen. The look happens AFTER that, so the verdict is its own command on a closed job:
+# `inconclusive -> passed|failed`, recorded as a human-confirm evidence row + a `verdict` stage event,
+# never by re-running the chain (which would spawn a second model nobody judged).
+
+
+def _verified_chain(db, tmp_path, monkeypatch, **kw):
+    """A real asset-chain job that closed `inconclusive` on a verified readback (the measured case)."""
+    _addon(tmp_path, monkeypatch)
+    _host(db)
+    _host(db, "pomps-pc")
+    _patch_build(monkeypatch, tmp_path)
+    _patch_ingame(monkeypatch, **kw)
+    return _run(db, build_command="rc -i bridge.vmdl -nop4", ingame_host="pomps-pc")
+
+
+def _human_confirms(db, job_id):
+    from s2docs import evidence
+
+    return [row for row in evidence.list_evidence(db, kind="human-confirm") if row.ref == job_id]
+
+
+def test_verdict_pass_closes_a_verified_inconclusive_job_and_records_evidence(db, tmp_path, monkeypatch):
+    job = _verified_chain(db, tmp_path, monkeypatch)
+    assert job.status == "inconclusive"
+
+    closed = pipeline.record_verdict(db, job.id, "pass", notes="the bridge spawned at the right scale")
+
+    assert closed.status == "passed"
+    # the chain's seven stages, then the one stage the human added — no re-run, no second spawn
+    assert [e.phase for e in closed.events if e.phase] == [*pipeline.STAGES, pipeline.VERDICT_STAGE]
+    verdict_event = closed.events[-1]
+    assert verdict_event.phase == "verdict" and verdict_event.level == "milestone"
+    assert verdict_event.data["verdict"] == "pass" and verdict_event.data["source"] == "coordinator"
+    assert verdict_event.data["from"] == "inconclusive" and verdict_event.data["to"] == "passed"
+
+    # durable, not just a status: a human-confirm row anchored to the job, linked from it
+    rows = _human_confirms(db, job.id)
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.kind == "human-confirm" and row.data["verdict"] == "pass"
+    assert row.data["notes"] == "the bridge spawned at the right scale"
+    assert row.data["job_id"] == job.id and row.data["stage"] == "ingame"
+    assert row.id == verdict_event.data["evidence_id"]
+    assert any(link.kind == "evidence" and link.ref_id == row.id for link in closed.links)
+
+    # the close-out says what a human saw, and does not claim the console line was the proof
+    assert "visual verdict pass" in closed.summary.learned
+    assert "looked right" in closed.summary.learned
+    assert "human look at the screen" in closed.summary.next
+    # …and the confirm push channel fired, so a waiting agent sees it without polling the API
+    from s2docs import confirms
+
+    assert row.id in confirms.confirms_jsonl_path().read_text(encoding="utf-8")
+
+
+def test_verdict_fail_closes_the_job_failed(db, tmp_path, monkeypatch):
+    job = _verified_chain(db, tmp_path, monkeypatch)
+
+    closed = pipeline.record_verdict(db, job.id, "fail", notes="the material was untextured grey")
+
+    assert closed.status == "failed"
+    assert "visual verdict fail" in closed.summary.learned
+    assert "did NOT look right" in closed.summary.learned
+    assert "fix what was seen" in closed.summary.next
+    assert closed.events[-1].data["to"] == "failed"
+
+
+def test_verdict_is_idempotent_for_the_same_call_and_a_conflict_for_a_different_one(db, tmp_path, monkeypatch):
+    job = _verified_chain(db, tmp_path, monkeypatch)
+
+    first = pipeline.record_verdict(db, job.id, "pass", notes="looks right")
+    again = pipeline.record_verdict(db, job.id, "pass", notes="looks right")
+
+    assert again.status == "passed"
+    # a retried command is a no-op: one evidence row, one verdict event, not two
+    assert len(_human_confirms(db, job.id)) == 1
+    assert [e.phase for e in again.events if e.phase] == [*pipeline.STAGES, pipeline.VERDICT_STAGE]
+    assert again.summary.learned == first.summary.learned
+
+    with pytest.raises(pipeline.jobs.JobConflict, match="already passed"):
+        pipeline.record_verdict(db, job.id, "fail", notes="changed my mind")
+    assert len(_human_confirms(db, job.id)) == 1
+
+
+def test_verdict_refuses_a_job_whose_readback_failed(db, tmp_path, monkeypatch):
+    """A verified spawn that then failed is `failed`, and no verdict can rescue it."""
+    _addon(tmp_path, monkeypatch)
+    _host(db)
+    _host(db, "pomps-pc")
+    _patch_build(monkeypatch, tmp_path)
+    _patch_ingame(monkeypatch, status="failed", detail="the runtime spawned name=models/chicken/chicken_roasted.vmdl")
+
+    job = _run(db, build_command="rc -i bridge.vmdl -nop4", ingame_host="pomps-pc")
+    assert job.status == "failed"
+
+    with pytest.raises(pipeline.jobs.JobConflict, match="not verified"):
+        pipeline.record_verdict(db, job.id, "pass", notes="it looked fine to me")
+    assert pipeline.jobs.get(db, job.id).status == "failed"
+    assert _human_confirms(db, job.id) == []
+
+
+def test_verdict_refuses_a_job_with_no_ingame_stage(db, tmp_path, monkeypatch):
+    """Not an asset-chain job: nothing was ever spawned, so there is nothing anybody could have seen."""
+    from s2docs import jobs
+
+    _addon(tmp_path, monkeypatch)
+    _host(db)
+    job = jobs.enqueue(
+        db, kind="test", title="a plain job", target="probe_addon", host_id="desktop-pc",
+        purpose="no chain here", expected="a closed job",
+    )
+    jobs.start(db, job.id, worker="test")
+    jobs.finish(db, job.id, status="inconclusive", summary={
+        "what": "nothing", "why": "test", "learned": "no ingame stage", "next": "none",
+    })
+
+    with pytest.raises(pipeline.jobs.JobConflict, match="no ingame stage"):
+        pipeline.record_verdict(db, job.id, "pass")
+
+
+def test_verdict_refuses_a_job_whose_ingame_stage_was_skipped_or_blocked(db, tmp_path, monkeypatch):
+    """Skipped (no host) and blocked (no netcon) both mean nothing was on screen."""
+    from s2docs.live.service import LiveError
+
+    _addon(tmp_path, monkeypatch)
+    _host(db)
+    skipped = _run(db)  # no --ingame-host
+    with pytest.raises(pipeline.jobs.JobConflict, match="ingame stage was skipped"):
+        pipeline.record_verdict(db, skipped.id, "pass")
+
+    _host(db, "pomps-pc")
+    _patch_build(monkeypatch, tmp_path)
+    _patch_ingame(monkeypatch, show_raises=LiveError("no netcon address for 'pomps-pc'"))
+    blocked = _run(db, build_command="rc -i bridge.vmdl -nop4", ingame_host="pomps-pc")
+    assert blocked.status == "inconclusive"
+    with pytest.raises(pipeline.jobs.JobConflict, match="ingame stage was blocked"):
+        pipeline.record_verdict(db, blocked.id, "fail")
+    assert blocked.id and pipeline.jobs.get(db, blocked.id).status == "inconclusive"
+
+
+def test_verdict_refuses_a_running_job(tmp_path, monkeypatch):
+    """A running job's answer is `s2docs job verdict`; closing it here would skip the chain's close-out."""
+    from s2docs import jobs
+    from s2docs.config import get_settings
+    from s2docs.db.connection import Database
+
+    monkeypatch.setenv("S2DOCS_DATA_DIR", str(tmp_path / "data"))
+    get_settings.cache_clear()
+    db = Database(get_settings().db_path)
+    with db.writer():
+        pass
+    _host(db)
+    job = jobs.enqueue(
+        db, kind="test", title="still going", target="probe_addon", host_id="desktop-pc",
+        purpose="running", expected="finish",
+    )
+    jobs.start(db, job.id, worker="test")
+    # the readback can be recorded before the chain closes out — the status is what gates the verdict
+    jobs.event(db, job.id, level="milestone", message="ingame verified", phase="ingame",
+               data={"status": "verified", "host_id": "desktop-pc", "model": "models/bridge/bridge.vmdl"})
+
+    with pytest.raises(pipeline.jobs.JobConflict, match="is running"):
+        pipeline.record_verdict(db, job.id, "pass")
+    assert jobs.get(db, job.id).status == "running"
+
+
+def test_verdict_refuses_an_unknown_verdict_or_source(db, tmp_path, monkeypatch):
+    job = _verified_chain(db, tmp_path, monkeypatch)
+
+    with pytest.raises(pipeline.PipelineError, match="verdict must be one of pass, fail"):
+        pipeline.record_verdict(db, job.id, "skip")  # `skip` is for steps, not for a look at the screen
+    with pytest.raises(pipeline.PipelineError, match="verdict must be one of pass, fail"):
+        pipeline.record_verdict(db, job.id, "looked fine")
+    with pytest.raises(pipeline.PipelineError, match="source must be one of"):
+        pipeline.record_verdict(db, job.id, "pass", source="vibes")
+    assert pipeline.jobs.get(db, job.id).status == "inconclusive"
+
+
+def test_cli_pipeline_verdict_closes_the_job_and_prints_the_chain(tmp_path, monkeypatch, capsys):
+    import json as _json
+
+    from s2docs import cli
+    from s2docs.config import get_settings
+    from s2docs.db.connection import Database
+
+    monkeypatch.setenv("S2DOCS_DATA_DIR", str(tmp_path / "data"))
+    _addon(tmp_path, monkeypatch)
+    get_settings.cache_clear()
+    db = Database(get_settings().db_path)
+    with db.writer():
+        pass
+    job = _verified_chain(db, tmp_path, monkeypatch)
+
+    code = cli.main(["--json", "pipeline", "verdict", job.id, "pass", "--notes", "spawned, looks right"])
+
+    assert code == 0
+    payload = _json.loads(capsys.readouterr().out)
+    assert payload["status"] == "passed"
+    assert [e["phase"] for e in payload["events"] if e["phase"]] == [*pipeline.STAGES, "verdict"]
+    assert payload["events"][-1]["data"]["verdict"] == "pass"
+    assert payload["events"][-1]["data"]["notes"] == "spawned, looks right"
+
+
+def test_cli_pipeline_verdict_reports_a_conflict_and_an_unknown_job(tmp_path, monkeypatch, capsys):
+    from s2docs import cli
+    from s2docs.config import get_settings
+    from s2docs.db.connection import Database
+
+    monkeypatch.setenv("S2DOCS_DATA_DIR", str(tmp_path / "data"))
+    _addon(tmp_path, monkeypatch)
+    get_settings.cache_clear()
+    db = Database(get_settings().db_path)
+    with db.writer():
+        pass
+    job = _verified_chain(db, tmp_path, monkeypatch)
+    pipeline.record_verdict(db, job.id, "pass")
+    capsys.readouterr()
+
+    conflict = cli.main(["pipeline", "verdict", job.id, "fail"])
+    assert conflict == cli.EXIT_CONFLICT
+    assert "already passed" in capsys.readouterr().err
+
+    missing = cli.main(["pipeline", "verdict", "j-nope", "pass"])
+    assert missing == cli.EXIT_NOT_FOUND

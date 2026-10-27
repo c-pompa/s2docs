@@ -746,18 +746,8 @@ def next_job(db: Database, host_id: str) -> m.Job:
     return get(db, row["id"])
 
 
-def finish(db: Database, job_id: str, *, status: str, summary: dict | None) -> m.Job:
-    """Close out a running/queued job. Gate: all four summary fields non-empty, each <= 600 chars.
-
-    ``status='inconclusive'`` is the honest close-out for a run that ended without a pass/fail verdict
-    (a step-gated demo the user stopped answering). It carries the same summary gate as any other
-    finish status.
-    """
-    job = get(db, job_id)
-    if status not in FINISH_STATUSES:
-        raise JobValidationError(f"status must be one of {FINISH_STATUSES}, not {status!r}", ["status"])
-    if job.status not in ACTIVE_STATUSES:
-        raise JobConflict(f"job {job_id} is {job.status}; only a queued/running job can finish")
+def _clean_summary(summary: dict | None) -> dict[str, str]:
+    """The summary gate every close-out path shares: all four fields, non-empty, each <= 600 chars."""
     fields: list[str] = []
     cleaned: dict[str, str] = {}
     for field in SUMMARY_FIELDS:
@@ -772,11 +762,48 @@ def finish(db: Database, job_id: str, *, status: str, summary: dict | None) -> m
             f"bad: {', '.join(fields)}",
             fields,
         )
+    return cleaned
+
+
+def finish(db: Database, job_id: str, *, status: str, summary: dict | None) -> m.Job:
+    """Close out a running/queued job. Gate: all four summary fields non-empty, each <= 600 chars.
+
+    ``status='inconclusive'`` is the honest close-out for a run that ended without a pass/fail verdict
+    (a step-gated demo the user stopped answering). It carries the same summary gate as any other
+    finish status.
+    """
+    job = get(db, job_id)
+    if status not in FINISH_STATUSES:
+        raise JobValidationError(f"status must be one of {FINISH_STATUSES}, not {status!r}", ["status"])
+    if job.status not in ACTIVE_STATUSES:
+        raise JobConflict(f"job {job_id} is {job.status}; only a queued/running job can finish")
+    cleaned = _clean_summary(summary)
     with db.writer() as conn, conn:
         conn.execute(
             "UPDATE jobs SET status = ?, summary = ?, finished_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'), "
             "updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE id = ? AND status IN ('queued', 'running')",
             (status, json.dumps(cleaned), job_id),
+        )
+    return get(db, job_id)
+
+
+def rewrite_summary(db: Database, job_id: str, *, summary: dict | None) -> m.Job:
+    """Rewrite a FINISHED job's close-out summary, leaving status/``finished_at`` alone.
+
+    The narrow companion to :func:`finish` for a fact that arrives *after* the close-out but changes
+    what the job learned (a human looked at the screen and the readback's ``inconclusive`` was answered —
+    :func:`s2docs.pipeline.record_verdict`). Same four-field gate; a queued/running job has no
+    close-out to rewrite (finish it), and the status transition itself is not this function's business.
+    """
+    job = get(db, job_id)  # 404 on an unknown job
+    if job.status not in TERMINAL_STATUSES:
+        raise JobConflict(f"job {job_id} is {job.status}; only a finished job has a close-out summary to rewrite")
+    cleaned = _clean_summary(summary)
+    with db.writer() as conn, conn:
+        conn.execute(
+            "UPDATE jobs SET summary = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') "
+            "WHERE id = ? AND status = ?",
+            (json.dumps(cleaned), job_id, job.status),
         )
     return get(db, job_id)
 

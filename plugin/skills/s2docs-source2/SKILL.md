@@ -109,9 +109,17 @@ which stages are real, so read the timeline rather than assuming every stage ran
   pushes the collected artifacts **loose** into that host's `game/csgo` (md5 readback), then sends the
   round lock and `hs_model`. It is `verified` only on the game's own
   `[hs] model <path> spawned name=<path>` line plus a rising `hs_ping` — a console line is not a visual
-  verdict, so the job still closes `inconclusive` and asks for one unless you pass `--verdict pass`.
+  verdict, so the job closes `inconclusive` and stops there. `--verdict pass|fail` on `pipeline run` is
+  only for a verdict you already made *while* watching; do not use it to predict what you will see.
   `concept` and `mesh` are recorded **stubbed** because no text-to-3D generator is wired into this
   repo (the chain starts from a mesh that exists).
+- `s2docs pipeline verdict <job-id> pass|fail [--notes TEXT] [--source …]` — the look at the screen,
+  recorded **after** the chain closed. `pass` closes the job `passed`, `fail` closes it `failed`; nothing
+  is re-run and nothing is spawned twice. It writes a `human-confirm` evidence row (so the confirm push
+  files fire) and a `verdict` stage event, and rewrites the close-out summary. Refused: a job with no
+  `ingame` stage, an `ingame` stage that was skipped or blocked (nothing was on screen), a readback that
+  did not verify (a `pass` never overrides `failed`), a still-running job (use `job_verdict` for a step),
+  and a second contradictory verdict — repeating the same one is a no-op.
 - `s2docs pipeline script --prompt … --addon <name> --name <script> [--script file.js] [--compile] [--deploy-host <id>]` —
   text → cs_script. `generate` writes the `--script` text you supply (the caller is the
   generator, so the stage never invents code it cannot attribute) and `validate` type-checks it

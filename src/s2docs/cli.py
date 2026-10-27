@@ -434,6 +434,30 @@ def _cmd_pipeline(args: argparse.Namespace) -> int:
     return _emit_chain(args, job)
 
 
+def _cmd_pipeline_verdict(args: argparse.Namespace) -> int:
+    """`s2docs pipeline verdict`: the look at the screen, recorded on the job that already closed.
+
+    The chain cannot ask for this — a verified readback only proves the model spawned, and the person
+    who judges it looks *after* the job ends. So the verdict is its own command, on a closed
+    ``inconclusive`` job, and it neither re-runs the chain nor spawns a second model.
+    """
+    from s2docs import jobs, pipeline
+    from s2docs.db.repository import NotFound
+
+    db = Database(get_settings().db_path)
+    try:
+        job = pipeline.record_verdict(
+            db, args.job_id, args.verdict, notes=args.notes, source=args.source,
+        )
+    except NotFound as exc:
+        return _fail(str(exc), EXIT_NOT_FOUND)
+    except jobs.JobConflict as exc:
+        return _fail(str(exc), EXIT_CONFLICT)
+    except pipeline.PipelineError as exc:
+        return _fail(str(exc), EXIT_VALIDATION)
+    return _emit_chain(args, job)
+
+
 def _cmd_pipeline_script(args: argparse.Namespace) -> int:
     """`s2docs pipeline script`: text -> cs_script as one job — generate/validate real, and with
     --compile/--deploy-host the .js is compiled to .vjs_c on the host and copied loose there."""
@@ -1361,11 +1385,32 @@ def build_parser() -> argparse.ArgumentParser:
                    help="hs_clear prop after the readback, so the test leaves nothing behind")
     q.add_argument(
         "--verdict", choices=["pass", "fail"],
-        help="Your visual verdict on a verified readback; only `pass` closes the job `passed` "
-        "(without it a verified readback closes `inconclusive`: request a visual verdict)",
+        help="A visual verdict you already made while watching this run: only `pass` closes the job "
+        "`passed` inline. Do NOT pass one to predict what you will see later — a verified readback "
+        "closes `inconclusive` and `s2docs pipeline verdict <job> pass|fail` records the look afterwards",
     )
     q.add_argument("--project", help="ledger project id to attach the chain to")
     q.set_defaults(fn=_cmd_pipeline)
+
+    v = pc.add_parser(
+        "verdict",
+        help="Record a human visual verdict on an asset-chain job that already closed inconclusive",
+        description=(
+            "The chain proves a model spawned (console readback only) and closes `inconclusive`. "
+            "Look at the screen, then record what you saw here: `pass` closes the job `passed`, `fail` "
+            "closes it `failed`. Nothing is re-run and nothing is spawned again; the verdict is kept as "
+            "a human-confirm evidence row plus a `verdict` stage event."
+        ),
+    )
+    v.add_argument("job_id", help="the closed pipeline job id (from `s2docs pipeline run`)")
+    v.add_argument("verdict", choices=["pass", "fail"], help="what you saw: pass | fail")
+    v.add_argument("--notes", help="what you actually saw (mesh, material, scale, placement, ...)")
+    v.add_argument(
+        "--source", default="coordinator",
+        help="where the verdict came from: chat | console | key | web | coordinator | director "
+        "(default: coordinator — a human relaying a look they made)",
+    )
+    v.set_defaults(fn=_cmd_pipeline_verdict)
 
     s = pc.add_parser("script", help="Run the text->cs_script chain for one script")
     s.add_argument("--prompt", required=True, help="What the script should do; recorded on the job")

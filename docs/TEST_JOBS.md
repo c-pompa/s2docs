@@ -97,6 +97,13 @@ it lands as a `milestone` timeline event (`data.restatus {from, to, reason}`) so
 auditable. `finished_at` and the summary are left untouched: the run ended when it ended, this only
 re-states the verdict.
 
+**A verdict that arrives after the close-out** — `s2docs pipeline verdict <job> pass|fail` is not
+`restatus` and not `job verdict`. An asset-chain job closes `inconclusive` on a *verified* readback, and
+the person who judges what the spawn looked like only looks afterwards; `pipeline.record_verdict` owns
+that one transition (`inconclusive -> passed|failed`), writes a `human-confirm` evidence row anchored to
+the job plus a `verdict` stage event, and rewrites the summary through `jobs.rewrite_summary` (same
+four-field gate, `status`/`finished_at` untouched). It is CLI-only, like the rest of `pipeline`.
+
 ## MCP
 
 `job_enqueue, job_list, job_get, job_screenshots, job_next, job_assign, job_start, job_event, job_attach(job_id, path),

@@ -22,10 +22,14 @@ is recorded **skipped** with the reason (no destination, or nothing new compiled
 blocked and not a pass: the ledger says which precondition was missing instead of implying the
 capability does not exist.
 
-A verified ``ingame`` readback is **not** a visual verdict: the job closes ``inconclusive`` with
-``next='request a visual verdict'`` unless the caller passes one (``verdict="pass"``), which is the only
-way this slice ever closes ``passed``. ``failed`` is real for a build, an artifact pull, a deploy or a
-readback that did not match.
+A verified ``ingame`` readback is **not** a visual verdict: the job closes ``inconclusive`` and its
+``next`` says to look at the screen and then run ``s2docs pipeline verdict <job> pass|fail``. That
+command (:func:`record_verdict`) is the one narrow transition this module owns besides the chain —
+``inconclusive -> passed`` / ``-> failed`` on a verified spawn, writing a ``human-confirm`` evidence row
+and a ``verdict`` stage event — because the look happens *after* the job closed, and re-running the
+chain to claim it would spawn a second model nobody judged. A caller who already watched the run can
+still pass ``verdict="pass"`` inline (the chain then closes ``passed``); ``failed`` is real for a build,
+an artifact pull, a deploy or a readback that did not match, and no verdict can override one.
 
 Every stage writes exactly one job event whose ``phase`` is the stage id, in stage order, so
 ``Job.current_step``/``jobs.get(...).phase`` and the timeline show the same chain. A produced
@@ -72,9 +76,13 @@ NO_INGAME_HOST_REASON = (
 )
 
 #: The only close-out a mechanical readback earns on its own: someone has to look at the screen.
+#: The job is CLOSED at this point, so the verdict cannot come from this run — it arrives later, as
+#: `s2docs pipeline verdict <job> pass|fail` (:func:`record_verdict`), which is the one transition this
+#: module owns besides the chain itself.
 NEEDS_VISUAL_VERDICT = (
     "the model precached and spawned on the target host (readback verified), but a console line is not a "
-    "visual verdict: ask the user whether they saw it, then re-run with --verdict pass|fail to close the job"
+    "visual verdict: look at the spawn in the running game, then record what you saw with "
+    "`s2docs pipeline verdict <job> pass|fail --notes ...` (no re-run, no second spawn)"
 )
 
 #: Why ``ingame`` is blocked rather than skipped/attempted: a capability precondition is missing.
@@ -195,10 +203,11 @@ def run_asset_build_slice(
     Without a target host the stage is *skipped*; with a host but no sandbox/no netcon it is *blocked*
     — neither is ever a pass.
 
-    ``verdict`` is the caller's visual verdict (``pass``/``fail``) on a verified readback: ``pass`` is
-    the only way this slice closes ``passed``. A verified readback with no verdict closes
-    ``inconclusive`` with ``next='request a visual verdict'``, because a console line is not a look at
-    the screen.
+    ``verdict`` is a visual verdict (``pass``/``fail``) the caller already made *while* the chain ran:
+    ``pass`` closes the job ``passed`` inline. A verified readback with no verdict closes
+    ``inconclusive``, because a console line is not a look at the screen — the job's ``next`` then points
+    at ``s2docs pipeline verdict <job> pass|fail`` (:func:`record_verdict`), which answers the same
+    question later without spawning anything again.
     """
     if verdict is not None and verdict not in VERDICTS:
         raise PipelineError(f"verdict must be one of {', '.join(VERDICTS)} (or omitted), got {verdict!r}")
@@ -452,6 +461,198 @@ def run_asset_build_slice(
                 "honestly instead of a green status that hides them."
             ),
             learned="; ".join(learned_bits),
+            next_=next_,
+        ),
+    )
+
+
+# ------------------------------------------------------------------ the look at the screen
+
+#: The stage a recorded verdict appends. It is deliberately NOT in :data:`STAGES`: the chain ran and
+#: closed without it, and a timeline reads ``STAGES + (VERDICT_STAGE,)`` only for a job a human closed.
+VERDICT_STAGE = "verdict"
+
+#: What a verdict can close. ``skip`` exists on the confirm channel for a step that cannot be exercised;
+#: here it would be a third way to say nothing was seen, and ``inconclusive`` already means that.
+VERDICT_OUTCOMES: dict[str, str] = {"pass": "passed", "fail": "failed"}
+
+
+def _ingame_event(job: m.Job) -> m.JobEvent | None:
+    """The job's newest ``ingame`` stage event (the readback), or None when it has no such stage."""
+    found = [e for e in job.events if e.phase == "ingame"]
+    return found[-1] if found else None
+
+
+def _recorded_verdict(job: m.Job) -> tuple[str | None, str | None]:
+    """The verdict already on the job: ``(verdict, where)`` — the verdict stage first, then the readback.
+
+    A verdict stage event is what :func:`record_verdict` appends; the fallback is the inline
+    ``--verdict`` a caller passed while the chain ran, which ``run_asset_build_slice`` stores on the
+    ``ingame`` event instead. Both count as "somebody already said this", so a repeat can be a no-op.
+    """
+    for event in reversed(job.events):
+        if event.phase == VERDICT_STAGE and event.data.get("verdict"):
+            return event.data["verdict"], VERDICT_STAGE
+    ingame = _ingame_event(job)
+    if ingame is not None and ingame.data.get("verdict"):
+        return ingame.data["verdict"], "ingame"
+    return None, None
+
+
+def record_verdict(
+    db,
+    job_id: str,
+    verdict: str,
+    notes: str | None = None,
+    *,
+    source: str = "coordinator",
+) -> m.Job:
+    """Attach a human's visual verdict to an asset-chain job that already closed ``inconclusive``.
+
+    The chain proves the model spawned (a console readback) and then stops: only a person looking at the
+    screen can say it *looked right*, and that look happens after the job is closed. This is the one
+    narrow transition that answers it without re-running anything —
+
+    ``inconclusive -> passed`` (``verdict='pass'``) or ``-> failed`` (``verdict='fail'``).
+
+    It is not a general reopen. Refused, with the reason:
+
+    * a verdict outside ``pass|fail`` (:class:`PipelineError`);
+    * a job with no ``ingame`` stage — it is not an asset-chain job at all;
+    * an ``ingame`` stage that was **skipped** (no target host / no compiled artifacts) or **blocked**
+      (no netcon, no sandbox): nobody spawned anything, so there is nothing anyone could have seen;
+    * an ``ingame`` stage that did not verify: a ``pass`` can never override a readback that failed
+      (that job stays ``failed``);
+    * a job that is not closed (``queued``/``running`` — answer the step, don't close it here) or that
+      closed ``error``/``cancelled``;
+    * a second verdict that disagrees with the one already recorded (:class:`jobs.JobConflict`). The
+      same verdict again is an idempotent no-op: the job comes back unchanged and no second evidence
+      row or event is written, so a retried command cannot double-book the confirmation.
+
+    The verdict is recorded durably, not just in the status: a ``human-confirm`` evidence row (through
+    :func:`s2docs.evidence.add_and_publish`, so the confirm push files fire) anchored to the job, a
+    ``milestone`` job event with ``phase='verdict'``, a link from the job to that row, and a rewritten
+    close-out summary whose ``learned``/``next`` say who looked and what they saw.
+    """
+    from s2docs import evidence
+
+    job = jobs.get(db, job_id)  # 404 on an unknown job
+    if verdict not in VERDICTS:
+        raise PipelineError(
+            f"verdict must be one of {', '.join(VERDICTS)}, not {verdict!r}"
+        )
+    if source not in evidence.CONFIRM_SOURCES:
+        raise PipelineError(
+            f"source must be one of {', '.join(evidence.CONFIRM_SOURCES)}, not {source!r}"
+        )
+    ingame = _ingame_event(job)
+    if ingame is None:
+        raise jobs.JobConflict(
+            f"job {job_id} has no ingame stage; it was not produced by the asset pipeline, so there is "
+            "no spawn to look at (answer it with `s2docs job verdict` if it is a step-gated run)"
+        )
+    if ingame.data.get("skipped") or ingame.data.get("blocked") or ingame.data.get("status") in ("skipped", "blocked"):
+        why = ingame.data.get("reason") or ingame.data.get("detail") or ingame.message
+        raise jobs.JobConflict(
+            f"job {job_id} ingame stage was {ingame.data.get('status') or 'skipped'}, not a spawn: "
+            f"{why} — nothing was on screen for anyone to judge"
+        )
+    if ingame.data.get("status") != "verified" or ingame.level != "milestone":
+        raise jobs.JobConflict(
+            f"job {job_id} ingame readback is {ingame.data.get('status') or ingame.level}, not verified; "
+            f"a {verdict} verdict cannot override a readback that did not match "
+            f"({ingame.data.get('detail') or ingame.data.get('error') or ingame.message})"
+        )
+    already, where = _recorded_verdict(job)
+    if job.status in jobs.ACTIVE_STATUSES:
+        raise jobs.JobConflict(
+            f"job {job_id} is {job.status}; a visual verdict closes a job that already ended — answer the "
+            "running step with `s2docs job verdict`, or let the chain close it out first"
+        )
+    if job.status not in VERDICT_OUTCOMES.values() and job.status != "inconclusive":
+        raise jobs.JobConflict(
+            f"job {job_id} is {job.status}; only an inconclusive asset-chain job takes a visual verdict "
+            "(a cancelled/error job stays as it is — that is `s2docs job restatus` territory)"
+        )
+    if job.status == VERDICT_OUTCOMES[verdict] and already == verdict:
+        return job  # idempotent: the same verdict was already recorded, nothing new to say
+    if job.status != "inconclusive":
+        raise jobs.JobConflict(
+            f"job {job_id} is already {job.status} (verdict {already!r} from {where}); refusing to "
+            f"restate it as {verdict!r} — a contradictory verdict needs `s2docs job restatus` with a reason"
+        )
+
+    status = VERDICT_OUTCOMES[verdict]
+    row = evidence.add_and_publish(
+        db,
+        kind="human-confirm",
+        job_id=job_id,
+        ref=job_id,
+        data={
+            "verdict": verdict,
+            "notes": notes,
+            "source": source,
+            "job_id": job_id,
+            "stage": "ingame",
+            "ingame_event": ingame.id,
+            "readback_status": ingame.data.get("status"),
+            "host_id": ingame.data.get("host_id"),
+            "model": ingame.data.get("model"),
+        },
+    )
+    with db.writer() as conn, conn:
+        cur = conn.execute(
+            "UPDATE jobs SET status = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') "
+            "WHERE id = ? AND status = 'inconclusive'",
+            (status, job_id),
+        )
+        changed = cur.rowcount
+    if not changed:  # another writer closed it between the read and the update
+        raise jobs.JobConflict(f"job {job_id} was closed by someone else while the verdict was recorded")
+    jobs.link(db, job_id, kind="evidence", ref_id=row.id)
+    jobs.event(
+        db, job_id,
+        level="milestone",
+        phase=VERDICT_STAGE,
+        message=f"visual verdict {verdict} ({source})"
+        + (f": {notes}" if notes and notes.strip() else " (no note given)"),
+        data={
+            "verdict": verdict, "notes": notes, "source": source, "evidence_id": row.id,
+            "from": "inconclusive", "to": status, "ingame_event": ingame.id,
+            "host_id": ingame.data.get("host_id"), "model": ingame.data.get("model"),
+        },
+    )
+    previous = job.summary.model_dump() if job.summary is not None else {}
+    # Keep room for the new sentence: the verdict is the fact this rewrite exists to record, so the old
+    # learned line is what gets shortened, never the verdict.
+    before = previous.get("learned", "")[: SUMMARY_MAX - 250].rstrip(" ;,")
+    sep = f"{before}; " if before else ""
+    said = (notes or "").strip()[:120]
+    seen = f"seen by a human ({source})" + (f": {said}" if said else ", no note given")
+    if verdict == "pass":
+        learned = (
+            f"{sep}visual verdict pass — the spawn of {ingame.data.get('model')} "
+            f"on {ingame.data.get('host_id')} looked right ({seen})"
+        )
+        next_ = (
+            "Closed passed on a human look at the screen, not on the console readback alone; a second "
+            "chain for the next asset is the way forward, and concept/mesh generators are still stubs."
+        )
+    else:
+        learned = (
+            f"{sep}visual verdict fail — the spawn of {ingame.data.get('model')} "
+            f"on {ingame.data.get('host_id')} did NOT look right ({seen})"
+        )
+        next_ = (
+            "Closed failed on a human look at the screen even though the readback verified: fix what was "
+            "seen (mesh, material, scale, placement), then re-run the chain and look again."
+        )
+    return jobs.rewrite_summary(
+        db, job_id,
+        summary=_summary(
+            what=previous.get("what", f"Ran the asset chain for job {job_id}."),
+            why=previous.get("why", "Record what the chain proved and what a human saw."),
+            learned=learned.lstrip("; "),
             next_=next_,
         ),
     )
