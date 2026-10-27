@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import re
 import sqlite3
 import subprocess
@@ -166,9 +167,27 @@ def _load(conn: sqlite3.Connection, host_id: str) -> m.Host:
     return _row_to_host(row, lock)
 
 
+#: Connection multiplexing (OpenSSH ControlMaster): every ssh/scp to one host rides ONE TCP session for
+#: CONTROL_PERSIST_SEC after the last use. Measured 2026-10-27 on pomps-pc, whose Windows sshd drops new
+#: connections for minutes after a burst: a loose deploy (1 mkdir + 6 scp + 1 hash pass, 8 fresh TCP
+#: connections) failed from the 2nd file on in two consecutive runs (j-6304c124, j-9af97a72), and the
+#: identical run with multiplexing went through (j-8ab87782). `%C` is OpenSSH's hash of host/port/user:
+#: the socket path stays short (macOS caps unix sockets at 104 bytes) and never contains target text.
+#: Set S2DOCS_SSH_MUX=0 to turn it off (e.g. a host whose sshd refuses session multiplexing).
+CONTROL_PERSIST_SEC = 120
+CONTROL_PATH = "~/.ssh/s2docs-cm-%C"
+
+
+def _mux_options() -> list[str]:
+    if os.environ.get("S2DOCS_SSH_MUX", "1").strip().lower() in {"0", "false", "no", "off"}:
+        return []
+    return ["-o", "ControlMaster=auto", "-o", f"ControlPath={CONTROL_PATH}",
+            "-o", f"ControlPersist={CONTROL_PERSIST_SEC}"]
+
+
 def _connection_options(host: m.Host, target: SshTarget, *, port_flag: str) -> list[str]:
-    """The flags ssh and scp share: connect timeout, identity file, port (scp spells it -P)."""
-    options = ["-o", "ConnectTimeout=15"]
+    """The flags ssh and scp share: connect timeout, multiplexing, identity file, port (scp spells it -P)."""
+    options = ["-o", "ConnectTimeout=15", *_mux_options()]
     if host.ssh_key:
         options += ["-i", host.ssh_key, "-o", "IdentitiesOnly=yes"]
     if target.port is not None:

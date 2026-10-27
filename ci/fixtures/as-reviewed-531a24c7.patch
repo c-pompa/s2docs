@@ -21,10 +21,10 @@ index 83e14a7..9cb6d6e 100644
      try:
          proc = subprocess.Popen(
 diff --git a/src/s2docs/deploys.py b/src/s2docs/deploys.py
-index b9ca34b..f6e54d1 100644
+index 4bab44f..4402518 100644
 --- a/src/s2docs/deploys.py
 +++ b/src/s2docs/deploys.py
-@@ -104,7 +104,10 @@ def remote_md5(host: m.Host, paths: list[str]) -> dict[str, str]:
+@@ -142,7 +142,10 @@ def remote_files(host: m.Host, roots: list[str], *, timeout: int = SSH_TIMEOUT_S
  
  
  def _copy_file(host: m.Host, local: Path, remote: str, *, timeout: int = SSH_TIMEOUT_SEC) -> None:
@@ -36,7 +36,7 @@ index b9ca34b..f6e54d1 100644
      try:
          proc = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
      except subprocess.TimeoutExpired as exc:
-@@ -229,9 +232,6 @@ def push(
+@@ -267,9 +270,6 @@ def push(
      if not dest_root.strip():
          raise DeployError("dest_root is required")
      host = hosts.get_host(db, host_id)  # raises HostError if unknown
@@ -47,10 +47,10 @@ index b9ca34b..f6e54d1 100644
  
      did = "d-" + secrets.token_hex(4)
 diff --git a/src/s2docs/hosts.py b/src/s2docs/hosts.py
-index c435f7c..ae4b14e 100644
+index affdbb1..ed4adfa 100644
 --- a/src/s2docs/hosts.py
 +++ b/src/s2docs/hosts.py
-@@ -25,7 +25,6 @@ import re
+@@ -26,7 +26,6 @@ import re
  import sqlite3
  import subprocess
  import time
@@ -58,7 +58,7 @@ index c435f7c..ae4b14e 100644
  from pathlib import Path
  
  from s2docs import models as m
-@@ -36,23 +35,6 @@ HOST_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
+@@ -37,23 +36,6 @@ HOST_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
  DEFAULT_TTL_SEC = 1800
  PROBE_SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "windows" / "probe_host.ps1"
  
@@ -82,7 +82,7 @@ index c435f7c..ae4b14e 100644
  
  class HostError(ValueError):
      pass
-@@ -62,25 +44,6 @@ class HostLocked(HostError):
+@@ -63,25 +45,6 @@ class HostLocked(HostError):
      pass
  
  
@@ -108,13 +108,13 @@ index c435f7c..ae4b14e 100644
  def _check_id(host_id: str) -> None:
      if not HOST_ID_RE.match(host_id):
          raise HostError(f"invalid host id {host_id!r}: lowercase [a-z0-9-], e.g. 'build-pc'")
-@@ -166,28 +129,17 @@ def _load(conn: sqlite3.Connection, host_id: str) -> m.Host:
-     return _row_to_host(row, lock)
+@@ -185,28 +148,17 @@ def _mux_options() -> list[str]:
+             "-o", f"ControlPersist={CONTROL_PERSIST_SEC}"]
  
  
 -def _connection_options(host: m.Host, target: SshTarget, *, port_flag: str) -> list[str]:
--    """The flags ssh and scp share: connect timeout, identity file, port (scp spells it -P)."""
--    options = ["-o", "ConnectTimeout=15"]
+-    """The flags ssh and scp share: connect timeout, multiplexing, identity file, port (scp spells it -P)."""
+-    options = ["-o", "ConnectTimeout=15", *_mux_options()]
 -    if host.ssh_key:
 -        options += ["-i", host.ssh_key, "-o", "IdentitiesOnly=yes"]
 -    if target.port is not None:
@@ -146,7 +146,7 @@ index c435f7c..ae4b14e 100644
  
  
  POWERSHELL = "powershell -NoProfile -ExecutionPolicy Bypass -EncodedCommand"
-@@ -216,20 +168,16 @@ def powershell_argv(host: m.Host, script: str) -> list[str]:
+@@ -235,20 +187,16 @@ def powershell_argv(host: m.Host, script: str) -> list[str]:
  
  
  def scp_argv(host: m.Host, local: Path, remote: str, *, pull: bool = False) -> list[str]:
@@ -175,7 +175,7 @@ index c435f7c..ae4b14e 100644
  
  
  def cs2_install_path(host: m.Host) -> str:
-@@ -356,7 +304,6 @@ def register_host(
+@@ -375,7 +323,6 @@ def register_host(
      notes: str | None = None,
  ) -> m.Host:
      _check_id(host_id)
