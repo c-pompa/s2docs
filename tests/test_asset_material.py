@@ -116,6 +116,16 @@ def test_write_vmat_refuses_to_clobber(tmp_path, png):
     assert (addon / "materials/hammered/probe/probe_color.png").read_bytes() == PNG + b"new"
 
 
+def test_write_vmat_accepts_the_texture_already_in_the_addon(tmp_path, png):
+    """Re-running an asset with --color pointing at the addon's own copy must not raise SameFileError."""
+    addon = tmp_path / "addon"
+    addon.mkdir()
+    write_vmat(addon, "probe", png)
+    inside = addon / "materials" / "hammered" / "probe" / "probe_color.png"
+    out = write_vmat(addon, "probe", inside, force=True)
+    assert out.is_file() and inside.read_bytes() == PNG
+
+
 def test_write_vmat_refuses_clobbering_the_texture_alone(tmp_path, png):
     addon = tmp_path / "addon"
     tex = addon / "materials" / "hammered" / "probe" / "probe_color.png"
