@@ -34,8 +34,13 @@ alone is enough to reconstruct what happened.
 
 The same contract holds for the cs_script chain (``run_script_slice``): ``generate`` and ``validate``
 always run, ``build`` compiles the ``.js`` on a host and pulls the ``.vjs_c`` back
-(:mod:`s2docs.build.script_compile`) when ``compile=True``, ``deploy`` copies it loose to a named host,
-and only ``verdict`` is still blocked (running a cs_script needs a map whose point_script references it).
+(:mod:`s2docs.build.script_compile`) when ``compile=True``, ``deploy`` copies it loose to a named host.
+``verdict`` is real when ``run_host`` is given: the module is bundled into the ``hermes_sandbox`` runtime
+(:mod:`s2docs.live.sandbox_user`, :mod:`s2docs.live.sandbox_run`), the bundle is compiled as that addon's
+ONE map script and copied loose to ``game/csgo/maps/scripts/hermes_sandbox.vjs_c``, and the map is
+reloaded so the engine reads it — no ``.vmap`` compile, which is the only route that works on a host with
+no Active session. It is judged by the console readback alone (``[user:<name>] ready <nonce>`` plus
+``[hs] pong``), and a verified readback still closes the job ``inconclusive``.
 """
 from __future__ import annotations
 
@@ -463,15 +468,29 @@ def run_asset_build_slice(
 SCRIPT_STAGES: tuple[str, ...] = ("prompt", "generate", "validate", "build", "deploy", "verdict")
 
 #: Stages that still cannot run, with the measured reason. ``build``/``deploy`` are real now (they are
-#: skipped, not blocked, when the caller does not ask for them) — only the verdict needs something this
-#: repo does not have yet.
+#: skipped, not blocked, when the caller does not ask for them); ``verdict`` is real when ``run_host`` is
+#: given, because the module is then bundled into the hermes_sandbox runtime and read back in game.
 SCRIPT_BLOCKED: dict[str, str] = {
     "verdict": (
-        "running a cs_script needs a map whose point_script references it: a runtime ent_create of "
-        "point_script fails with 'Failed to load cs_script' (2026-10-27), so the verdict needs a map "
-        "compiled with scripts/<name>.vjs on its point_script — a later step"
+        "no run host was given (--run-host <host id>): a cs_script cannot be added to a running game by "
+        "itself — a runtime ent_create of point_script fails with 'Failed to load cs_script' (2026-10-27), "
+        "and running it as its own script needs a map compiled with scripts/<name>.vjs on its point_script. "
+        "With --run-host the module is bundled into the hermes_sandbox runtime instead (no map compile at "
+        "all) and judged by its own console readback"
     ),
 }
+
+#: ``verdict`` without a netcon-reachable host: a block, not a failure (nothing was sent).
+VERDICT_NO_NETCON = (
+    "the verdict needs netcon: register the host's address first "
+    "(PUT /api/live/hosts/{host_id} or `s2docs live set-netcon`)"
+)
+
+#: A verified readback is a console line, not a visual verdict: this chain never claims a pass for it.
+VERDICT_NEXT = (
+    "the readback proves the build ran; a human should confirm the behaviour in game "
+    "(the job stays inconclusive on purpose)"
+)
 
 #: ``build`` without ``compile=True`` is a missing argument, not a block.
 COMPILE_NOT_REQUESTED = (
@@ -502,8 +521,13 @@ def run_script_slice(
     expected: str | None = None,
     compile: bool = False,
     deploy_host_id: str | None = None,
+    run_host: str | None = None,
+    restore: bool = False,
+    verdict_timeout_sec: int = 90,
+    nonce: str | None = None,
     build_timeout_sec: int = 120,
     poll_sec: float = 1.0,
+    client=None,
 ) -> m.Job:
     """Run the text -> cs_script chain for one script and return the closed-out job.
 
@@ -516,12 +540,25 @@ def run_script_slice(
     ``resourcecompiler`` run compiles it to ``.vjs_c`` (:mod:`s2docs.build.script_compile`), which is
     pulled back MD5-checked and attached to the run. It never runs when ``validate`` failed — a script
     that does not type-check is not compiled. ``deploy_host_id`` makes ``deploy`` real: the pulled
-    ``.vjs_c`` is copied LOOSE to that host's ``<CS2>/game/csgo/scripts/<name>.vjs_c``. ``verdict``
-    stays blocked: it needs a map whose point_script references the script.
+    ``.vjs_c`` is copied LOOSE to that host's ``<CS2>/game/csgo/scripts/<name>.vjs_c``.
+
+    ``run_host`` makes ``verdict`` real WITHOUT a map compile. The script is not shipped as its own
+    point_script (a runtime ``ent_create`` of one fails with *Failed to load cs_script*, and its own map
+    would have to be recompiled): it is bundled into the ``hermes_sandbox`` runtime
+    (:mod:`s2docs.live.sandbox_user` contract, :func:`s2docs.live.sandbox_map.render_script`), compiled as
+    that addon's one map script, copied loose to ``<CS2>/game/csgo/maps/scripts/hermes_sandbox.vjs_c``,
+    and the map is reloaded so the engine reads it. The verdict is the console readback alone:
+    ``[user:<name>] ready <nonce>`` (a per-build nonce, so a stale build cannot produce it) **and**
+    ``[hs] pong`` — an error line, a pong without a ready line, or silence is ``failed``. A verified
+    readback still closes the job ``inconclusive``: a console line is not a visual verdict.
+
+    ``restore=True`` puts the STOCK script back after the run (same bundle, no module) and reports whether
+    that reload verified, so a host is never left running somebody's module by accident.
     """
     from s2docs.build.validate_script import ToolchainMissing, validate_cs_script
     from s2docs.build.workspace import addon_root, script_template
     from s2docs.db.repository import NotFound, Repository
+    from s2docs.live import sandbox_map, sandbox_run, sandbox_user, spawnables
 
     job = jobs.enqueue(
         db,
@@ -563,33 +600,79 @@ def run_script_slice(
               "source": "supplied" if script_text is not None else "scaffold skeleton"},
     )
 
-    # ---- validate ----------------------------------------------------------
+    # ---- validate: the bundle contract when a run host is given, then tsc ---
+    # ONE event per stage (the timeline contract), so everything this stage learns is collected first.
     validation = "blocked"
     validation_errors = 0
-    try:
-        with db.reader() as conn:
-            result = validate_cs_script(Repository(conn), text, game=game, filename=f"{name}.js")
-    except ToolchainMissing as exc:
-        _stage(db, job.id, "validate", level="warn", message="validate blocked: no TypeScript toolchain",
-               data={"blocked": True, "reason": str(exc)})
-    except NotFound as exc:
-        # No ingested cs_script API in this data dir: there is nothing to type-check against. That is a
-        # blocked validation (like a missing tsc), not a crash and not a pass.
-        _stage(db, job.id, "validate", level="warn", message="validate blocked: no ingested script API",
-               data={"blocked": True, "reason": str(exc)})
-    else:
-        if result.ok:
-            validation = "ok"
-            _stage(db, job.id, "validate", level="milestone", message="script type-checks",
-                   data={"errors": result.errors, "warnings": result.warnings, "checker": result.checker})
+    user_module = None
+    refused: list[str] = []
+    validate_level, validate_message = "milestone", "script type-checks"
+    validate_data: dict = {}
+    blocked_reason: str | None = None
+    if run_host is not None:
+        # The contract is checked FIRST: it is the cheap half of the gate, and a module that touches
+        # Instance must be refused before a TypeScript run or a compile is spent on it.
+        try:
+            user_module = sandbox_user.check_user_module(text, name=name, nonce=nonce)
+        except sandbox_user.UserScriptRefused as exc:
+            refused = exc.reasons
+            validation, validation_errors = "failed", len(refused)
+            validate_level, validate_message = "error", "the module breaks the api contract"
+            validate_data = {"refused": refused, "errors": len(refused), "contract": "start(api)"}
+
+    if not refused:
+        try:
+            with db.reader() as conn:
+                result = validate_cs_script(Repository(conn), text, game=game, filename=f"{name}.js")
+        except ToolchainMissing as exc:
+            blocked_reason = str(exc)
+            validate_level, validate_message = "warn", "validate blocked: no TypeScript toolchain"
+        except NotFound as exc:
+            # No ingested cs_script API in this data dir: there is nothing to type-check against. That is a
+            # blocked validation (like a missing tsc), not a crash and not a pass.
+            blocked_reason = str(exc)
+            validate_level, validate_message = "warn", "validate blocked: no ingested script API"
         else:
-            validation = "failed"
-            validation_errors = result.errors
-            _stage(
-                db, job.id, "validate", level="error", message=f"script has {result.errors} error(s)",
-                data={"errors": result.errors, "warnings": result.warnings,
-                      "diagnostics": [d.model_dump() for d in result.diagnostics[:5]]},
-            )
+            if result.ok:
+                validation = "ok"
+                validate_data = {"errors": result.errors, "warnings": result.warnings,
+                                 "checker": result.checker}
+            else:
+                validation = "failed"
+                validation_errors = result.errors
+                validate_level, validate_message = "error", f"script has {result.errors} error(s)"
+                validate_data = {"errors": result.errors, "warnings": result.warnings,
+                                 "diagnostics": [d.model_dump() for d in result.diagnostics[:5]]}
+
+    # The BUNDLE is what gets compiled, so it has to type-check too: a module that is clean alone but
+    # breaks the runtime's own text (a stray `}` that closes the wrapper early) must never reach a host.
+    bundle_text: str | None = None
+    if run_host is not None and validation == "ok":
+        bundle_text = sandbox_map.render_script(spawnables.stock(), user_module)
+        try:
+            with db.reader() as conn:
+                bundled = validate_cs_script(Repository(conn), bundle_text, game=game,
+                                             filename="hermes_sandbox.js")
+        except (ToolchainMissing, NotFound):
+            validate_data["bundle_blocked"] = "the bundled script could not be type-checked here"
+        else:
+            if bundled.ok:
+                validate_message = "script and bundle type-check"
+                validate_data |= {"bundle_bytes": len(bundle_text.encode("utf-8")),
+                                  "bundle_errors": bundled.errors, "bundle_warnings": bundled.warnings,
+                                  "bundle_checker": bundled.checker}
+            else:
+                validation, validation_errors = "failed", bundled.errors
+                validate_level, validate_message = "error", f"the bundle has {bundled.errors} error(s)"
+                validate_data = {"bundle": True, "errors": bundled.errors,
+                                 "diagnostics": [d.model_dump() for d in bundled.diagnostics[:5]]}
+
+    if blocked_reason is not None:
+        # a missing toolchain (or an empty index) is a BLOCKED validate: not a pass, not a failure
+        validate_level, validate_message = "warn", validate_message
+        if not refused:
+            validate_data = {"blocked": True, "reason": blocked_reason}
+    _stage(db, job.id, "validate", level=validate_level, message=validate_message, data=validate_data)
 
     # ---- build: real when compile is requested and validate did not fail ----
     from s2docs.build import script_compile
@@ -598,16 +681,46 @@ def run_script_slice(
     build_id: str | None = None
     build_reason: str | None = None
     compiled = None
-    if not compile:
-        build_reason = COMPILE_NOT_REQUESTED
-        _stage(db, job.id, "build", message="build skipped: no compile requested",
-               data={"skipped": True, "reason": build_reason})
-    elif validation == "failed":
+    if validation == "failed":
         build_reason = (
             f"validate reported {validation_errors} error(s), so nothing was compiled: "
             "a script that does not type-check is not shipped as a .vjs_c"
         )
         _stage(db, job.id, "build", message="build skipped: validate failed",
+               data={"skipped": True, "reason": build_reason})
+    elif run_host is not None:
+        # Bundling means the artifact is the RUNTIME script, not scripts/<name>.js: the user's module only
+        # ever runs inside it, so compiling the module on its own would prove nothing about what loads.
+        try:
+            compiled = sandbox_run.compile_bundle(
+                db, host_id=host_id, user=user_module, owner=f"job:{job.id}",
+                timeout_sec=build_timeout_sec, poll_sec=poll_sec,
+            )
+        except service.LiveError as exc:
+            build_status, build_reason = "failed", str(exc)
+            run_id = getattr(exc.__cause__, "run_id", None)
+            if run_id:
+                build_id = run_id
+                jobs.link(db, job.id, kind="build", ref_id=run_id)
+            _stage(db, job.id, "build", level="error", message="build failed", data={
+                "build": build_id, "status": build_status, "host_id": host_id, "error": build_reason,
+                "reason": build_reason,
+            })
+        else:
+            build_id, build_status = compiled.run.id, compiled.run.status
+            jobs.link(db, job.id, kind="build", ref_id=compiled.run.id)
+            _stage(
+                db, job.id, "build", level="milestone", message="compiled hermes_sandbox.vjs_c",
+                data={
+                    "build": build_id, "status": build_status, "host_id": host_id,
+                    "artifact": compiled.path.name, "md5": compiled.md5, "size": compiled.size,
+                    "remote": compiled.remote, "exit_code": compiled.run.exit_code,
+                    "log_path": compiled.run.log_path, "bundle": True, "target": "maps/scripts/hermes_sandbox",
+                },
+            )
+    elif not compile:
+        build_reason = COMPILE_NOT_REQUESTED
+        _stage(db, job.id, "build", message="build skipped: no compile requested",
                data={"skipped": True, "reason": build_reason})
     else:
         try:
@@ -653,6 +766,28 @@ def run_script_slice(
                 ),
             },
         )
+    elif run_host is not None:
+        try:
+            deployment = sandbox_run.deploy_bundle(
+                db, host_id=run_host, compiled=compiled, owner=f"job:{job.id}",
+            )
+        except service.LiveError as exc:
+            deploy_status = "failed"
+            _stage(db, job.id, "deploy", level="error", message="deploy failed",
+                   data={"host_id": run_host, "status": deploy_status, "error": str(exc)})
+        else:
+            deploy_id, deploy_status = deployment.id, deployment.status
+            jobs.link(db, job.id, kind="deploy", ref_id=deployment.id)
+            _stage(
+                db, job.id, "deploy",
+                level="milestone" if deploy_status == "verified" else "error",
+                message=f"deploy {deploy_status}",
+                data={
+                    "host_id": run_host, "deploy": deploy_id, "status": deploy_status,
+                    "path": f"{script_compile.SANDBOX_REL}{script_compile.SCRIPT_SUFFIX}",
+                    "md5": compiled.md5, "size": compiled.size, "bundle": True,
+                },
+            )
     elif not deploy_host_id:
         _stage(db, job.id, "deploy", message="deploy skipped: no deploy host",
                data={"skipped": True, "reason": NO_SCRIPT_DEST_REASON})
@@ -679,23 +814,108 @@ def run_script_slice(
                 },
             )
 
-    # ---- verdict: still blocked, with the measured reason -------------------
-    _stage(db, job.id, "verdict", message="verdict blocked",
-           data={"blocked": True, "reason": SCRIPT_BLOCKED["verdict"]})
+    # ---- verdict: the console readback, judged mechanically -----------------
+    verdict_status: str | None = None
+    verdict_reason: str | None = None
+    verdict_data: dict = {}
+    if run_host is None:
+        verdict_reason = SCRIPT_BLOCKED["verdict"]
+    elif validation == "failed" or build_status != "succeeded" or deploy_status != "verified":
+        verdict_status = "failed"
+        verdict_reason = (
+            build_reason if build_status != "succeeded"
+            else "the bundle was compiled but not deployed verified: nothing new is on the host to run"
+        )
+    else:
+        try:
+            result = sandbox_run.reload(db, run_host, user=user_module, client=client,
+                                        timeout_sec=verdict_timeout_sec)
+        except service.LiveError as exc:
+            verdict_status, verdict_reason = "blocked", str(exc)
+        else:
+            verdict_status = result["status"]
+            verdict_reason = result["detail"]
+            verdict_data = {"lines": result["lines"], "readback": result["readback"]}
+
+    # ---- restore: put the stock script back, and say whether that verified --
+    restore_result: dict | None = None
+    if restore:
+        if run_host is None or deploy_status != "verified":
+            restore_result = {"skipped": True,
+                              "reason": "nothing new was deployed to a run host, so there is nothing to undo"}
+        else:
+            try:
+                restore_result = sandbox_run.restore_sandbox(
+                    db, host_id=run_host, compile_host_id=host_id, client=client,
+                    timeout_sec=verdict_timeout_sec, owner=f"job:{job.id}",
+                    build_timeout_sec=build_timeout_sec, poll_sec=poll_sec,
+                )
+            except service.LiveError as exc:
+                restore_result = {"status": "failed", "detail": str(exc)}
+            else:
+                for link_kind, key in (("build", "build_id"), ("deploy", "deploy_id")):
+                    if restore_result.get(key):
+                        jobs.link(db, job.id, kind=link_kind, ref_id=restore_result[key])
+
+    if run_host is None:
+        _stage(db, job.id, "verdict", message="verdict blocked",
+               data={"blocked": True, "reason": verdict_reason})
+    elif verdict_status == "blocked":
+        _stage(db, job.id, "verdict", level="warn", message="verdict blocked",
+               data={"blocked": True, "reason": verdict_reason, "host_id": run_host,
+                     **({"restore": restore_result} if restore_result else {})})
+    elif verdict_status == "verified":
+        _stage(
+            db, job.id, "verdict", level="milestone", message="verdict verified by readback",
+            data={"status": verdict_status, "detail": verdict_reason, "host_id": run_host,
+                  "name": name, "nonce": getattr(user_module, "nonce", None),
+                  "build": build_id, "deploy": deploy_id, **verdict_data,
+                  **({"restore": restore_result} if restore_result else {})},
+        )
+    else:
+        _stage(
+            db, job.id, "verdict", level="error", message="verdict failed",
+            data={"status": verdict_status, "detail": verdict_reason, "host_id": run_host,
+                  "name": name, "nonce": getattr(user_module, "nonce", None),
+                  "build": build_id, "deploy": deploy_id, **verdict_data,
+                  **({"restore": restore_result} if restore_result else {})},
+        )
 
     learned_bits = [
         f"generate wrote scripts/{name}.js ({len(text.encode('utf-8'))} B, "
         f"{'caller-supplied' if script_text is not None else 'scaffold skeleton'})",
-        f"validate {validation}",
-        ("build skipped (no compile requested)" if not compile
+        f"validate {validation}" + (f" ({len(refused)} contract refusal(s))" if refused else ""),
+        ("build skipped (no compile requested)" if not compile and run_host is None
          else f"build {build_status or 'skipped'}" + (f" ({build_id})" if build_id else "")),
         ("deploy skipped" if deploy_status is None else f"deploy {deploy_status}"
          + (f" ({deploy_id})" if deploy_id else "")),
-        "verdict blocked",
+        ("verdict blocked (no run host)" if run_host is None else f"verdict {verdict_status or 'not reached'}"),
     ]
+    if restore_result is not None:
+        learned_bits.append(
+            "restore " + ("skipped" if restore_result.get("skipped") else restore_result.get("status", "failed"))
+        )
     failed = validation == "failed" or build_status == "failed" or (
         deploy_status is not None and deploy_status != "verified"
+    ) or verdict_status == "failed" or (
+        restore_result is not None and not restore_result.get("skipped")
+        and restore_result.get("status") != "verified"
     )
+    if run_host is None:
+        next_ = (
+            "Load hermes_sandbox on a host and re-run with --run-host <host id>: the module is then "
+            "bundled into the runtime script, reloaded over netcon and judged by its own console "
+            "readback — no map compile is needed for that"
+        )
+    elif verdict_status == "verified":
+        next_ = VERDICT_NEXT
+    elif verdict_status == "blocked":
+        next_ = VERDICT_NO_NETCON
+    elif run_host is not None and verdict_status == "failed":
+        next_ = ("Read the verdict readback (it carries the console lines): fix the module or the bundle "
+                 "and re-run with --run-host")
+    else:
+        next_ = "Read the build/deploy stages; the bundle never reached the run host"
     return jobs.finish(
         db, job.id,
         status="failed" if failed else "inconclusive",
@@ -706,13 +926,10 @@ def run_script_slice(
             ),
             why=(
                 "A text->script action kind needs a durable record of what was generated, whether it "
-                "type-checks, and — when a host was named — which .vjs_c that host actually compiled."
+                "type-checks, and — when a host was named — which .vjs_c that host actually compiled and "
+                "what the game answered when it ran it."
             ),
             learned="; ".join(learned_bits),
-            next_=(
-                "Compile a map whose point_script references scripts/"
-                f"{name}.vjs on desktop-pc (vmap compiles need its display adapter) and capture an "
-                "in-game verdict there."
-            ),
+            next_=next_,
         ),
     )
