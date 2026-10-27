@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 from datetime import UTC, datetime
+from pathlib import Path
 
 import pytest
 
@@ -425,7 +426,7 @@ def _patch_validate(monkeypatch, *, raises=None, result=None):
     monkeypatch.setattr(vs, "validate_cs_script", fake)
 
 
-def test_script_slice_writes_validates_and_blocks_the_rest(db, tmp_path, monkeypatch):
+def test_script_slice_writes_validates_and_skips_build_without_a_compile(db, tmp_path, monkeypatch):
     root = _addon(tmp_path, monkeypatch)
     _host(db)
     _patch_validate(monkeypatch, result=_fake_validation(ok=True))
@@ -436,15 +437,23 @@ def test_script_slice_writes_validates_and_blocks_the_rest(db, tmp_path, monkeyp
     )
 
     assert [e.phase for e in job.events if e.phase] == list(pipeline.SCRIPT_STAGES)
-    assert job.status == "inconclusive", "build/deploy/verdict are blocked, so no pass"
+    assert job.status == "inconclusive", "the verdict is blocked, so no pass"
     written = root / "scripts" / "pinger.js"
     assert written.is_file() and "cs_script/point_script" in written.read_text(encoding="utf-8")
     generate = next(e for e in job.events if e.phase == "generate")
     assert generate.data["source"] == "supplied"
     validate = next(e for e in job.events if e.phase == "validate")
     assert validate.level == "milestone"
-    for stage in ("build", "deploy", "verdict"):
-        assert next(e for e in job.events if e.phase == stage).data["blocked"] is True
+    # build/deploy are real capabilities now: without a request they are SKIPPED with the reason
+    build = next(e for e in job.events if e.phase == "build")
+    assert build.data["skipped"] is True and "no compile was requested" in build.data["reason"]
+    deploy = next(e for e in job.events if e.phase == "deploy")
+    assert deploy.data["skipped"] is True
+    assert not [link for link in job.links if link.kind in ("build", "deploy")]
+    # ... and only the verdict is still blocked
+    verdict = next(e for e in job.events if e.phase == "verdict")
+    assert verdict.data["blocked"] is True
+    assert "point_script" in verdict.data["reason"] and "Failed to load cs_script" in verdict.data["reason"]
 
 
 def test_script_slice_uses_the_scaffold_skeleton_when_no_text_is_supplied(db, tmp_path, monkeypatch):
@@ -465,13 +474,135 @@ def test_script_slice_fails_when_validation_reports_errors(db, tmp_path, monkeyp
     _host(db)
     _patch_validate(monkeypatch, result=_fake_validation(ok=False, errors=2))
 
+    from s2docs.build import script_compile
+
+    monkeypatch.setattr(script_compile, "compile_js",
+                        lambda *a, **kw: pytest.fail("a script that does not type-check is not compiled"))
+
     job = pipeline.run_script_slice(db, prompt="p", addon="probe_addon", name="pinger",
-                                    host_id="desktop-pc", script_text="const x = ;\n")
+                                    host_id="desktop-pc", script_text="const x = ;\n", compile=True)
 
     assert job.status == "failed"
     validate = next(e for e in job.events if e.phase == "validate")
     assert validate.level == "error"
     assert validate.data["errors"] == 2
+    # compile was asked for, and still did not run: the honest record says why
+    build = next(e for e in job.events if e.phase == "build")
+    assert build.data["skipped"] is True and "validate reported 2 error(s)" in build.data["reason"]
+    assert next(e for e in job.events if e.phase == "deploy").data["skipped"] is True
+
+
+def _patch_script_compile(monkeypatch, seen: dict, *, error=None, deploy_error=None):
+    """Fake the compile/pull and the loose deploy halves: no host, no scp, no resourcecompiler."""
+    from s2docs.build import script_compile
+
+    def fake_compile(_db, host_id, *, addon, name, source, **_kw):
+        seen["compile"] = {"host_id": host_id, "addon": addon, "name": name, "source": str(source)}
+        if error is not None:
+            raise error
+        artifact = Path(seen["data_dir"]) / f"{name}.vjs_c"
+        artifact.parent.mkdir(parents=True, exist_ok=True)
+        artifact.write_bytes(b"vjs_c")
+        seen["artifact"] = artifact
+        return script_compile.CompiledScript(
+            run=_build_run(id="b-vjs", host_id=host_id, status="succeeded", exit_code=0),
+            path=artifact, md5="a" * 32, size=artifact.stat().st_size,
+            remote=f"C:/cs2/game/csgo_addons/{addon}/scripts/{name}.vjs_c",
+        )
+
+    def fake_deploy(_db, host_id, *, addon, name, compiled, **_kw):
+        seen["deploy"] = {"host_id": host_id, "addon": addon, "name": name, "compiled": str(compiled)}
+        if deploy_error is not None:
+            raise deploy_error
+        return _deployment(id="d-vjs", status="verified", verified=True)
+
+    monkeypatch.setattr(script_compile, "compile_js", fake_compile)
+    monkeypatch.setattr(script_compile, "deploy_loose", fake_deploy)
+
+
+def test_script_slice_compiles_and_deploys_when_asked(db, tmp_path, monkeypatch):
+    _addon(tmp_path, monkeypatch)
+    _host(db, "pomps-pc")
+    _patch_validate(monkeypatch, result=_fake_validation(ok=True))
+    seen: dict = {"data_dir": str(tmp_path)}
+    _patch_script_compile(monkeypatch, seen)
+
+    job = pipeline.run_script_slice(
+        db, prompt="p", addon="probe_addon", name="pinger", host_id="pomps-pc",
+        script_text="export {};\n", compile=True, deploy_host_id="pomps-pc",
+    )
+
+    # one event per stage, in order — the timeline is still the chain
+    assert [e.phase for e in job.events if e.phase] == list(pipeline.SCRIPT_STAGES)
+    assert job.status == "inconclusive", "the verdict is blocked, so the chain cannot claim a pass"
+
+    # the compile got the addon's own .js and the host it was told to use
+    assert seen["compile"]["host_id"] == "pomps-pc"
+    assert seen["compile"]["name"] == "pinger"
+    assert seen["compile"]["source"].endswith("scripts/pinger.js")
+
+    build = next(e for e in job.events if e.phase == "build")
+    assert build.level == "milestone"
+    assert build.data["build"] == "b-vjs" and build.data["status"] == "succeeded"
+    assert build.data["md5"] == "a" * 32 and build.data["size"] == 5
+    assert any(link.kind == "build" and link.ref_id == "b-vjs" for link in job.links)
+
+    # the deploy copied the pulled artifact, and its record is linked like the build
+    assert seen["deploy"]["host_id"] == "pomps-pc" and seen["deploy"]["name"] == "pinger"
+    assert seen["deploy"]["compiled"] == str(seen["artifact"])
+    deploy = next(e for e in job.events if e.phase == "deploy")
+    assert deploy.data["status"] == "verified" and deploy.data["deploy"] == "d-vjs"
+    assert deploy.data["path"] == "scripts/pinger.vjs_c"
+    assert any(link.kind == "deploy" and link.ref_id == "d-vjs" for link in job.links)
+    assert job.status != "failed"
+
+
+def test_script_slice_records_a_compile_failure_and_skips_the_deploy(db, tmp_path, monkeypatch):
+    from s2docs.build import script_compile
+
+    _addon(tmp_path, monkeypatch)
+    _host(db, "pomps-pc")
+    _patch_validate(monkeypatch, result=_fake_validation(ok=True))
+    seen: dict = {"data_dir": str(tmp_path)}
+    _patch_script_compile(
+        monkeypatch, seen,
+        error=script_compile.ScriptNotFresh("run b-x exited 0 but printed no 'SCRIPT COMPILE OK'", run_id="b-x"),
+    )
+
+    job = pipeline.run_script_slice(db, prompt="p", addon="probe_addon", name="pinger",
+                                    host_id="pomps-pc", script_text="export {};\n",
+                                    compile=True, deploy_host_id="pomps-pc")
+
+    build = next(e for e in job.events if e.phase == "build")
+    assert build.level == "error" and build.data["status"] == "failed"
+    assert "SCRIPT COMPILE OK" in build.data["error"]
+    assert build.data["build"] == "b-x" and any(
+        link.kind == "build" and link.ref_id == "b-x" for link in job.links
+    )
+    deploy = next(e for e in job.events if e.phase == "deploy")
+    assert deploy.data["skipped"] is True and "nothing was copied" in deploy.data["reason"]
+    assert "deploy" not in seen
+    assert job.status == "failed"
+
+
+def test_script_slice_fails_when_the_loose_deploy_fails(db, tmp_path, monkeypatch):
+    from s2docs.build import script_compile
+
+    _addon(tmp_path, monkeypatch)
+    _host(db, "pomps-pc")
+    _patch_validate(monkeypatch, result=_fake_validation(ok=True))
+    seen: dict = {"data_dir": str(tmp_path)}
+    _patch_script_compile(monkeypatch, seen,
+                          deploy_error=script_compile.ScriptCompileError("scp rc=1"))
+
+    job = pipeline.run_script_slice(db, prompt="p", addon="probe_addon", name="pinger",
+                                    host_id="pomps-pc", script_text="export {};\n",
+                                    compile=True, deploy_host_id="pomps-pc")
+
+    deploy = next(e for e in job.events if e.phase == "deploy")
+    assert deploy.level == "error" and deploy.data["status"] == "failed"
+    assert "scp rc=1" in deploy.data["error"]
+    assert job.status == "failed"
 
 
 def test_script_slice_blocks_validate_when_the_toolchain_is_missing(db, tmp_path, monkeypatch):
@@ -488,6 +619,23 @@ def test_script_slice_blocks_validate_when_the_toolchain_is_missing(db, tmp_path
     assert validate.data["blocked"] is True
     assert "tsc" in validate.data["reason"]
     assert job.status == "inconclusive", "a missing toolchain is not a validation failure"
+
+
+def test_script_slice_blocks_validate_when_no_script_api_is_ingested(db, tmp_path, monkeypatch):
+    """An empty data dir has no .d.ts to check against: blocked (like a missing tsc), never a crash."""
+    from s2docs.db.repository import NotFound
+
+    _addon(tmp_path, monkeypatch)
+    _host(db)
+    _patch_validate(monkeypatch, raises=NotFound("game 'cs2' has no any ingested build"))
+
+    job = pipeline.run_script_slice(db, prompt="p", addon="probe_addon", name="pinger",
+                                    host_id="desktop-pc")
+
+    validate = next(e for e in job.events if e.phase == "validate")
+    assert validate.data["blocked"] is True
+    assert "ingested build" in validate.data["reason"]
+    assert job.status == "inconclusive"
 
 
 def test_cli_runs_the_script_chain(tmp_path, monkeypatch, capsys):

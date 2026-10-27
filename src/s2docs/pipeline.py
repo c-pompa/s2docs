@@ -21,6 +21,11 @@ Every stage writes exactly one job event whose ``phase`` is the stage id, in sta
 ``Job.current_step``/``jobs.get(...).phase`` and the timeline show the same chain. A produced
 artifact is linked (``kind="build"``/``kind="deploy"``) rather than pasted into a message, so the job
 alone is enough to reconstruct what happened.
+
+The same contract holds for the cs_script chain (``run_script_slice``): ``generate`` and ``validate``
+always run, ``build`` compiles the ``.js`` on a host and pulls the ``.vjs_c`` back
+(:mod:`s2docs.build.script_compile`) when ``compile=True``, ``deploy`` copies it loose to a named host,
+and only ``verdict`` is still blocked (running a cs_script needs a map whose point_script references it).
 """
 from __future__ import annotations
 
@@ -312,20 +317,28 @@ def run_asset_build_slice(
 #: The script chain, in order. Same contract as STAGES: one event per entry, ``phase`` = the id.
 SCRIPT_STAGES: tuple[str, ...] = ("prompt", "generate", "validate", "build", "deploy", "verdict")
 
+#: Stages that still cannot run, with the measured reason. ``build``/``deploy`` are real now (they are
+#: skipped, not blocked, when the caller does not ask for them) — only the verdict needs something this
+#: repo does not have yet.
 SCRIPT_BLOCKED: dict[str, str] = {
-    "build": (
-        "the .js -> .vjs compile path is not established in this repo (the engine loads "
-        "scripts/<name>.vjs); recorded instead of guessing a compiler invocation"
-    ),
-    "deploy": (
-        "needs a reachable target host and a mounted addon; not attempted by this slice "
-        "(pomps-pc sshd flaps for minutes at a time)"
-    ),
     "verdict": (
-        "an in-game verdict needs a live server plus the driver; blocked with the ingame stage "
-        "(docs/HAMMERED.md 2026-10-24)"
+        "running a cs_script needs a map whose point_script references it: a runtime ent_create of "
+        "point_script fails with 'Failed to load cs_script' (2026-10-27), so the verdict needs a map "
+        "compiled with scripts/<name>.vjs on its point_script — a later step"
     ),
 }
+
+#: ``build`` without ``compile=True`` is a missing argument, not a block.
+COMPILE_NOT_REQUESTED = (
+    "no compile was requested (pass compile=True / --compile): the .js is written and type-checked, "
+    "but nothing was pushed to a host, so build is skipped rather than blocked"
+)
+
+#: ``deploy`` without a target host is a missing argument too.
+NO_SCRIPT_DEST_REASON = (
+    "no deploy host was given (--deploy-host <host id>), so the .vjs_c was not copied loose to any "
+    "host; the stage is skipped rather than blocked, because the deploy path itself works"
+)
 
 
 def run_script_slice(
@@ -342,6 +355,10 @@ def run_script_slice(
     project_id: str | None = None,
     origin: str = "agent",
     expected: str | None = None,
+    compile: bool = False,
+    deploy_host_id: str | None = None,
+    build_timeout_sec: int = 120,
+    poll_sec: float = 1.0,
 ) -> m.Job:
     """Run the text -> cs_script chain for one script and return the closed-out job.
 
@@ -349,10 +366,17 @@ def run_script_slice(
     generator) and otherwise the scaffold's own skeleton, so the stage never invents code it cannot
     attribute. ``validate`` type-checks through the same ``validate_cs_script`` the CLI uses; a
     missing TypeScript toolchain is *blocked*, not a pass and not a failure.
+
+    ``compile=True`` makes ``build`` real: the ``.js`` is pushed to ``host_id`` and one
+    ``resourcecompiler`` run compiles it to ``.vjs_c`` (:mod:`s2docs.build.script_compile`), which is
+    pulled back MD5-checked and attached to the run. It never runs when ``validate`` failed — a script
+    that does not type-check is not compiled. ``deploy_host_id`` makes ``deploy`` real: the pulled
+    ``.vjs_c`` is copied LOOSE to that host's ``<CS2>/game/csgo/scripts/<name>.vjs_c``. ``verdict``
+    stays blocked: it needs a map whose point_script references the script.
     """
     from s2docs.build.validate_script import ToolchainMissing, validate_cs_script
     from s2docs.build.workspace import addon_root, script_template
-    from s2docs.db.repository import Repository
+    from s2docs.db.repository import NotFound, Repository
 
     job = jobs.enqueue(
         db,
@@ -396,11 +420,17 @@ def run_script_slice(
 
     # ---- validate ----------------------------------------------------------
     validation = "blocked"
+    validation_errors = 0
     try:
         with db.reader() as conn:
             result = validate_cs_script(Repository(conn), text, game=game, filename=f"{name}.js")
     except ToolchainMissing as exc:
         _stage(db, job.id, "validate", level="warn", message="validate blocked: no TypeScript toolchain",
+               data={"blocked": True, "reason": str(exc)})
+    except NotFound as exc:
+        # No ingested cs_script API in this data dir: there is nothing to type-check against. That is a
+        # blocked validation (like a missing tsc), not a crash and not a pass.
+        _stage(db, job.id, "validate", level="warn", message="validate blocked: no ingested script API",
                data={"blocked": True, "reason": str(exc)})
     else:
         if result.ok:
@@ -409,38 +439,135 @@ def run_script_slice(
                    data={"errors": result.errors, "warnings": result.warnings, "checker": result.checker})
         else:
             validation = "failed"
+            validation_errors = result.errors
             _stage(
                 db, job.id, "validate", level="error", message=f"script has {result.errors} error(s)",
                 data={"errors": result.errors, "warnings": result.warnings,
                       "diagnostics": [d.model_dump() for d in result.diagnostics[:5]]},
             )
 
-    # ---- build / deploy / verdict: blocked, recorded as such ---------------
-    for stage in ("build", "deploy", "verdict"):
-        _stage(db, job.id, stage, message=f"{stage} blocked",
-               data={"blocked": True, "reason": SCRIPT_BLOCKED[stage]})
+    # ---- build: real when compile is requested and validate did not fail ----
+    from s2docs.build import script_compile
 
-    learned = (
+    build_status: str | None = None
+    build_id: str | None = None
+    build_reason: str | None = None
+    compiled = None
+    if not compile:
+        build_reason = COMPILE_NOT_REQUESTED
+        _stage(db, job.id, "build", message="build skipped: no compile requested",
+               data={"skipped": True, "reason": build_reason})
+    elif validation == "failed":
+        build_reason = (
+            f"validate reported {validation_errors} error(s), so nothing was compiled: "
+            "a script that does not type-check is not shipped as a .vjs_c"
+        )
+        _stage(db, job.id, "build", message="build skipped: validate failed",
+               data={"skipped": True, "reason": build_reason})
+    else:
+        try:
+            compiled = script_compile.compile_js(
+                db, host_id, addon=addon, name=name, source=target,
+                timeout_sec=build_timeout_sec, poll_sec=poll_sec, owner=f"job:{job.id}",
+            )
+        except script_compile.ScriptCompileError as exc:  # refused input, failed run, stale artifact
+            build_status = "failed"
+            build_reason = str(exc)
+            run_id = getattr(exc, "run_id", None)
+            if run_id:
+                build_id = run_id
+                jobs.link(db, job.id, kind="build", ref_id=run_id)
+            _stage(db, job.id, "build", level="error", message="build failed", data={
+                "build": build_id, "status": build_status, "host_id": host_id, "error": build_reason,
+                "reason": build_reason,
+            })
+        else:
+            build_id, build_status = compiled.run.id, compiled.run.status
+            jobs.link(db, job.id, kind="build", ref_id=compiled.run.id)
+            _stage(
+                db, job.id, "build", level="milestone", message=f"compiled {name}.vjs_c",
+                data={
+                    "build": build_id, "status": build_status, "host_id": host_id,
+                    "artifact": compiled.path.name, "md5": compiled.md5, "size": compiled.size,
+                    "remote": compiled.remote, "exit_code": compiled.run.exit_code,
+                    "log_path": compiled.run.log_path,
+                },
+            )
+
+    # ---- deploy: real when a target host is given and the build produced a .vjs_c ----
+    deploy_id: str | None = None
+    deploy_status: str | None = None
+    if build_status != "succeeded" or compiled is None:
+        _stage(
+            db, job.id, "deploy", message="deploy skipped: no compiled .vjs_c",
+            data={
+                "skipped": True,
+                "reason": (
+                    (build_reason or "the build did not produce a .vjs_c")
+                    + "; nothing was copied to a host"
+                ),
+            },
+        )
+    elif not deploy_host_id:
+        _stage(db, job.id, "deploy", message="deploy skipped: no deploy host",
+               data={"skipped": True, "reason": NO_SCRIPT_DEST_REASON})
+    else:
+        try:
+            deployment = script_compile.deploy_loose(
+                db, deploy_host_id, addon=addon, name=name, compiled=compiled.path,
+                owner=f"job:{job.id}",
+            )
+        except script_compile.ScriptCompileError as exc:
+            deploy_status = "failed"
+            _stage(db, job.id, "deploy", level="error", message="deploy failed",
+                   data={"host_id": deploy_host_id, "status": deploy_status, "error": str(exc)})
+        else:
+            deploy_id, deploy_status = deployment.id, deployment.status
+            jobs.link(db, job.id, kind="deploy", ref_id=deployment.id)
+            _stage(
+                db, job.id, "deploy",
+                level="milestone" if deploy_status == "verified" else "error",
+                message=f"deploy {deploy_status}",
+                data={
+                    "host_id": deploy_host_id, "deploy": deploy_id, "status": deploy_status,
+                    "path": f"scripts/{name}.vjs_c", "md5": compiled.md5, "size": compiled.size,
+                },
+            )
+
+    # ---- verdict: still blocked, with the measured reason -------------------
+    _stage(db, job.id, "verdict", message="verdict blocked",
+           data={"blocked": True, "reason": SCRIPT_BLOCKED["verdict"]})
+
+    learned_bits = [
         f"generate wrote scripts/{name}.js ({len(text.encode('utf-8'))} B, "
-        f"{'caller-supplied' if script_text is not None else 'scaffold skeleton'}); "
-        f"validate {validation}; build/deploy/verdict blocked"
+        f"{'caller-supplied' if script_text is not None else 'scaffold skeleton'})",
+        f"validate {validation}",
+        ("build skipped (no compile requested)" if not compile
+         else f"build {build_status or 'skipped'}" + (f" ({build_id})" if build_id else "")),
+        ("deploy skipped" if deploy_status is None else f"deploy {deploy_status}"
+         + (f" ({deploy_id})" if deploy_id else "")),
+        "verdict blocked",
+    ]
+    failed = validation == "failed" or build_status == "failed" or (
+        deploy_status is not None and deploy_status != "verified"
     )
     return jobs.finish(
         db, job.id,
-        status="failed" if validation == "failed" else "inconclusive",
+        status="failed" if failed else "inconclusive",
         summary=_summary(
             what=(
                 f"Ran the cs_script chain for {name} in addon {addon}: "
                 f"{', '.join(SCRIPT_STAGES)} recorded on one job."
             ),
             why=(
-                "A text->script action kind needs a durable record of what was generated and whether "
-                "it type-checks, not a shell transcript."
+                "A text->script action kind needs a durable record of what was generated, whether it "
+                "type-checks, and — when a host was named — which .vjs_c that host actually compiled."
             ),
-            learned=learned,
+            learned="; ".join(learned_bits),
             next_=(
-                "Establish the .js->.vjs compile path, then deploy the addon and capture an in-game "
-                "verdict once a host with an active display adapter is reachable."
+                "Compile a map whose point_script references scripts/"
+                f"{name}.vjs on desktop-pc (vmap compiles need its display adapter) and capture an "
+                "in-game verdict there."
             ),
         ),
     )
