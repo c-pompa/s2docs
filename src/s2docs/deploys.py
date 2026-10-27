@@ -103,6 +103,44 @@ def remote_md5(host: m.Host, paths: list[str]) -> dict[str, str]:
     return _hash_remote(host, paths)
 
 
+def remote_files(host: m.Host, roots: list[str], *, timeout: int = SSH_TIMEOUT_SEC) -> dict[str, int]:
+    """Every regular file under ``roots`` on the host, as ``{full_path: size}`` (one PowerShell pass).
+
+    A root that does not exist is skipped rather than refused: a compile legitimately produces no
+    ``materials/`` tree when it has no material, so the caller decides whether an empty listing means
+    "nothing compiled" or "one of the two trees is empty". Paths come back as the host writes them
+    (backslashes on Windows); the caller normalises, because it is the caller that knows which prefix
+    it wants to strip.
+    """
+    if not roots:
+        return {}
+    targets = ",".join(_pwsh_literal(r) for r in roots)
+    script = (
+        f"$r = @({targets}); "
+        "foreach ($p in $r) { "
+        "if (Test-Path -LiteralPath $p) { "
+        "Get-ChildItem -LiteralPath $p -Recurse -File | ForEach-Object { "
+        "Write-Output ($_.Length.ToString() + '|' + $_.FullName) } } }"
+    )
+    argv = hosts.powershell_argv(host, script)
+    try:
+        proc = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        raise DeployError(f"listing files on {host.id} timed out after {timeout}s") from exc
+    if proc.returncode != 0:
+        raise DeployError(f"listing files on {host.id} failed (rc={proc.returncode}): {proc.stderr.strip()[:300]}")
+    out: dict[str, int] = {}
+    for line in proc.stdout.replace("\r", "").splitlines():
+        if "|" not in line:
+            continue
+        size, path = line.split("|", 1)
+        try:
+            out[path.strip()] = int(size.strip())
+        except ValueError:  # a warning line, not a row
+            continue
+    return out
+
+
 def _copy_file(host: m.Host, local: Path, remote: str, *, timeout: int = SSH_TIMEOUT_SEC) -> None:
     argv = hosts.scp_argv(host, local, remote)
     try:
