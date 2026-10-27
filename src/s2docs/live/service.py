@@ -204,6 +204,84 @@ def load_sandbox(db: Database, host_id: str, deploy_id: str, *, client=None) -> 
             "spawngroups": groups, "lines": list(LOAD_LINES), "readback": reply[-READBACK_MAX:]}
 
 
+#: The model path is a vmdl under models/ — the same shape `hs_model` accepts in the allowlist.
+MODEL_PATH = re.compile(r"models/[a-z0-9_/]+\.vmdl")
+_PONG = re.compile(r"\[hs\] pong (\d+)")
+#: How long one `hs_model` line may take to answer. A precache of a 6-file model measured ~1-2 s on
+#: pomps-pc 2026-10-27; the drain is generous because a miss is reported as a timeout, not retried.
+MODEL_DRAIN_SEC = 3.0
+
+
+def show_model(db: Database, host_id: str, model: str, *, client=None, clear: bool = False) -> dict:
+    """Runtime-precache a compiled model and spawn it, judged ONLY by the console readback.
+
+    The route, measured 2026-10-27 on pomps-pc (CS2 1.41.9.2/14192): with `hermes_sandbox` loaded and the
+    round locked, `hs_model models/<name>/<name>.vmdl` answers `[hs] precaching models/...` and then
+    `[hs] model models/... spawned name=models/...`, and `hs_ping` counts one more live entity. The model
+    must already be at that relative path on the host (`s2docs.live.asset_artifacts.deploy_loose`).
+
+    The verdict is mechanical, not visual: a different `name=` means `SetModel` did not take (the template
+    stays a roasted chicken), and no line at all means the precache did not finish. Either way this reports
+    `failed`; it never calls a `verified` readback a pass — that needs a human verdict.
+
+    Returns ``{host_id, model, status, detail, lines, readback, pong_before, pong_after}`` with status one of
+    ``verified`` / ``failed`` / ``blocked``. A host with no netcon address raises ``LiveError``.
+    """
+    hosts.get_host(db, host_id)
+    if not isinstance(model, str) or not MODEL_PATH.fullmatch(model):
+        raise LiveError(f"hs_model needs an addon-relative vmdl path (models/<name>/<name>.vmdl), got {model!r}")
+    _check_lease(db, host_id)
+    client = client or client_for(db, host_id)
+    try:
+        before = client.run(["status", "hs_ping"], drain=0.8, settle=0.3)
+    except NetconError as exc:
+        raise LiveError(str(exc)) from exc
+    groups = _SPAWNGROUP.findall(before)
+    ping = _PONG.findall(before)
+    result = {"host_id": host_id, "model": model, "lines": [], "readback": before[-READBACK_MAX:],
+              "pong_before": int(ping[-1]) if ping else None, "pong_after": None}
+    if SANDBOX not in groups:
+        return {**result, "status": "blocked",
+                "detail": f"spawngroup {SANDBOX} is not loaded on {host_id} "
+                          f"({', '.join(groups) or 'no spawngroups'}): load it first "
+                          "(POST /api/live/sandbox/load)"}
+    if not ping:
+        return {**result, "status": "blocked",
+                "detail": f"spawngroup {SANDBOX} is loaded but the runtime did not answer hs_ping"}
+    lines = [*recipes.ROUND_LOCK_LINES, "mp_restartgame 1", "sleep 3", f"hs_model {model}", "sleep 2", "hs_ping"]
+    if clear:
+        lines.append("hs_clear prop")
+    for line in lines:
+        if not recipes.ALLOWED.fullmatch(line):
+            raise LiveError(f"refusing a line outside the allowlist: {line!r}")
+    try:
+        reply = client.run(lines, drain=MODEL_DRAIN_SEC, settle=0.5)
+    except NetconError as exc:
+        raise LiveError(str(exc)) from exc
+    after = _PONG.findall(reply)
+    pong_before, pong_after = result["pong_before"], (int(after[-1]) if after else None)
+    spawned = re.search(rf"\[hs\] model {re.escape(model)} spawned name=(\S+)", reply)
+    error = next((ln.strip() for ln in reply.splitlines() if ln.strip().startswith("[hs] error")), "")
+    if spawned and spawned.group(1) == model and pong_after is not None and pong_before is not None \
+            and pong_after > pong_before:
+        status = "verified"
+        detail = f"{model} precached and spawned; hs_ping went from {pong_before} to {pong_after}"
+    elif spawned:
+        status = "failed"
+        detail = (f"the runtime spawned name={spawned.group(1)} instead of {model} (SetModel did not take; "
+                  f"the template's roasted chicken is what is on screen)")
+    elif error:
+        status = "failed"
+        detail = error[:300]
+    else:
+        status = "failed"
+        detail = (f"no '[hs] model {model} spawned name=...' line within {MODEL_DRAIN_SEC:g}s per line "
+                  "(the precache did not finish)")
+    return {**result, "status": status, "detail": detail, "lines": lines,
+            "readback": (before[-READBACK_MAX:] + "\n--- ingame ---\n" + reply)[-READBACK_MAX:],
+            "pong_before": pong_before, "pong_after": pong_after}
+
+
 def plan_only(env: IntentEnvelope, *, sandbox: bool = True) -> dict:
     """Dry run for previews: no host contact; reports needs_sandbox instead of checking it."""
     return recipes.compile_plan(env, spawnables.stock(), sandbox=sandbox).as_dict()

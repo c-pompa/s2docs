@@ -279,3 +279,100 @@ def test_cli_lists_actions_as_json(db, capsys, monkeypatch):
     assert cli.main(["--json", "live", "actions"]) == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["schema"] == "s2docs/v1" and payload["actions"][0]["status"] == "verified"
+
+
+# ------------------------------------------------------------------ show_model (runtime precache, Task 4.9)
+# The route proved on pomps-pc 2026-10-27 (CS2 1.41.9.2/14192): round lock, `hs_model <vmdl>`, then the
+# game's own `[hs] model ... spawned name=<path>` line and one more live entity on `hs_ping`. Judged by
+# readback only — a different name means SetModel did not take and the roasted chicken stayed.
+
+MODEL = "models/tsr_eefa8331/tsr_eefa8331.vmdl"
+STATUS_WITH_SANDBOX = f"{SPAWNGROUP_LOADED}\n[hs] pong 0"
+
+
+class ScriptedClient:
+    """One canned reply per ``run`` call, so the preflight and the action can answer differently."""
+
+    def __init__(self, replies):
+        self.replies, self.sent = list(replies), []
+
+    def run(self, lines, **_):
+        self.sent.append(list(lines))
+        return self.replies.pop(0) if self.replies else ""
+
+
+def test_show_model_is_verified_by_the_spawned_name_and_a_rising_pong(db):
+    client = ScriptedClient([STATUS_WITH_SANDBOX,
+                             f"[hs] precaching {MODEL}\n[hs] model {MODEL} spawned name={MODEL}\n[hs] pong 1"])
+    result = service.show_model(db, "pomps-pc", MODEL, client=client)
+
+    assert result["status"] == "verified"
+    assert (result["pong_before"], result["pong_after"]) == (0, 1)
+    assert "0 to 1" in result["detail"]
+    # the round lock goes out BEFORE the spawn: an unlocked round ends and wipes it (measured with the user)
+    lines = client.sent[-1]
+    assert lines[:5] == [*recipes.ROUND_LOCK_LINES, "mp_restartgame 1"]
+    assert lines.index(f"hs_model {MODEL}") > lines.index("mp_restartgame 1")
+    assert lines[-1] == "hs_ping" and "hs_clear prop" not in lines
+    for line in lines:
+        assert recipes.ALLOWED.fullmatch(line), line
+
+
+def test_show_model_can_clear_afterwards(db):
+    client = ScriptedClient([STATUS_WITH_SANDBOX,
+                             f"[hs] model {MODEL} spawned name={MODEL}\n[hs] pong 1\n[hs] cleared 1"])
+    result = service.show_model(db, "pomps-pc", MODEL, client=client, clear=True)
+    assert result["status"] == "verified" and client.sent[-1][-1] == "hs_clear prop"
+
+
+def test_show_model_fails_when_a_different_name_comes_back(db):
+    """The template is a roasted chicken on purpose: a different `name=` is the tell that SetModel lost."""
+    roasted = "models/chicken/chicken_roasted.vmdl"
+    client = ScriptedClient([STATUS_WITH_SANDBOX,
+                             f"[hs] precaching {MODEL}\n[hs] model {MODEL} spawned name={roasted}\n[hs] pong 1"])
+    result = service.show_model(db, "pomps-pc", MODEL, client=client)
+    assert result["status"] == "failed" and roasted in result["detail"] and "SetModel" in result["detail"]
+
+
+def test_show_model_fails_when_the_precache_never_answers(db):
+    client = ScriptedClient([STATUS_WITH_SANDBOX, f"[hs] precaching {MODEL}\n[hs] pong 0"])
+    result = service.show_model(db, "pomps-pc", MODEL, client=client)
+    assert result["status"] == "failed" and "did not finish" in result["detail"]
+
+
+def test_show_model_fails_when_the_pong_count_does_not_rise(db):
+    client = ScriptedClient([STATUS_WITH_SANDBOX,
+                             f"[hs] model {MODEL} spawned name={MODEL}\n[hs] pong 0"])
+    result = service.show_model(db, "pomps-pc", MODEL, client=client)
+    assert result["status"] == "failed", "no new live entity means nothing was spawned"
+
+
+def test_show_model_reports_the_runtimes_own_error(db):
+    client = ScriptedClient([STATUS_WITH_SANDBOX, "[hs] error precache timed out for " + MODEL])
+    result = service.show_model(db, "pomps-pc", MODEL, client=client)
+    assert result["status"] == "failed" and "precache timed out" in result["detail"]
+
+
+def test_show_model_is_blocked_without_the_sandbox(db):
+    client = ScriptedClient(["loaded spawngroup(  1) : SV: [0: de_dust2]"])
+    result = service.show_model(db, "pomps-pc", MODEL, client=client)
+    assert result["status"] == "blocked" and "hermes_sandbox" in result["detail"]
+    assert len(client.sent) == 1, "nothing is sent when there is nothing to spawn onto"
+
+
+def test_show_model_is_blocked_when_the_runtime_does_not_answer(db):
+    client = ScriptedClient([SPAWNGROUP_LOADED])
+    result = service.show_model(db, "pomps-pc", MODEL, client=client)
+    assert result["status"] == "blocked" and "hs_ping" in result["detail"]
+
+
+@pytest.mark.parametrize("model", ["", "models/X.vmdl", "/models/x.vmdl", "models/../x.vmdl",
+                                   "models/x.mdl", f"{MODEL}; quit", f"{MODEL} 1.5 2"])
+def test_show_model_refuses_a_path_outside_the_allowlist(db, model):
+    with pytest.raises(service.LiveError, match="vmdl"):
+        service.show_model(db, "pomps-pc", model, client=ScriptedClient([]))
+
+
+def test_show_model_needs_a_netcon_address(db):
+    with pytest.raises(service.LiveError, match="no netcon address"):
+        service.show_model(db, "pomps-pc", MODEL)
