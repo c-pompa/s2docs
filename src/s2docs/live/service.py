@@ -248,7 +248,10 @@ def show_model(db: Database, host_id: str, model: str, *, client=None, clear: bo
     if not ping:
         return {**result, "status": "blocked",
                 "detail": f"spawngroup {SANDBOX} is loaded but the runtime did not answer hs_ping"}
-    lines = [*recipes.ROUND_LOCK_LINES, "mp_restartgame 1", "sleep 3", f"hs_model {model}", "sleep 2", "hs_ping"]
+    # The baseline pong is re-read AFTER the restart: `mp_restartgame` wipes anything spawned earlier, so a
+    # pre-restart count (e.g. 3 chickens) would make a correct spawn (pong 0 -> 1) read as "not rising".
+    lines = [*recipes.ROUND_LOCK_LINES, "mp_restartgame 1", "sleep 3", "hs_ping", f"hs_model {model}", "sleep 2",
+             "hs_ping"]
     if clear:
         lines.append("hs_clear prop")
     for line in lines:
@@ -259,7 +262,9 @@ def show_model(db: Database, host_id: str, model: str, *, client=None, clear: bo
     except NetconError as exc:
         raise LiveError(str(exc)) from exc
     after = _PONG.findall(reply)
-    pong_before, pong_after = result["pong_before"], (int(after[-1]) if after else None)
+    # two pongs in the reply = post-restart baseline + after the spawn; fall back to the pre-restart one
+    pong_before = int(after[0]) if len(after) >= 2 else result["pong_before"]
+    pong_after = int(after[-1]) if after else None
     spawned = re.search(rf"\[hs\] model {re.escape(model)} spawned name=(\S+)", reply)
     error = next((ln.strip() for ln in reply.splitlines() if ln.strip().startswith("[hs] error")), "")
     if spawned and spawned.group(1) == model and pong_after is not None and pong_before is not None \

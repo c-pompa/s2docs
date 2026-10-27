@@ -318,6 +318,19 @@ def test_show_model_is_verified_by_the_spawned_name_and_a_rising_pong(db):
         assert recipes.ALLOWED.fullmatch(line), line
 
 
+def test_show_model_baselines_the_pong_after_the_restart(db):
+    """Earlier spawns (pong 3) are wiped by mp_restartgame: 0 -> 1 after the restart is a real spawn."""
+    client = ScriptedClient([f"{SPAWNGROUP_LOADED}\n[hs] pong 3",
+                             f"[hs] pong 0\n[hs] precaching {MODEL}\n"
+                             f"[hs] model {MODEL} spawned name={MODEL}\n[hs] pong 1"])
+    result = service.show_model(db, "pomps-pc", MODEL, client=client)
+    assert result["status"] == "verified"
+    assert (result["pong_before"], result["pong_after"]) == (0, 1)
+    lines = client.sent[-1]
+    assert lines.index("hs_ping") > lines.index("mp_restartgame 1")
+    assert lines.index("hs_ping") < lines.index(f"hs_model {MODEL}")
+
+
 def test_show_model_can_clear_afterwards(db):
     client = ScriptedClient([STATUS_WITH_SANDBOX,
                              f"[hs] model {MODEL} spawned name={MODEL}\n[hs] pong 1\n[hs] cleared 1"])
