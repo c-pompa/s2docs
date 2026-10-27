@@ -66,6 +66,54 @@ Same chain, different asset stage:
 - An `action` has no mesh, so the mesh/build gates in §2 do not apply; the gates that do apply are
   validate + compile + a non-fail verdict.
 
+### The compile + deploy stages, as built (measured 2026-10-27 on pomps-pc)
+
+`s2docs pipeline script --compile [--deploy-host <id>]` (Python: `run_script_slice(compile=True,
+deploy_host_id=…)`, implementation `s2docs/build/script_compile.py`) makes `build` and `deploy` real:
+
+1. the `.js` is pushed to `<CS2>/content/csgo_addons/<addon>/scripts/<name>.js` and MD5-verified;
+2. one server-owned run (`builds.start`) executes `resourcecompiler -nop4 -i <that .js>` over ssh;
+3. the `.vjs_c` is pulled back to `<data>/scripts/<addon>/` against the host's `Get-FileHash` and
+   attached to the run (`builds.record_artifacts`);
+4. `--deploy-host` copies it **loose** to that host's `<CS2>/game/csgo/scripts/<name>.vjs_c`, MD5 readback.
+
+What the run actually produces, verbatim from the probe (`vjs_probe` addon, CS2 in ssh's session 0, no
+interactive task, no display):
+
+```
+No display adapters found. Falling back to software rasterizer. (nAdapterCount=0, nAdapter=0)
+- csgo_addons\vjs_probe\scripts\vjsprobe.js
+-----------------------------------------------------------------
+ OK: 1 compiled, 0 failed, 0 skipped, 0m:00s
+-----------------------------------------------------------------
+Leaked KeyValues blocks: 594
+resourcecompiler exit 0
+SCRIPT COMPILE OK …\game\csgo_addons\vjs_probe\scripts\vjsprobe.vjs_c
+```
+
+`vjsprobe.vjs_c`: 1412 bytes, md5 `62cd1aade67a2ce048fd3e3bd307fb74` (identical on the host after the
+loose deploy). A `.js` pass therefore needs neither a display adapter nor a logged-on session — which is
+why `.js` compiles are allowed on **both** hosts while `.vmap` compiles stay `desktop-pc` only
+(`live.sandbox_build.COMPILE_HOSTS`). The script path refuses any input that is not exactly one `.js`
+file (a `.vmap`/`.vmdl`/directory is a hard error), so it can never be used to reach the map pass.
+
+Two behaviours worth knowing before trusting a "OK" line:
+
+- **resourcecompiler does not validate JS.** A script with `Instance.ThisDoesNotExist(;` compiled
+  `OK: 1 compiled, 0 failed` (1008 B `.vjs_c`), and a file that is not JavaScript at all did the same
+  (875 B). tsc `validate` is the only syntax/API gate — that is why a failed `validate` never compiles.
+- **exit 0 is not proof of a fresh artifact.** rc can exit 0 after a crash, so the runner also requires
+  the `.vjs_c` to exist with `LastWriteTime` at or after the run's start, and prints its success token
+  only then. rc's real failure mode is exit 1 with
+  `FATAL ERROR: Unable to determine mod from file "…"` (e.g. a missing input), and the output directory
+  must exist before the redirect (rc does not create `game/csgo_addons/<addon>/scripts`: a missing dir
+  fails the redirect with `out-file : Could not find a part of the path` before rc runs).
+
+`verdict` stays **blocked**, and the reason is now the measured one: a cs_script only runs from a map
+whose `point_script` references it — a runtime `ent_create` of `point_script` fails with
+`Failed to load cs_script`. Making the verdict real needs a map compiled with `scripts/<name>.vjs` on its
+point_script, on desktop-pc.
+
 ## 4. Quality gates — the four things the first proof lacked
 
 The 2026-10-24 proof produced a prop that *renders* and is still not a game asset. Each gap becomes

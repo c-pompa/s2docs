@@ -431,7 +431,8 @@ def _cmd_pipeline(args: argparse.Namespace) -> int:
 
 
 def _cmd_pipeline_script(args: argparse.Namespace) -> int:
-    """`s2docs pipeline script`: text -> cs_script as one job — generate+validate real, the rest blocked."""
+    """`s2docs pipeline script`: text -> cs_script as one job — generate/validate real, and with
+    --compile/--deploy-host the .js is compiled to .vjs_c on the host and copied loose there."""
     from s2docs import pipeline
 
     text = Path(args.script).read_text(encoding="utf-8") if args.script else None
@@ -444,6 +445,9 @@ def _cmd_pipeline_script(args: argparse.Namespace) -> int:
         host_id=args.host,
         script_text=text,
         project_id=args.project,
+        compile=args.compile,
+        deploy_host_id=args.deploy_host,
+        build_timeout_sec=args.build_timeout,
     )
     return _emit_chain(args, job)
 
@@ -1349,6 +1353,16 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--name", required=True, help="Script name (addon-safe: [a-z][a-z0-9_]+)")
     s.add_argument("--host", required=True, help="Build host id (see `s2docs host list`)")
     s.add_argument("--script", help="an existing .js to use instead of the scaffold skeleton")
+    s.add_argument(
+        "--compile",
+        action="store_true",
+        help="compile the .js to .vjs_c on --host (desktop-pc or pomps-pc) and pull it back, md5-checked",
+    )
+    s.add_argument(
+        "--deploy-host",
+        help="copy the compiled .vjs_c LOOSE to this host's <CS2>/game/csgo/scripts (needs --compile)",
+    )
+    s.add_argument("--build-timeout", type=int, default=120, help="seconds to wait for the compile")
     s.add_argument("--project", help="ledger project id to attach the chain to")
     s.set_defaults(fn=_cmd_pipeline_script)
 
