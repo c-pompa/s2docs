@@ -125,3 +125,15 @@ def test_spawn_plan_is_safe_once_and_clear_alone_is_unchanged():
 def test_safe_lines_are_allowlisted():
     for line in SAFE:
         assert ALLOWED.fullmatch(line), line
+
+
+def test_round_lock_lines_are_allowlisted_and_only_at_their_measured_values():
+    """A runtime spawn only survives while the round does (measured 2026-10-27: the round ended, the
+    restart wiped the prop). The lock is literal: no other round length, no extra token, no second command."""
+    for line in recipes.ROUND_LOCK_LINES:
+        assert ALLOWED.fullmatch(line), line
+    for good in ("mp_roundtime 60", "mp_roundtime_defuse 60", "mp_freezetime 0", "hs_clear prop", "hs_clear all"):
+        assert ALLOWED.fullmatch(good), good
+    for bad in ("mp_roundtime 60;quit", "mp_roundtime 6", "mp_roundtime_defuse 1.5", "mp_freezetime 1",
+                "mp_roundtime", "mp_roundtime 60 1", "hs_clear prop; quit", "hs_clear", "mp_freezetime 0.5"):
+        assert not ALLOWED.fullmatch(bad), bad

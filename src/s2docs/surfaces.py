@@ -393,11 +393,12 @@ OPERATIONS: tuple[Operation, ...] = (
     ),
     Operation(
         id="pipeline_script",
-        summary="Run the text -> cs_script chain (generate, validate) as one job",
+        summary="Run the text -> cs_script chain (generate, validate, compile, deploy) as one job",
         module="s2docs.pipeline", function="run_script_slice",
         surfaces=frozenset({"cli"}),
         cli=("pipeline", "script"), api=("POST", "/api/pipeline/script"), mcp="pipeline_script",
-        note="CLI-only by design, like pipeline_run; the remaining stages are blocked, not faked",
+        note="CLI-only by design, like pipeline_run; build/deploy are real with --compile/"
+             "--deploy-host, and only the in-game verdict is still blocked",
     ),
 )
 

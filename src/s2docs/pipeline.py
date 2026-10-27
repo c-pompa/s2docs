@@ -3,24 +3,39 @@
 This is the vertical slice of the ``pipeline`` ledger step, and it is deliberately explicit about
 which stages are real:
 
-* ``asset``, ``build`` and ``deploy`` call the same code the CLI calls (the ``.vmdl``/``.vmat``
-  writers, the server-owned build runs, and ``deploys.push`` + ``deploys.verify``), so the chain is
-  proven exactly where it runs today.
+* ``asset``, ``build``, ``deploy`` and ``ingame`` call the same code the CLI calls (the
+  ``.vmdl``/``.vmat`` writers, the server-owned build runs, ``deploys.push`` + ``deploys.verify``, and
+  ``live.service.show_model`` over netcon), so the chain is proven exactly where it runs today.
 * ``concept`` and ``mesh`` are recorded as **stubbed**. No text->3D generator is wired into this
   repo (``docs/HAMMERED.md``: the chain starts from an existing mesh), and a stage that silently
   "passes" without producing anything is worse than one that says so.
-* ``ingame`` is recorded as **blocked**, with the measured reason (``ent_create`` never renders a
-  loose model in this client; the map-compile route needs a host with an active display adapter).
+* ``ingame`` is **real only when it can be judged**: it needs a netcon-reachable target host running
+  ``hermes_sandbox``. A succeeded model build also collects its compiled files
+  (``live.asset_artifacts.collect_model_artifacts``), pushes them loose to that host, and then asks the
+  running game to precache and spawn the model (`hs_model`), judging the readback
+  ``[hs] model <path> spawned name=<path>`` plus a rising ``hs_ping`` counter. Without a target host, a
+  successful build, or the spawngroup it is recorded **skipped** or **blocked** with the reason — never
+  a fake pass.
 
 ``deploy`` only runs when the caller supplies a destination *and* the build succeeded; otherwise it
 is recorded **skipped** with the reason (no destination, or nothing new compiled). Skipped is not
 blocked and not a pass: the ledger says which precondition was missing instead of implying the
 capability does not exist.
 
+A verified ``ingame`` readback is **not** a visual verdict: the job closes ``inconclusive`` with
+``next='request a visual verdict'`` unless the caller passes one (``verdict="pass"``), which is the only
+way this slice ever closes ``passed``. ``failed`` is real for a build, an artifact pull, a deploy or a
+readback that did not match.
+
 Every stage writes exactly one job event whose ``phase`` is the stage id, in stage order, so
 ``Job.current_step``/``jobs.get(...).phase`` and the timeline show the same chain. A produced
 artifact is linked (``kind="build"``/``kind="deploy"``) rather than pasted into a message, so the job
 alone is enough to reconstruct what happened.
+
+The same contract holds for the cs_script chain (``run_script_slice``): ``generate`` and ``validate``
+always run, ``build`` compiles the ``.js`` on a host and pulls the ``.vjs_c`` back
+(:mod:`s2docs.build.script_compile`) when ``compile=True``, ``deploy`` copies it loose to a named host,
+and only ``verdict`` is still blocked (running a cs_script needs a map whose point_script references it).
 """
 from __future__ import annotations
 
@@ -29,13 +44,15 @@ from pathlib import Path
 from s2docs import builds, deploys, hosts, jobs
 from s2docs import models as m
 from s2docs.config import get_settings
+from s2docs.live import asset_artifacts, service
 
 #: The chain, in order. This tuple is the contract: a job's timeline must carry one event per entry.
 STAGES: tuple[str, ...] = ("prompt", "concept", "mesh", "asset", "build", "deploy", "ingame")
 
-#: Stages this slice can execute. ``deploy`` executes only when a destination is supplied and the
-#: build succeeded; otherwise it is recorded skipped with the reason (see ``NO_DEST_REASON``).
-REAL_STAGES: tuple[str, ...] = ("asset", "build", "deploy")
+#: Stages this slice can execute. ``deploy`` and ``ingame`` execute only when their preconditions are
+#: supplied (a destination, a netcon-reachable host with the sandbox loaded); otherwise they are
+#: recorded skipped/blocked with the reason (see ``NO_DEST_REASON`` / ``BLOCKED_REASONS``).
+REAL_STAGES: tuple[str, ...] = ("asset", "build", "deploy", "ingame")
 
 STUB_REASON = (
     "no generator is wired for this stage yet: the chain starts from an existing mesh "
@@ -48,12 +65,30 @@ NO_DEST_REASON = (
     "skipped rather than blocked, because the deploy path itself works"
 )
 
+#: Why ``ingame`` is skipped when the caller gave no target host — a missing argument, not a block.
+NO_INGAME_HOST_REASON = (
+    "no in-game target host was given (--ingame-host <host id>), so nothing was spawned in a running "
+    "game; a model can only be proven in-game on a host that is running CS2 with hermes_sandbox loaded"
+)
+
+#: The only close-out a mechanical readback earns on its own: someone has to look at the screen.
+NEEDS_VISUAL_VERDICT = (
+    "the model precached and spawned on the target host (readback verified), but a console line is not a "
+    "visual verdict: ask the user whether they saw it, then re-run with --verdict pass|fail to close the job"
+)
+
+#: Why ``ingame`` is blocked rather than skipped/attempted: a capability precondition is missing.
 BLOCKED_REASONS: dict[str, str] = {
     "ingame": (
-        "in-game proof is blocked: ent_create never renders a loose model in this client, and the "
-        "map-compile route needs a host with an active display adapter (docs/HAMMERED.md 2026-10-24)"
+        "in-game proof needs a netcon-reachable host that is running CS2 with the hermes_sandbox spawngroup "
+        "loaded: `hs_model` uses the sandbox's hs_tpl_prop template (a missing vpk makes spawn_group_load "
+        "kick the client), so without it there is nothing to spawn onto. Nothing was launched here "
+        "(docs/LIVE.md, measured 2026-10-27)"
     ),
 }
+
+#: Verdicts a caller may pass. Only ``pass`` closes the chain ``passed``.
+VERDICTS: tuple[str, ...] = ("pass", "fail")
 
 SUMMARY_MAX = 600
 
@@ -139,6 +174,10 @@ def run_asset_build_slice(
     poll_sec: float = 2.0,
     expected: str | None = None,
     dest: str | None = None,
+    ingame_host: str | None = None,
+    ingame_model: str | None = None,
+    ingame_clear: bool = False,
+    verdict: str | None = None,
 ) -> m.Job:
     """Run the chain for one mesh and return the closed-out job.
 
@@ -146,10 +185,23 @@ def run_asset_build_slice(
     *not attempted* rather than faked. ``dest`` is the remote root the compiled addon is copied to
     (a Windows/share path, ``D:/...`` — whatever the host's scp accepts): with it, and a successful
     build, the deploy stage pushes and MD5-verifies the addon content; without it the stage is
-    recorded *skipped* and says no destination was given. The returned job is terminal: ``passed``
-    never happens here, because ``ingame`` is blocked — ``inconclusive`` is the honest close-out, and
-    ``failed`` when the build or the deploy actually failed.
+    recorded *skipped* and says no destination was given.
+
+    ``ingame_host`` is the host running CS2 (netcon registered, ``hermes_sandbox`` loaded). With it, a
+    succeeded build's compiled artifacts are collected to ``<data_dir>/artifacts/<build id>/<rel>``,
+    pushed loose into that host's ``game/csgo`` tree (MD5 readback), and the game is asked to precache
+    and spawn ``ingame_model`` (default ``models/<name>/<name>.vmdl``). The stage is ``verified`` only on
+    the game's own ``[hs] model <path> spawned name=<path>`` line plus a rising ``hs_ping`` count.
+    Without a target host the stage is *skipped*; with a host but no sandbox/no netcon it is *blocked*
+    — neither is ever a pass.
+
+    ``verdict`` is the caller's visual verdict (``pass``/``fail``) on a verified readback: ``pass`` is
+    the only way this slice closes ``passed``. A verified readback with no verdict closes
+    ``inconclusive`` with ``next='request a visual verdict'``, because a console line is not a look at
+    the screen.
     """
+    if verdict is not None and verdict not in VERDICTS:
+        raise PipelineError(f"verdict must be one of {', '.join(VERDICTS)} (or omitted), got {verdict!r}")
     from s2docs.asset.material import write_vmat
     from s2docs.asset.model import render_model_doc, write_model_doc
     from s2docs.build.workspace import addon_root
@@ -204,6 +256,8 @@ def run_asset_build_slice(
     # ---- build: real when a command is supplied ----------------------------
     build_status: str | None = None
     build_id: str | None = None
+    collected: asset_artifacts.Collected | None = None
+    artifact_error: str | None = None
     if build_command:
         try:
             run = builds.start(db, host_id, build_command, kind="compile", timeout_sec=build_timeout_sec)
@@ -215,13 +269,29 @@ def run_asset_build_slice(
             jobs.link(db, job.id, kind="build", ref_id=run.id)
             run = _finish_build(db, run, timeout_sec=build_timeout_sec, poll_sec=poll_sec)
             build_status = run.status
-            _stage(
-                db, job.id, "build",
-                level="milestone" if run.status == "succeeded" else "error",
-                message=f"build {run.status}",
-                data={"build": run.id, "status": run.status, "exit_code": run.exit_code,
-                      "summary": run.summary, "log_path": run.log_path},
-            )
+            build_data: dict = {"build": run.id, "status": run.status, "exit_code": run.exit_code,
+                                "summary": run.summary, "log_path": run.log_path}
+            level = "milestone" if run.status == "succeeded" else "error"
+            message = f"build {run.status}"
+            if run.status == "succeeded":
+                # The compile host writes models/<name>/*.vmdl_c + materials/hammered/<name>/*.vmat_c; before
+                # 2026-10-27 nothing collected them and `artifacts` stayed []. One MD5-checked pull later, the
+                # build record carries the files a playing host needs.
+                try:
+                    collected = asset_artifacts.collect_model_artifacts(
+                        db, host_id=host_id, addon=addon, name=name, run_id=run.id,
+                    )
+                except (service.LiveError, deploys.DeployError, hosts.HostError, OSError) as exc:
+                    # A pull that did not match is not a build we can hand to a game: the stage is an error.
+                    artifact_error = str(exc)
+                    level = "error"
+                    message = "build succeeded but its artifacts were not collected"
+                    build_data["artifact_error"] = artifact_error
+                else:
+                    build_data["artifacts"] = len(collected.files)
+                    build_data["artifact_root"] = str(collected.root)
+                    message = f"build {run.status}, {len(collected.files)} artifact(s) collected"
+            _stage(db, job.id, "build", level=level, message=message, data=build_data)
     else:
         _stage(db, job.id, "build", message="build not attempted",
                data={"skipped": True, "reason": "no build_command supplied"})
@@ -266,43 +336,123 @@ def run_asset_build_slice(
             message=f"deploy {deploy_status}", data=data,
         )
 
-    # ---- ingame: still blocked, recorded as such ---------------------------
-    _stage(db, job.id, "ingame", message="ingame blocked",
-           data={"blocked": True, "reason": BLOCKED_REASONS["ingame"]})
+    # ---- ingame: real when a target host is given and the build produced artifacts
+    ingame_status: str | None = None
+    ingame_detail: str | None = None
+    model_path = ingame_model or f"models/{name}/{name}.vmdl"
+    ingame_data: dict = {"host_id": ingame_host, "model": model_path}
+    if not ingame_host:
+        _stage(db, job.id, "ingame", message="ingame skipped: no target host",
+               data={"skipped": True, "reason": NO_INGAME_HOST_REASON})
+    elif build_status != "succeeded" or collected is None:
+        ingame_data.update({"skipped": True, "reason": (
+            "the build did not succeed and its compiled artifacts are not on this machine, so there is "
+            "nothing to spawn in a running game"
+        )})
+        _stage(db, job.id, "ingame", message="ingame skipped: no compiled artifacts",
+               data=ingame_data)
+    else:
+        # The playing host loads loose files (an addon mount did not work): push the collected artifacts
+        # to <CS2>/game/csgo at their own relative paths, MD5-read back, then ask the game to spawn it.
+        try:
+            loose, loose_failure = asset_artifacts.deploy_loose(
+                db, collected, host_id=ingame_host, addon=addon, owner=f"live:pipeline:{job.id}",
+            )
+        except (deploys.DeployError, hosts.HostError, service.LiveError) as exc:
+            loose, loose_failure = None, str(exc)
+        if loose is not None:
+            jobs.link(db, job.id, kind="deploy", ref_id=loose.id)
+            ingame_data.update({"loose_deploy": loose.id, "loose_status": loose.status,
+                                "files": len(loose.entries),
+                                "verified": sum(1 for entry in loose.entries if entry.verified)})
+        else:
+            ingame_data["loose_status"] = "failed"
+        loose_status = loose.status if loose is not None else "failed"
+        if loose_failure or loose_status != "verified":
+            ingame_status = "failed"
+            ingame_detail = loose_failure or f"the loose artifact deploy is {loose_status}"
+            ingame_data.update({"status": ingame_status, "error": ingame_detail})
+            _stage(db, job.id, "ingame", level="error",
+                   message="ingame failed: artifacts did not reach the target host", data=ingame_data)
+        else:
+            try:
+                result = service.show_model(db, ingame_host, model_path, clear=ingame_clear)
+            except (service.LiveError, hosts.HostError) as exc:
+                # No netcon address for that host, or netcon went away: a missing precondition, not a pass.
+                ingame_status = "blocked"
+                ingame_detail = str(exc)
+                ingame_data.update({"blocked": True, "status": ingame_status,
+                                    "reason": BLOCKED_REASONS["ingame"], "detail": ingame_detail})
+                _stage(db, job.id, "ingame", level="warn", message="ingame blocked", data=ingame_data)
+            else:
+                ingame_status = result["status"]
+                ingame_detail = result["detail"]
+                ingame_data.update({
+                    "status": ingame_status, "detail": ingame_detail, "lines": result["lines"],
+                    "pong_before": result["pong_before"], "pong_after": result["pong_after"],
+                    "readback": result["readback"],
+                })
+                if verdict is not None:
+                    ingame_data["verdict"] = verdict
+                if ingame_status == "blocked":
+                    ingame_data["blocked"] = True
+                    ingame_data["reason"] = BLOCKED_REASONS["ingame"]
+                    _stage(db, job.id, "ingame", level="warn", message="ingame blocked", data=ingame_data)
+                else:
+                    _stage(db, job.id, "ingame",
+                           level="milestone" if ingame_status == "verified" else "error",
+                           message=f"ingame {ingame_status}", data=ingame_data)
 
     # A deploy that ran and did not come back 'verified' is a failure, including the case where the
     # MD5 readback could not run: the chain must not close 'inconclusive' on bytes nobody confirmed.
     deploy_failed = deploy_status is not None and deploy_status != "verified"
-    failed = build_status in ("failed", "cancelled", "interrupted") or deploy_failed
+    ingame_failed = ingame_status == "failed" or verdict == "fail"
+    failed = (build_status in ("failed", "cancelled", "interrupted") or deploy_failed
+              or artifact_error is not None or ingame_failed)
+    # `passed` is the caller's verdict on a verified readback — never a console line on its own.
+    passed = ingame_status == "verified" and verdict == "pass"
     if deploy_status is None:
         deploy_bit = "deploy skipped (no destination)" if not dest else "deploy skipped (no successful build)"
     else:
         deploy_bit = f"deploy {deploy_status}" + (f" ({deploy_id})" if deploy_id else "")
+    if ingame_status is None:
+        ingame_bit = ("ingame skipped (no target host)" if not ingame_host
+                      else "ingame skipped (no compiled artifacts)")
+    else:
+        ingame_bit = f"ingame {ingame_status}" + (f": {ingame_detail}" if ingame_detail else "")
     learned_bits = [
         f"asset stage wrote {produced['vmdl']}" + (f" and {produced['vmat']}" if "vmat" in produced else ""),
         "concept/mesh have no generator (stubbed)",
-        f"build {'not attempted' if build_status is None else build_status}" + (f" ({build_id})" if build_id else ""),
+        f"build {'not attempted' if build_status is None else build_status}"
+        + (f" ({build_id})" if build_id else "")
+        + (f", {len(collected.files)} artifact(s) collected" if collected else "")
+        + (f", artifacts not collected: {artifact_error}" if artifact_error else ""),
         deploy_bit,
-        "ingame blocked",
+        ingame_bit,
     ]
+    if ingame_status == "verified" and verdict is None:
+        next_ = NEEDS_VISUAL_VERDICT
+    elif passed:
+        next_ = "Closed passed on the caller's visual verdict; wire concept/mesh generators to finish the chain."
+    else:
+        next_ = (
+            "Pass --dest to copy a compiled addon to a host; pass --ingame-host (a host running CS2 with "
+            "hermes_sandbox loaded) to prove the model in-game, then wire concept/mesh generators."
+        )
     return jobs.finish(
         db, job.id,
-        status="failed" if failed else "inconclusive",
+        status="failed" if failed else ("passed" if passed else "inconclusive"),
         summary=_summary(
             what=(
                 f"Ran the asset chain for {name} in addon {addon} from a prompt; "
                 f"stages {', '.join(STAGES)} recorded on one job."
             ),
             why=(
-                "Prove the chain where it exists (asset+build+deploy) and record stubs/blocks/skips "
+                "Prove the chain where it exists (asset+build+deploy+ingame) and record stubs/blocks/skips "
                 "honestly instead of a green status that hides them."
             ),
             learned="; ".join(learned_bits),
-            next_=(
-                "Pass --dest to copy a compiled addon to a host; unblock ingame by compiling a map "
-                "that references the model on a host with an active display adapter, then wire "
-                "concept/mesh generators."
-            ),
+            next_=next_,
         ),
     )
 
@@ -312,20 +462,28 @@ def run_asset_build_slice(
 #: The script chain, in order. Same contract as STAGES: one event per entry, ``phase`` = the id.
 SCRIPT_STAGES: tuple[str, ...] = ("prompt", "generate", "validate", "build", "deploy", "verdict")
 
+#: Stages that still cannot run, with the measured reason. ``build``/``deploy`` are real now (they are
+#: skipped, not blocked, when the caller does not ask for them) — only the verdict needs something this
+#: repo does not have yet.
 SCRIPT_BLOCKED: dict[str, str] = {
-    "build": (
-        "the .js -> .vjs compile path is not established in this repo (the engine loads "
-        "scripts/<name>.vjs); recorded instead of guessing a compiler invocation"
-    ),
-    "deploy": (
-        "needs a reachable target host and a mounted addon; not attempted by this slice "
-        "(pomps-pc sshd flaps for minutes at a time)"
-    ),
     "verdict": (
-        "an in-game verdict needs a live server plus the driver; blocked with the ingame stage "
-        "(docs/HAMMERED.md 2026-10-24)"
+        "running a cs_script needs a map whose point_script references it: a runtime ent_create of "
+        "point_script fails with 'Failed to load cs_script' (2026-10-27), so the verdict needs a map "
+        "compiled with scripts/<name>.vjs on its point_script — a later step"
     ),
 }
+
+#: ``build`` without ``compile=True`` is a missing argument, not a block.
+COMPILE_NOT_REQUESTED = (
+    "no compile was requested (pass compile=True / --compile): the .js is written and type-checked, "
+    "but nothing was pushed to a host, so build is skipped rather than blocked"
+)
+
+#: ``deploy`` without a target host is a missing argument too.
+NO_SCRIPT_DEST_REASON = (
+    "no deploy host was given (--deploy-host <host id>), so the .vjs_c was not copied loose to any "
+    "host; the stage is skipped rather than blocked, because the deploy path itself works"
+)
 
 
 def run_script_slice(
@@ -342,6 +500,10 @@ def run_script_slice(
     project_id: str | None = None,
     origin: str = "agent",
     expected: str | None = None,
+    compile: bool = False,
+    deploy_host_id: str | None = None,
+    build_timeout_sec: int = 120,
+    poll_sec: float = 1.0,
 ) -> m.Job:
     """Run the text -> cs_script chain for one script and return the closed-out job.
 
@@ -349,10 +511,17 @@ def run_script_slice(
     generator) and otherwise the scaffold's own skeleton, so the stage never invents code it cannot
     attribute. ``validate`` type-checks through the same ``validate_cs_script`` the CLI uses; a
     missing TypeScript toolchain is *blocked*, not a pass and not a failure.
+
+    ``compile=True`` makes ``build`` real: the ``.js`` is pushed to ``host_id`` and one
+    ``resourcecompiler`` run compiles it to ``.vjs_c`` (:mod:`s2docs.build.script_compile`), which is
+    pulled back MD5-checked and attached to the run. It never runs when ``validate`` failed — a script
+    that does not type-check is not compiled. ``deploy_host_id`` makes ``deploy`` real: the pulled
+    ``.vjs_c`` is copied LOOSE to that host's ``<CS2>/game/csgo/scripts/<name>.vjs_c``. ``verdict``
+    stays blocked: it needs a map whose point_script references the script.
     """
     from s2docs.build.validate_script import ToolchainMissing, validate_cs_script
     from s2docs.build.workspace import addon_root, script_template
-    from s2docs.db.repository import Repository
+    from s2docs.db.repository import NotFound, Repository
 
     job = jobs.enqueue(
         db,
@@ -396,11 +565,17 @@ def run_script_slice(
 
     # ---- validate ----------------------------------------------------------
     validation = "blocked"
+    validation_errors = 0
     try:
         with db.reader() as conn:
             result = validate_cs_script(Repository(conn), text, game=game, filename=f"{name}.js")
     except ToolchainMissing as exc:
         _stage(db, job.id, "validate", level="warn", message="validate blocked: no TypeScript toolchain",
+               data={"blocked": True, "reason": str(exc)})
+    except NotFound as exc:
+        # No ingested cs_script API in this data dir: there is nothing to type-check against. That is a
+        # blocked validation (like a missing tsc), not a crash and not a pass.
+        _stage(db, job.id, "validate", level="warn", message="validate blocked: no ingested script API",
                data={"blocked": True, "reason": str(exc)})
     else:
         if result.ok:
@@ -409,38 +584,135 @@ def run_script_slice(
                    data={"errors": result.errors, "warnings": result.warnings, "checker": result.checker})
         else:
             validation = "failed"
+            validation_errors = result.errors
             _stage(
                 db, job.id, "validate", level="error", message=f"script has {result.errors} error(s)",
                 data={"errors": result.errors, "warnings": result.warnings,
                       "diagnostics": [d.model_dump() for d in result.diagnostics[:5]]},
             )
 
-    # ---- build / deploy / verdict: blocked, recorded as such ---------------
-    for stage in ("build", "deploy", "verdict"):
-        _stage(db, job.id, stage, message=f"{stage} blocked",
-               data={"blocked": True, "reason": SCRIPT_BLOCKED[stage]})
+    # ---- build: real when compile is requested and validate did not fail ----
+    from s2docs.build import script_compile
 
-    learned = (
+    build_status: str | None = None
+    build_id: str | None = None
+    build_reason: str | None = None
+    compiled = None
+    if not compile:
+        build_reason = COMPILE_NOT_REQUESTED
+        _stage(db, job.id, "build", message="build skipped: no compile requested",
+               data={"skipped": True, "reason": build_reason})
+    elif validation == "failed":
+        build_reason = (
+            f"validate reported {validation_errors} error(s), so nothing was compiled: "
+            "a script that does not type-check is not shipped as a .vjs_c"
+        )
+        _stage(db, job.id, "build", message="build skipped: validate failed",
+               data={"skipped": True, "reason": build_reason})
+    else:
+        try:
+            compiled = script_compile.compile_js(
+                db, host_id, addon=addon, name=name, source=target,
+                timeout_sec=build_timeout_sec, poll_sec=poll_sec, owner=f"job:{job.id}",
+            )
+        except script_compile.ScriptCompileError as exc:  # refused input, failed run, stale artifact
+            build_status = "failed"
+            build_reason = str(exc)
+            run_id = getattr(exc, "run_id", None)
+            if run_id:
+                build_id = run_id
+                jobs.link(db, job.id, kind="build", ref_id=run_id)
+            _stage(db, job.id, "build", level="error", message="build failed", data={
+                "build": build_id, "status": build_status, "host_id": host_id, "error": build_reason,
+                "reason": build_reason,
+            })
+        else:
+            build_id, build_status = compiled.run.id, compiled.run.status
+            jobs.link(db, job.id, kind="build", ref_id=compiled.run.id)
+            _stage(
+                db, job.id, "build", level="milestone", message=f"compiled {name}.vjs_c",
+                data={
+                    "build": build_id, "status": build_status, "host_id": host_id,
+                    "artifact": compiled.path.name, "md5": compiled.md5, "size": compiled.size,
+                    "remote": compiled.remote, "exit_code": compiled.run.exit_code,
+                    "log_path": compiled.run.log_path,
+                },
+            )
+
+    # ---- deploy: real when a target host is given and the build produced a .vjs_c ----
+    deploy_id: str | None = None
+    deploy_status: str | None = None
+    if build_status != "succeeded" or compiled is None:
+        _stage(
+            db, job.id, "deploy", message="deploy skipped: no compiled .vjs_c",
+            data={
+                "skipped": True,
+                "reason": (
+                    (build_reason or "the build did not produce a .vjs_c")
+                    + "; nothing was copied to a host"
+                ),
+            },
+        )
+    elif not deploy_host_id:
+        _stage(db, job.id, "deploy", message="deploy skipped: no deploy host",
+               data={"skipped": True, "reason": NO_SCRIPT_DEST_REASON})
+    else:
+        try:
+            deployment = script_compile.deploy_loose(
+                db, deploy_host_id, addon=addon, name=name, compiled=compiled.path,
+                owner=f"job:{job.id}",
+            )
+        except script_compile.ScriptCompileError as exc:
+            deploy_status = "failed"
+            _stage(db, job.id, "deploy", level="error", message="deploy failed",
+                   data={"host_id": deploy_host_id, "status": deploy_status, "error": str(exc)})
+        else:
+            deploy_id, deploy_status = deployment.id, deployment.status
+            jobs.link(db, job.id, kind="deploy", ref_id=deployment.id)
+            _stage(
+                db, job.id, "deploy",
+                level="milestone" if deploy_status == "verified" else "error",
+                message=f"deploy {deploy_status}",
+                data={
+                    "host_id": deploy_host_id, "deploy": deploy_id, "status": deploy_status,
+                    "path": f"scripts/{name}.vjs_c", "md5": compiled.md5, "size": compiled.size,
+                },
+            )
+
+    # ---- verdict: still blocked, with the measured reason -------------------
+    _stage(db, job.id, "verdict", message="verdict blocked",
+           data={"blocked": True, "reason": SCRIPT_BLOCKED["verdict"]})
+
+    learned_bits = [
         f"generate wrote scripts/{name}.js ({len(text.encode('utf-8'))} B, "
-        f"{'caller-supplied' if script_text is not None else 'scaffold skeleton'}); "
-        f"validate {validation}; build/deploy/verdict blocked"
+        f"{'caller-supplied' if script_text is not None else 'scaffold skeleton'})",
+        f"validate {validation}",
+        ("build skipped (no compile requested)" if not compile
+         else f"build {build_status or 'skipped'}" + (f" ({build_id})" if build_id else "")),
+        ("deploy skipped" if deploy_status is None else f"deploy {deploy_status}"
+         + (f" ({deploy_id})" if deploy_id else "")),
+        "verdict blocked",
+    ]
+    failed = validation == "failed" or build_status == "failed" or (
+        deploy_status is not None and deploy_status != "verified"
     )
     return jobs.finish(
         db, job.id,
-        status="failed" if validation == "failed" else "inconclusive",
+        status="failed" if failed else "inconclusive",
         summary=_summary(
             what=(
                 f"Ran the cs_script chain for {name} in addon {addon}: "
                 f"{', '.join(SCRIPT_STAGES)} recorded on one job."
             ),
             why=(
-                "A text->script action kind needs a durable record of what was generated and whether "
-                "it type-checks, not a shell transcript."
+                "A text->script action kind needs a durable record of what was generated, whether it "
+                "type-checks, and — when a host was named — which .vjs_c that host actually compiled."
             ),
-            learned=learned,
+            learned="; ".join(learned_bits),
             next_=(
-                "Establish the .js->.vjs compile path, then deploy the addon and capture an in-game "
-                "verdict once a host with an active display adapter is reachable."
+                "Compile a map whose point_script references scripts/"
+                f"{name}.vjs on desktop-pc (vmap compiles need its display adapter) and capture an "
+                "in-game verdict there."
             ),
         ),
     )

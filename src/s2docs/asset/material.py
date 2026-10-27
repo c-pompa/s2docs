@@ -204,8 +204,10 @@ def write_vmat(
     # re-check after mkdir: a symlink created meanwhile still fails
     for rel in (material_path(name), color_texture_path(name), *baked_rel.values()):
         _inside(root, rel)
-    shutil.copyfile(src, tex)
-    for kind, dst in baked_dst.items():
-        shutil.copyfile(baked_src[kind], dst)
+    # The caller may point at the texture already in the addon (a re-run of the same asset): copying a
+    # file onto itself raises SameFileError, and there is nothing to copy anyway.
+    for source, dst in ((src, tex), *((baked_src[k], d) for k, d in baked_dst.items())):
+        if not (dst.exists() and source.resolve() == dst.resolve()):
+            shutil.copyfile(source, dst)
     vmat.write_bytes(doc.encode("utf-8"))
     return vmat

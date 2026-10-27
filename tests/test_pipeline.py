@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 from datetime import UTC, datetime
+from pathlib import Path
 
 import pytest
 
@@ -77,7 +78,34 @@ def _deployment(*, id="d-test", status: DeployStatus = "pushed", verified=False)
     )
 
 
-def _patch_build(monkeypatch, *, status: BuildStatus = "succeeded"):
+def _collected(tmp_path, *, run_id="b-test", name="bridge"):
+    """What a real artifact pull leaves behind: one local file per addon-relative compiled path."""
+    from s2docs.live.asset_artifacts import Collected
+
+    root = tmp_path / "artifacts" / run_id
+    files = {}
+    for rel in (f"models/{name}/{name}.vmdl_c", f"materials/hammered/{name}/{name}.vmat_c"):
+        path = root / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"compiled")
+        files[rel] = path
+    return Collected(run_id=run_id, root=root, files=files)
+
+
+def _patch_artifacts(monkeypatch, tmp_path, *, raises=None, seen=None):
+    """Fake the artifact pull: no ssh, no scp — the collected files are written locally instead."""
+    def fake_collect(_db, *, host_id, addon, name, run_id, dest=None):
+        if raises is not None:
+            raise raises
+        if seen is not None:
+            seen.update({"host_id": host_id, "addon": addon, "name": name, "run_id": run_id})
+        return _collected(tmp_path, run_id=run_id, name=name)
+
+    monkeypatch.setattr(pipeline.asset_artifacts, "collect_model_artifacts", fake_collect)
+
+
+def _patch_build(monkeypatch, tmp_path, *, status: BuildStatus = "succeeded", artifact_raises=None,
+                 collected_seen=None):
     """Fake the server-owned build run: the pipeline sees a finished run, never SSH or a host."""
     def fake_start(_db, host_id, command, **_kw):
         return _build_run(host_id=host_id, command=command)
@@ -90,6 +118,7 @@ def _patch_build(monkeypatch, *, status: BuildStatus = "succeeded"):
 
     monkeypatch.setattr(pipeline.builds, "start", fake_start)
     monkeypatch.setattr(pipeline.builds, "wait", fake_wait)
+    _patch_artifacts(monkeypatch, tmp_path, raises=artifact_raises, seen=collected_seen)
 
 
 def _patch_deploy(monkeypatch, *, status: DeployStatus = "verified", push_raises=None, verify_raises=None, seen=None):
@@ -113,7 +142,8 @@ def _patch_deploy(monkeypatch, *, status: DeployStatus = "verified", push_raises
 
 def _run(db, *, prompt="a stone bridge prop", addon="probe_addon", name="bridge",
          mesh="models/bridge/bridge.fbx", host_id="desktop-pc", material_color=None,
-         build_command=None, poll_sec=0.0, build_timeout_sec=300, dest=None):
+         build_command=None, poll_sec=0.0, build_timeout_sec=300, dest=None,
+         ingame_host=None, ingame_model=None, ingame_clear=False, verdict=None):
     return pipeline.run_asset_build_slice(
         db,
         prompt=prompt,
@@ -126,6 +156,10 @@ def _run(db, *, prompt="a stone bridge prop", addon="probe_addon", name="bridge"
         poll_sec=poll_sec,
         build_timeout_sec=build_timeout_sec,
         dest=dest,
+        ingame_host=ingame_host,
+        ingame_model=ingame_model,
+        ingame_clear=ingame_clear,
+        verdict=verdict,
     )
 
 
@@ -148,10 +182,10 @@ def test_slice_records_every_stage_in_order_and_stubs_what_it_cannot_run(db, tmp
         assert event.data["stubbed"] is True
         assert "generator" in event.data["reason"]
 
-    # the blocked stage says why, so a reader is not left guessing
+    # ingame with no target host is a missing argument: skipped, with the flag that fixes it
     ingame = next(e for e in job.events if e.phase == "ingame")
-    assert ingame.data["blocked"] is True
-    assert "display adapter" in ingame.data["reason"]
+    assert ingame.data["skipped"] is True and not ingame.data.get("blocked")
+    assert "--ingame-host" in ingame.data["reason"]
 
     # deploy is not blocked any more: with no destination it says so and copies nothing
     deploy = next(e for e in job.events if e.phase == "deploy")
@@ -211,7 +245,7 @@ def test_slice_links_a_real_build_and_a_failed_build_fails_the_job(db, tmp_path,
 def test_slice_deploys_to_a_destination_and_links_the_deploy(db, tmp_path, monkeypatch):
     _addon(tmp_path, monkeypatch)
     _host(db)
-    _patch_build(monkeypatch)
+    _patch_build(monkeypatch, tmp_path)
     seen: dict = {}
     _patch_deploy(monkeypatch, seen=seen)
 
@@ -232,15 +266,15 @@ def test_slice_deploys_to_a_destination_and_links_the_deploy(db, tmp_path, monke
     # the deployment is linked exactly the way the build is, so the job alone reconstructs it
     assert any(link.kind == "deploy" and link.ref_id == "d-test" for link in job.links)
     assert any(link.kind == "build" for link in job.links)
-    # deploy is real, but ingame is still blocked — the chain still cannot claim a pass
+    # deploy is real, but with no target host ingame is skipped — the chain still cannot claim a pass
     assert job.status == "inconclusive"
-    assert next(e for e in job.events if e.phase == "ingame").data["blocked"] is True
+    assert next(e for e in job.events if e.phase == "ingame").data["skipped"] is True
 
 
 def test_slice_skips_deploy_without_a_destination(db, tmp_path, monkeypatch):
     _addon(tmp_path, monkeypatch)
     _host(db)
-    _patch_build(monkeypatch)
+    _patch_build(monkeypatch, tmp_path)
 
     def _never(*_a, **_kw):
         raise AssertionError("deploy must not run without a destination")
@@ -255,13 +289,13 @@ def test_slice_skips_deploy_without_a_destination(db, tmp_path, monkeypatch):
     assert not deploy.data.get("blocked")
     assert not [link for link in job.links if link.kind == "deploy"]
     assert job.status == "inconclusive", "a skipped deploy is not a failure and not a pass"
-    assert next(e for e in job.events if e.phase == "ingame").data["blocked"] is True
+    assert next(e for e in job.events if e.phase == "ingame").data["skipped"] is True
 
 
 def test_slice_fails_the_job_when_the_deploy_readback_fails(db, tmp_path, monkeypatch):
     _addon(tmp_path, monkeypatch)
     _host(db)
-    _patch_build(monkeypatch)
+    _patch_build(monkeypatch, tmp_path)
     _patch_deploy(monkeypatch, status="failed")
 
     job = _run(db, build_command="rc -i bridge.vmdl -nop4", dest="D:/addons")
@@ -273,7 +307,7 @@ def test_slice_fails_the_job_when_the_deploy_readback_fails(db, tmp_path, monkey
     assert deploy.data["deploy"] == "d-test"
     assert any(link.kind == "deploy" and link.ref_id == "d-test" for link in job.links)
     assert job.status == "failed"
-    assert next(e for e in job.events if e.phase == "ingame").data["blocked"] is True
+    assert next(e for e in job.events if e.phase == "ingame").data["skipped"] is True
 
 
 def test_slice_fails_the_job_when_the_deploy_cannot_start(db, tmp_path, monkeypatch):
@@ -281,7 +315,7 @@ def test_slice_fails_the_job_when_the_deploy_cannot_start(db, tmp_path, monkeypa
 
     _addon(tmp_path, monkeypatch)
     _host(db)
-    _patch_build(monkeypatch)
+    _patch_build(monkeypatch, tmp_path)
     _patch_deploy(monkeypatch, push_raises=DeployError("all copies failed: scp rc=1"))
 
     job = _run(db, build_command="rc -i bridge.vmdl -nop4", dest="D:/addons")
@@ -299,7 +333,7 @@ def test_slice_keeps_the_deploy_link_when_the_readback_cannot_run(db, tmp_path, 
 
     _addon(tmp_path, monkeypatch)
     _host(db)
-    _patch_build(monkeypatch)
+    _patch_build(monkeypatch, tmp_path)
     _patch_deploy(monkeypatch, verify_raises=DeployError("Get-FileHash on desktop-pc timed out after 120s"))
 
     job = _run(db, build_command="rc -i bridge.vmdl -nop4", dest="D:/addons")
@@ -380,7 +414,7 @@ def test_cli_passes_the_destination_to_the_deploy_stage(tmp_path, monkeypatch, c
     with db.writer():
         pass
     _host(db)
-    _patch_build(monkeypatch)
+    _patch_build(monkeypatch, tmp_path)
     seen: dict = {}
     _patch_deploy(monkeypatch, seen=seen)
 
@@ -425,7 +459,7 @@ def _patch_validate(monkeypatch, *, raises=None, result=None):
     monkeypatch.setattr(vs, "validate_cs_script", fake)
 
 
-def test_script_slice_writes_validates_and_blocks_the_rest(db, tmp_path, monkeypatch):
+def test_script_slice_writes_validates_and_skips_build_without_a_compile(db, tmp_path, monkeypatch):
     root = _addon(tmp_path, monkeypatch)
     _host(db)
     _patch_validate(monkeypatch, result=_fake_validation(ok=True))
@@ -436,15 +470,23 @@ def test_script_slice_writes_validates_and_blocks_the_rest(db, tmp_path, monkeyp
     )
 
     assert [e.phase for e in job.events if e.phase] == list(pipeline.SCRIPT_STAGES)
-    assert job.status == "inconclusive", "build/deploy/verdict are blocked, so no pass"
+    assert job.status == "inconclusive", "the verdict is blocked, so no pass"
     written = root / "scripts" / "pinger.js"
     assert written.is_file() and "cs_script/point_script" in written.read_text(encoding="utf-8")
     generate = next(e for e in job.events if e.phase == "generate")
     assert generate.data["source"] == "supplied"
     validate = next(e for e in job.events if e.phase == "validate")
     assert validate.level == "milestone"
-    for stage in ("build", "deploy", "verdict"):
-        assert next(e for e in job.events if e.phase == stage).data["blocked"] is True
+    # build/deploy are real capabilities now: without a request they are SKIPPED with the reason
+    build = next(e for e in job.events if e.phase == "build")
+    assert build.data["skipped"] is True and "no compile was requested" in build.data["reason"]
+    deploy = next(e for e in job.events if e.phase == "deploy")
+    assert deploy.data["skipped"] is True
+    assert not [link for link in job.links if link.kind in ("build", "deploy")]
+    # ... and only the verdict is still blocked
+    verdict = next(e for e in job.events if e.phase == "verdict")
+    assert verdict.data["blocked"] is True
+    assert "point_script" in verdict.data["reason"] and "Failed to load cs_script" in verdict.data["reason"]
 
 
 def test_script_slice_uses_the_scaffold_skeleton_when_no_text_is_supplied(db, tmp_path, monkeypatch):
@@ -465,13 +507,135 @@ def test_script_slice_fails_when_validation_reports_errors(db, tmp_path, monkeyp
     _host(db)
     _patch_validate(monkeypatch, result=_fake_validation(ok=False, errors=2))
 
+    from s2docs.build import script_compile
+
+    monkeypatch.setattr(script_compile, "compile_js",
+                        lambda *a, **kw: pytest.fail("a script that does not type-check is not compiled"))
+
     job = pipeline.run_script_slice(db, prompt="p", addon="probe_addon", name="pinger",
-                                    host_id="desktop-pc", script_text="const x = ;\n")
+                                    host_id="desktop-pc", script_text="const x = ;\n", compile=True)
 
     assert job.status == "failed"
     validate = next(e for e in job.events if e.phase == "validate")
     assert validate.level == "error"
     assert validate.data["errors"] == 2
+    # compile was asked for, and still did not run: the honest record says why
+    build = next(e for e in job.events if e.phase == "build")
+    assert build.data["skipped"] is True and "validate reported 2 error(s)" in build.data["reason"]
+    assert next(e for e in job.events if e.phase == "deploy").data["skipped"] is True
+
+
+def _patch_script_compile(monkeypatch, seen: dict, *, error=None, deploy_error=None):
+    """Fake the compile/pull and the loose deploy halves: no host, no scp, no resourcecompiler."""
+    from s2docs.build import script_compile
+
+    def fake_compile(_db, host_id, *, addon, name, source, **_kw):
+        seen["compile"] = {"host_id": host_id, "addon": addon, "name": name, "source": str(source)}
+        if error is not None:
+            raise error
+        artifact = Path(seen["data_dir"]) / f"{name}.vjs_c"
+        artifact.parent.mkdir(parents=True, exist_ok=True)
+        artifact.write_bytes(b"vjs_c")
+        seen["artifact"] = artifact
+        return script_compile.CompiledScript(
+            run=_build_run(id="b-vjs", host_id=host_id, status="succeeded", exit_code=0),
+            path=artifact, md5="a" * 32, size=artifact.stat().st_size,
+            remote=f"C:/cs2/game/csgo_addons/{addon}/scripts/{name}.vjs_c",
+        )
+
+    def fake_deploy(_db, host_id, *, addon, name, compiled, **_kw):
+        seen["deploy"] = {"host_id": host_id, "addon": addon, "name": name, "compiled": str(compiled)}
+        if deploy_error is not None:
+            raise deploy_error
+        return _deployment(id="d-vjs", status="verified", verified=True)
+
+    monkeypatch.setattr(script_compile, "compile_js", fake_compile)
+    monkeypatch.setattr(script_compile, "deploy_loose", fake_deploy)
+
+
+def test_script_slice_compiles_and_deploys_when_asked(db, tmp_path, monkeypatch):
+    _addon(tmp_path, monkeypatch)
+    _host(db, "pomps-pc")
+    _patch_validate(monkeypatch, result=_fake_validation(ok=True))
+    seen: dict = {"data_dir": str(tmp_path)}
+    _patch_script_compile(monkeypatch, seen)
+
+    job = pipeline.run_script_slice(
+        db, prompt="p", addon="probe_addon", name="pinger", host_id="pomps-pc",
+        script_text="export {};\n", compile=True, deploy_host_id="pomps-pc",
+    )
+
+    # one event per stage, in order — the timeline is still the chain
+    assert [e.phase for e in job.events if e.phase] == list(pipeline.SCRIPT_STAGES)
+    assert job.status == "inconclusive", "the verdict is blocked, so the chain cannot claim a pass"
+
+    # the compile got the addon's own .js and the host it was told to use
+    assert seen["compile"]["host_id"] == "pomps-pc"
+    assert seen["compile"]["name"] == "pinger"
+    assert seen["compile"]["source"].endswith("scripts/pinger.js")
+
+    build = next(e for e in job.events if e.phase == "build")
+    assert build.level == "milestone"
+    assert build.data["build"] == "b-vjs" and build.data["status"] == "succeeded"
+    assert build.data["md5"] == "a" * 32 and build.data["size"] == 5
+    assert any(link.kind == "build" and link.ref_id == "b-vjs" for link in job.links)
+
+    # the deploy copied the pulled artifact, and its record is linked like the build
+    assert seen["deploy"]["host_id"] == "pomps-pc" and seen["deploy"]["name"] == "pinger"
+    assert seen["deploy"]["compiled"] == str(seen["artifact"])
+    deploy = next(e for e in job.events if e.phase == "deploy")
+    assert deploy.data["status"] == "verified" and deploy.data["deploy"] == "d-vjs"
+    assert deploy.data["path"] == "scripts/pinger.vjs_c"
+    assert any(link.kind == "deploy" and link.ref_id == "d-vjs" for link in job.links)
+    assert job.status != "failed"
+
+
+def test_script_slice_records_a_compile_failure_and_skips_the_deploy(db, tmp_path, monkeypatch):
+    from s2docs.build import script_compile
+
+    _addon(tmp_path, monkeypatch)
+    _host(db, "pomps-pc")
+    _patch_validate(monkeypatch, result=_fake_validation(ok=True))
+    seen: dict = {"data_dir": str(tmp_path)}
+    _patch_script_compile(
+        monkeypatch, seen,
+        error=script_compile.ScriptNotFresh("run b-x exited 0 but printed no 'SCRIPT COMPILE OK'", run_id="b-x"),
+    )
+
+    job = pipeline.run_script_slice(db, prompt="p", addon="probe_addon", name="pinger",
+                                    host_id="pomps-pc", script_text="export {};\n",
+                                    compile=True, deploy_host_id="pomps-pc")
+
+    build = next(e for e in job.events if e.phase == "build")
+    assert build.level == "error" and build.data["status"] == "failed"
+    assert "SCRIPT COMPILE OK" in build.data["error"]
+    assert build.data["build"] == "b-x" and any(
+        link.kind == "build" and link.ref_id == "b-x" for link in job.links
+    )
+    deploy = next(e for e in job.events if e.phase == "deploy")
+    assert deploy.data["skipped"] is True and "nothing was copied" in deploy.data["reason"]
+    assert "deploy" not in seen
+    assert job.status == "failed"
+
+
+def test_script_slice_fails_when_the_loose_deploy_fails(db, tmp_path, monkeypatch):
+    from s2docs.build import script_compile
+
+    _addon(tmp_path, monkeypatch)
+    _host(db, "pomps-pc")
+    _patch_validate(monkeypatch, result=_fake_validation(ok=True))
+    seen: dict = {"data_dir": str(tmp_path)}
+    _patch_script_compile(monkeypatch, seen,
+                          deploy_error=script_compile.ScriptCompileError("scp rc=1"))
+
+    job = pipeline.run_script_slice(db, prompt="p", addon="probe_addon", name="pinger",
+                                    host_id="pomps-pc", script_text="export {};\n",
+                                    compile=True, deploy_host_id="pomps-pc")
+
+    deploy = next(e for e in job.events if e.phase == "deploy")
+    assert deploy.level == "error" and deploy.data["status"] == "failed"
+    assert "scp rc=1" in deploy.data["error"]
+    assert job.status == "failed"
 
 
 def test_script_slice_blocks_validate_when_the_toolchain_is_missing(db, tmp_path, monkeypatch):
@@ -488,6 +652,23 @@ def test_script_slice_blocks_validate_when_the_toolchain_is_missing(db, tmp_path
     assert validate.data["blocked"] is True
     assert "tsc" in validate.data["reason"]
     assert job.status == "inconclusive", "a missing toolchain is not a validation failure"
+
+
+def test_script_slice_blocks_validate_when_no_script_api_is_ingested(db, tmp_path, monkeypatch):
+    """An empty data dir has no .d.ts to check against: blocked (like a missing tsc), never a crash."""
+    from s2docs.db.repository import NotFound
+
+    _addon(tmp_path, monkeypatch)
+    _host(db)
+    _patch_validate(monkeypatch, raises=NotFound("game 'cs2' has no any ingested build"))
+
+    job = pipeline.run_script_slice(db, prompt="p", addon="probe_addon", name="pinger",
+                                    host_id="desktop-pc")
+
+    validate = next(e for e in job.events if e.phase == "validate")
+    assert validate.data["blocked"] is True
+    assert "ingested build" in validate.data["reason"]
+    assert job.status == "inconclusive"
 
 
 def test_cli_runs_the_script_chain(tmp_path, monkeypatch, capsys):
@@ -521,3 +702,209 @@ def test_cli_runs_the_script_chain(tmp_path, monkeypatch, capsys):
     assert payload["status"] == "inconclusive"
     assert [e["phase"] for e in payload["events"] if e["phase"]] == list(pipeline.SCRIPT_STAGES)
     assert (workspace / "scripts" / "pinger.js").is_file()
+
+
+# ------------------------------------------------------------------ ingame (real, judged by readback)
+# The 2026-10-27 route: collect the model compile's artifacts, push them loose into the playing host's
+# game/csgo tree, then `hs_model` over netcon and judge by the game's own `[hs] model ... spawned name=...`
+# line plus a rising `hs_ping` counter. A console line is not a look at the screen, so the job only
+# closes `passed` on the caller's verdict.
+
+def _patch_ingame(monkeypatch, *, status="verified", detail="readback ok", show_raises=None,
+                  loose_status: DeployStatus = "verified", loose_raises=None, seen=None):
+    from s2docs.live.asset_artifacts import Collected
+
+    def fake_loose(_db, collected, *, host_id, addon=None, owner=None):
+        if loose_raises is not None:
+            raise loose_raises
+        if seen is not None:
+            seen.update({"loose_host": host_id, "loose_addon": addon, "owner": owner,
+                         "loose_paths": sorted(collected.files)})
+        assert isinstance(collected, Collected)
+        return _deployment(id="d-loose", status=loose_status, verified=loose_status == "verified"), None
+
+    def fake_show(_db, host_id, model, *, client=None, clear=False):
+        if show_raises is not None:
+            raise show_raises
+        if seen is not None:
+            seen.update({"show_host": host_id, "model": model, "clear": clear})
+        return {"host_id": host_id, "model": model, "status": status, "detail": detail,
+                "lines": [f"hs_model {model}"], "readback": "…", "pong_before": 0, "pong_after": 1}
+
+    monkeypatch.setattr(pipeline.asset_artifacts, "deploy_loose", fake_loose)
+    monkeypatch.setattr(pipeline.service, "show_model", fake_show)
+
+
+def test_slice_collects_the_build_artifacts_and_links_them_to_the_run(db, tmp_path, monkeypatch):
+    _addon(tmp_path, monkeypatch)
+    _host(db)
+    seen: dict = {}
+    _patch_build(monkeypatch, tmp_path, collected_seen=seen)
+
+    job = _run(db, build_command="rc -i bridge.vmdl -nop4")
+
+    assert seen == {"host_id": "desktop-pc", "addon": "probe_addon", "name": "bridge", "run_id": "b-test"}
+    build = next(e for e in job.events if e.phase == "build")
+    assert build.data["artifacts"] == 2 and build.level == "milestone"
+    assert "2 artifact(s) collected" in build.message
+    assert job.status == "inconclusive", "a collected build is still not an in-game proof"
+
+
+def test_slice_fails_the_job_when_an_artifact_pull_does_not_match(db, tmp_path, monkeypatch):
+    from s2docs.live.service import LiveError
+
+    _addon(tmp_path, monkeypatch)
+    _host(db)
+    _host(db, "pomps-pc")
+    _patch_build(monkeypatch, tmp_path,
+                 artifact_raises=LiveError("models/bridge/bridge.vmdl_c: pulled md5 a != the host's b"))
+
+    job = _run(db, build_command="rc -i bridge.vmdl -nop4", ingame_host="pomps-pc")
+
+    build = next(e for e in job.events if e.phase == "build")
+    assert build.level == "error"
+    assert "not collected" in build.message and "md5" in build.data["artifact_error"]
+    assert job.status == "failed", "bytes nobody could confirm are not a build we can hand to a game"
+    ingame = next(e for e in job.events if e.phase == "ingame")
+    assert ingame.data["skipped"] is True and "artifacts" in ingame.data["reason"]
+
+
+def test_slice_ingame_verified_closes_inconclusive_and_asks_for_a_visual_verdict(db, tmp_path, monkeypatch):
+    _addon(tmp_path, monkeypatch)
+    _host(db)
+    _host(db, "pomps-pc")
+    _patch_build(monkeypatch, tmp_path)
+    seen: dict = {}
+    _patch_ingame(monkeypatch, seen=seen)
+
+    job = _run(db, build_command="rc -i bridge.vmdl -nop4", ingame_host="pomps-pc", ingame_clear=True)
+
+    # the artifacts went LOOSE to the playing host, at their own addon-relative paths
+    assert seen["loose_host"] == "pomps-pc" and seen["loose_paths"] == [
+        "materials/hammered/bridge/bridge.vmat_c", "models/bridge/bridge.vmdl_c"]
+    assert seen["owner"].startswith("live:pipeline:")
+    # …and the model the stage asked the game to spawn is the one the asset stage wrote
+    assert seen["show_host"] == "pomps-pc" and seen["model"] == "models/bridge/bridge.vmdl"
+    assert seen["clear"] is True
+
+    ingame = next(e for e in job.events if e.phase == "ingame")
+    assert ingame.data["status"] == "verified" and ingame.level == "milestone"
+    assert ingame.data["loose_deploy"] == "d-loose"
+    assert not ingame.data.get("blocked") and not ingame.data.get("skipped")
+    # the loose push is a real deployment record, linked like any other artifact
+    assert any(link.kind == "deploy" and link.ref_id == "d-loose" for link in job.links)
+    # mechanical readback only: the job cannot claim a pass on it
+    assert job.status == "inconclusive"
+    assert job.summary.next.startswith("the model precached and spawned")
+
+
+def test_slice_closes_passed_only_with_a_supplied_pass_verdict(db, tmp_path, monkeypatch):
+    _addon(tmp_path, monkeypatch)
+    _host(db)
+    _host(db, "pomps-pc")
+    _patch_build(monkeypatch, tmp_path)
+    _patch_ingame(monkeypatch)
+
+    job = _run(db, build_command="rc -i bridge.vmdl -nop4", ingame_host="pomps-pc", verdict="pass")
+
+    assert job.status == "passed"
+    ingame = next(e for e in job.events if e.phase == "ingame")
+    assert ingame.data["verdict"] == "pass" and ingame.data["status"] == "verified"
+
+
+def test_slice_refuses_a_verdict_it_does_not_understand(db, tmp_path, monkeypatch):
+    _addon(tmp_path, monkeypatch)
+    _host(db)
+    with pytest.raises(pipeline.PipelineError, match="verdict"):
+        _run(db, verdict="looked fine")
+
+
+def test_slice_fails_the_job_when_the_readback_does_not_match(db, tmp_path, monkeypatch):
+    _addon(tmp_path, monkeypatch)
+    _host(db)
+    _host(db, "pomps-pc")
+    _patch_build(monkeypatch, tmp_path)
+    _patch_ingame(monkeypatch, status="failed", detail="the runtime spawned name=models/chicken/chicken_roasted.vmdl")
+
+    job = _run(db, build_command="rc -i bridge.vmdl -nop4", ingame_host="pomps-pc", verdict="pass")
+
+    ingame = next(e for e in job.events if e.phase == "ingame")
+    assert ingame.level == "error" and ingame.data["status"] == "failed"
+    assert "chicken_roasted" in ingame.data["detail"]
+    assert job.status == "failed", "a pass verdict cannot rescue a readback that did not match"
+
+
+def test_slice_fails_the_job_when_the_artifacts_do_not_reach_the_target_host(db, tmp_path, monkeypatch):
+    from s2docs.deploys import DeployError
+
+    _addon(tmp_path, monkeypatch)
+    _host(db)
+    _host(db, "pomps-pc")
+    _patch_build(monkeypatch, tmp_path)
+    _patch_ingame(monkeypatch, loose_raises=DeployError("all copies failed: scp rc=1"))
+
+    job = _run(db, build_command="rc -i bridge.vmdl -nop4", ingame_host="pomps-pc")
+
+    ingame = next(e for e in job.events if e.phase == "ingame")
+    assert ingame.level == "error" and "scp rc=1" in ingame.data["error"]
+    assert job.status == "failed"
+
+
+def test_slice_records_ingame_blocked_when_the_host_has_no_netcon(db, tmp_path, monkeypatch):
+    """A host registered but never given a netcon address is a missing precondition, not a pass."""
+    from s2docs.live.service import LiveError
+
+    _addon(tmp_path, monkeypatch)
+    _host(db)
+    _host(db, "pomps-pc")
+    _patch_build(monkeypatch, tmp_path)
+    _patch_ingame(monkeypatch, show_raises=LiveError("no netcon address for 'pomps-pc'"))
+
+    job = _run(db, build_command="rc -i bridge.vmdl -nop4", ingame_host="pomps-pc")
+
+    ingame = next(e for e in job.events if e.phase == "ingame")
+    assert ingame.data["blocked"] is True and ingame.data["status"] == "blocked"
+    assert "no netcon address" in ingame.data["detail"]
+    assert "hermes_sandbox" in ingame.data["reason"]
+    assert job.status == "inconclusive", "blocked is not failed and not passed"
+
+
+def test_cli_passes_the_ingame_flags_through(tmp_path, monkeypatch, capsys):
+    import json
+
+    from s2docs import cli
+    from s2docs.config import get_settings
+    from s2docs.db.connection import Database
+
+    monkeypatch.setenv("S2DOCS_DATA_DIR", str(tmp_path / "data"))
+    _addon(tmp_path, monkeypatch)
+    get_settings.cache_clear()
+    db = Database(get_settings().db_path)
+    with db.writer():
+        pass
+    _host(db)
+    _host(db, "pomps-pc")
+    _patch_build(monkeypatch, tmp_path)
+    seen: dict = {}
+    _patch_ingame(monkeypatch, seen=seen)
+
+    code = cli.main([
+        "--json", "pipeline", "run",
+        "--prompt", "a stone bridge prop",
+        "--addon", "probe_addon",
+        "--name", "bridge",
+        "--mesh", "models/bridge/bridge.fbx",
+        "--host", "desktop-pc",
+        "--build-command", "rc -i bridge.vmdl -nop4",
+        "--ingame-host", "pomps-pc",
+        "--ingame-model", "models/bridge/bridge.vmdl",
+        "--ingame-clear",
+        "--verdict", "pass",
+    ])
+
+    assert code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == "passed"
+    ingame = next(e for e in payload["events"] if e["phase"] == "ingame")
+    assert ingame["data"]["verdict"] == "pass"
+    assert seen["model"] == "models/bridge/bridge.vmdl" and seen["clear"] is True

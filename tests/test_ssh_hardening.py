@@ -143,16 +143,33 @@ def test_every_registration_surface_refuses_the_reviewer_target(hdb, tmp_path, m
 
 
 # ------------------------------------------------------------------ 2. argv shape
+#: The multiplexing flags every ssh/scp argv carries (between ConnectTimeout and the identity/port flags).
+MUX = ["-o", "ControlMaster=auto", "-o", "ControlPath=~/.ssh/s2docs-cm-%C", "-o", "ControlPersist=120"]
+BASE = ["-o", "ConnectTimeout=15", *MUX]
+
+
+def test_multiplexing_is_on_by_default_and_the_socket_path_carries_no_target(monkeypatch):
+    monkeypatch.delenv("S2DOCS_SSH_MUX", raising=False)
+    assert hosts._mux_options() == MUX
+    # %C is OpenSSH's hash of host/port/user: a hostile target can never reach the socket path
+    assert hosts.CONTROL_PATH.endswith("%C") and "%h" not in hosts.CONTROL_PATH and "%r" not in hosts.CONTROL_PATH
+
+
+@pytest.mark.parametrize("off", ["0", "false", "no", "OFF"])
+def test_multiplexing_can_be_switched_off(monkeypatch, off):
+    monkeypatch.setenv("S2DOCS_SSH_MUX", off)
+    assert hosts.ssh_argv(_host("pompa@192.0.2.172")) == ["ssh", "-o", "ConnectTimeout=15", "--", "pompa@192.0.2.172"]
+
 def _host(target: str, key: str | None = None) -> hosts.m.Host:
     return hosts.m.Host(id="build-pc", ssh_target=target, ssh_key=key)
 
 
 def test_ssh_argv_ends_option_parsing_before_the_destination():
-    assert hosts.ssh_argv(_host("pompa@192.0.2.172")) == ["ssh", "-o", "ConnectTimeout=15", "--", "pompa@192.0.2.172"]
-    with_key = ["ssh", "-o", "ConnectTimeout=15", "-i", "/keys/id_build", "-o", "IdentitiesOnly=yes", "--", "rtx-pc"]
+    assert hosts.ssh_argv(_host("pompa@192.0.2.172")) == ["ssh", *BASE, "--", "pompa@192.0.2.172"]
+    with_key = ["ssh", *BASE, "-i", "/keys/id_build", "-o", "IdentitiesOnly=yes", "--", "rtx-pc"]
     assert hosts.ssh_argv(_host("rtx-pc", key="/keys/id_build")) == with_key
     # a [:port] suffix becomes -p: ssh has no host:port destination syntax
-    with_port = ["ssh", "-o", "ConnectTimeout=15", "-p", "2222", "--", "pompa@build-pc"]
+    with_port = ["ssh", *BASE, "-p", "2222", "--", "pompa@build-pc"]
     assert hosts.ssh_argv(_host("pompa@build-pc:2222")) == with_port
 
 
@@ -161,9 +178,10 @@ def test_scp_argv_keeps_both_operands_off_the_option_parser(tmp_path, monkeypatc
     local = Path("-oProxyCommand=id")  # a hostile *relative* local name is made absolute
     argv = hosts.scp_argv(_host("pompa@192.0.2.172"), local, "C:/dst/a.txt")
     absolute = str(tmp_path.resolve() / local)
-    assert argv == ["scp", "-o", "ConnectTimeout=15", "--", absolute, "pompa@192.0.2.172:C:/dst/a.txt"]
+    assert argv == ["scp", *BASE, "--", absolute, "pompa@192.0.2.172:C:/dst/a.txt"]
     assert not argv[-1].startswith("-") and argv[-2].startswith("/")
-    assert hosts.scp_argv(_host("pompa@build-pc:2222"), tmp_path / "a", "C:/a")[3:6] == ["-P", "2222", "--"]
+    assert hosts.scp_argv(_host("pompa@build-pc:2222"), tmp_path / "a", "C:/a")[1 + len(BASE):4 + len(BASE)] \
+        == ["-P", "2222", "--"]
 
 
 def test_scp_pull_argv_keeps_the_remote_operand_first_and_both_off_the_option_parser(tmp_path, monkeypatch):
@@ -172,9 +190,10 @@ def test_scp_pull_argv_keeps_the_remote_operand_first_and_both_off_the_option_pa
     local = Path("-oProxyCommand=id")  # a hostile *relative* local name is made absolute
     argv = hosts.scp_pull_argv(_host("pompa@192.0.2.172"), "C:/src/hermes_sandbox.vpk", local)
     absolute = str(tmp_path.resolve() / local)
-    assert argv == ["scp", "-o", "ConnectTimeout=15", "--", "pompa@192.0.2.172:C:/src/hermes_sandbox.vpk", absolute]
+    assert argv == ["scp", *BASE, "--", "pompa@192.0.2.172:C:/src/hermes_sandbox.vpk", absolute]
     assert not local.is_absolute() and argv[-1].startswith("/")
-    assert hosts.scp_pull_argv(_host("pompa@build-pc:2222"), "C:/a", tmp_path / "a")[3:6] == ["-P", "2222", "--"]
+    assert hosts.scp_pull_argv(_host("pompa@build-pc:2222"), "C:/a", tmp_path / "a")[1 + len(BASE):4 + len(BASE)] \
+        == ["-P", "2222", "--"]
 
 
 @pytest.mark.parametrize("remote", ["-oProxyCommand=id", "-C:/x", "-", "", "C:/a\nb", "C:/a\rb"])
@@ -249,7 +268,7 @@ def test_every_ssh_call_site_puts_the_destination_right_after_double_dash(hdb, t
     run = builds.start(hdb, "build-pc", "-oProxyCommand=id")
     gate.set()
     builds.wait(hdb, run.id, timeout_sec=5, poll_sec=0.02)
-    assert launched == [["ssh", "-o", "ConnectTimeout=15", "--", "pompa@192.0.2.172", "-oProxyCommand=id"]]
+    assert launched == [["ssh", *BASE, "--", "pompa@192.0.2.172", "-oProxyCommand=id"]]
 
 
 # ------------------------------------------------------------------ 3. rows stored before the fix

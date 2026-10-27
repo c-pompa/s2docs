@@ -98,20 +98,30 @@ Steps that need a machine other than this one are explicit:
 with one event per stage, instead of leaving a trail of unrelated builds. They are honest about
 which stages are real, so read the timeline rather than assuming every stage ran:
 
-- `s2docs pipeline run --prompt … --addon <name> --name <prop> --mesh <path> --host <id> [--dest <root>]` —
+- `s2docs pipeline run --prompt … --addon <name> --name <prop> --mesh <path> --host <id> [--dest <root>] [--ingame-host <id> [--ingame-model <vmdl>] [--ingame-clear] [--verdict pass|fail]]` —
   `prompt` → `concept` → `mesh` → `asset` → `build` → `deploy` → `ingame`. `asset` and `build`
-  are **real** (the same `.vmdl`/`.vmat` writers and server-owned build runs the CLI uses), and so is
-  `deploy` when you pass `--dest` and the build succeeded: it pushes the addon the way
-  `s2docs deploy push` does, verifies the MD5s on the host, and links the deployment to the job.
-  Without `--dest` the stage is **skipped**, with a reason saying no destination was given;
+  are **real** (the same `.vmdl`/`.vmat` writers and server-owned build runs the CLI uses), and a
+  succeeded build also collects its compiled files off the compile host (md5-checked, attached to the
+  build run). `deploy` is real when you pass `--dest` and the build succeeded: it pushes the addon the
+  way `s2docs deploy push` does, verifies the MD5s on the host, and links the deployment to the job.
+  Without `--dest` the stage is **skipped**, with a reason saying no destination was given.
+  `ingame` is real when you pass `--ingame-host` (a host running CS2 with `hermes_sandbox` loaded): it
+  pushes the collected artifacts **loose** into that host's `game/csgo` (md5 readback), then sends the
+  round lock and `hs_model`. It is `verified` only on the game's own
+  `[hs] model <path> spawned name=<path>` line plus a rising `hs_ping` — a console line is not a visual
+  verdict, so the job still closes `inconclusive` and asks for one unless you pass `--verdict pass`.
   `concept` and `mesh` are recorded **stubbed** because no text-to-3D generator is wired into this
-  repo (the chain starts from a mesh that exists), and `ingame` is recorded **blocked** with the
-  measured reason.
-- `s2docs pipeline script --prompt … --addon <name> --name <script> [--script file.js]` —
+  repo (the chain starts from a mesh that exists).
+- `s2docs pipeline script --prompt … --addon <name> --name <script> [--script file.js] [--compile] [--deploy-host <id>]` —
   text → cs_script. `generate` writes the `--script` text you supply (the caller is the
   generator, so the stage never invents code it cannot attribute) and `validate` type-checks it
-  through the same `validate_cs_script`; a missing TypeScript toolchain is **blocked**, never a
-  pass and never a failure.
+  through the same `validate_cs_script`; a missing TypeScript toolchain (or a data dir with no
+  ingested script API) is **blocked**, never a pass and never a failure. With `--compile` the
+  `build` stage is real: the `.js` is pushed to `--host` and one `resourcecompiler` run turns it
+  into `scripts/<name>.vjs_c`, pulled back MD5-checked and attached to the run; a failed
+  `validate` never compiles. `--deploy-host` then copies the `.vjs_c` **loose** to that host's
+  `<CS2>/game/csgo/scripts/`. `verdict` stays **blocked**: running the script needs a map whose
+  `point_script` references it.
 
 Both return the job; `job_get`/`get_project` show the same chain. A produced artifact is linked
 to the job, not pasted into a message. Two things that bite: `--name` must be addon-safe

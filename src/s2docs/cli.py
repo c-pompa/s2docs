@@ -410,7 +410,7 @@ def _emit_chain(args: argparse.Namespace, job) -> int:
 
 def _cmd_pipeline(args: argparse.Namespace) -> int:
     """`s2docs pipeline run`: the chain as one job — asset+build real, deploy real with --dest,
-    concept/mesh stubbed, ingame blocked."""
+    ingame real with --ingame-host, concept/mesh stubbed."""
     from s2docs import pipeline
 
     db = Database(get_settings().db_path)
@@ -426,12 +426,17 @@ def _cmd_pipeline(args: argparse.Namespace) -> int:
         build_command=args.build_command,
         build_timeout_sec=args.build_timeout,
         dest=args.dest,
+        ingame_host=args.ingame_host,
+        ingame_model=args.ingame_model,
+        ingame_clear=args.ingame_clear,
+        verdict=args.verdict,
     )
     return _emit_chain(args, job)
 
 
 def _cmd_pipeline_script(args: argparse.Namespace) -> int:
-    """`s2docs pipeline script`: text -> cs_script as one job — generate+validate real, the rest blocked."""
+    """`s2docs pipeline script`: text -> cs_script as one job — generate/validate real, and with
+    --compile/--deploy-host the .js is compiled to .vjs_c on the host and copied loose there."""
     from s2docs import pipeline
 
     text = Path(args.script).read_text(encoding="utf-8") if args.script else None
@@ -444,6 +449,9 @@ def _cmd_pipeline_script(args: argparse.Namespace) -> int:
         host_id=args.host,
         script_text=text,
         project_id=args.project,
+        compile=args.compile,
+        deploy_host_id=args.deploy_host,
+        build_timeout_sec=args.build_timeout,
     )
     return _emit_chain(args, job)
 
@@ -1340,6 +1348,22 @@ def build_parser() -> argparse.ArgumentParser:
         help="Remote destination root; with a successful build the addon content is pushed and "
         "MD5-verified there (omit to record deploy as skipped)",
     )
+    q.add_argument(
+        "--ingame-host",
+        help="Host running CS2 (netcon registered, hermes_sandbox loaded): pushes the collected "
+        "artifacts loose and asks the game to spawn the model; verified on the readback only",
+    )
+    q.add_argument(
+        "--ingame-model",
+        help="Addon-relative vmdl to spawn (default: models/<name>/<name>.vmdl)",
+    )
+    q.add_argument("--ingame-clear", action="store_true",
+                   help="hs_clear prop after the readback, so the test leaves nothing behind")
+    q.add_argument(
+        "--verdict", choices=["pass", "fail"],
+        help="Your visual verdict on a verified readback; only `pass` closes the job `passed` "
+        "(without it a verified readback closes `inconclusive`: request a visual verdict)",
+    )
     q.add_argument("--project", help="ledger project id to attach the chain to")
     q.set_defaults(fn=_cmd_pipeline)
 
@@ -1349,6 +1373,16 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--name", required=True, help="Script name (addon-safe: [a-z][a-z0-9_]+)")
     s.add_argument("--host", required=True, help="Build host id (see `s2docs host list`)")
     s.add_argument("--script", help="an existing .js to use instead of the scaffold skeleton")
+    s.add_argument(
+        "--compile",
+        action="store_true",
+        help="compile the .js to .vjs_c on --host (desktop-pc or pomps-pc) and pull it back, md5-checked",
+    )
+    s.add_argument(
+        "--deploy-host",
+        help="copy the compiled .vjs_c LOOSE to this host's <CS2>/game/csgo/scripts (needs --compile)",
+    )
+    s.add_argument("--build-timeout", type=int, default=120, help="seconds to wait for the compile")
     s.add_argument("--project", help="ledger project id to attach the chain to")
     s.set_defaults(fn=_cmd_pipeline_script)
 
