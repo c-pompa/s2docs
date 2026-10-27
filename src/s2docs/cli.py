@@ -410,7 +410,7 @@ def _emit_chain(args: argparse.Namespace, job) -> int:
 
 def _cmd_pipeline(args: argparse.Namespace) -> int:
     """`s2docs pipeline run`: the chain as one job — asset+build real, deploy real with --dest,
-    concept/mesh stubbed, ingame blocked."""
+    ingame real with --ingame-host, concept/mesh stubbed."""
     from s2docs import pipeline
 
     db = Database(get_settings().db_path)
@@ -426,6 +426,10 @@ def _cmd_pipeline(args: argparse.Namespace) -> int:
         build_command=args.build_command,
         build_timeout_sec=args.build_timeout,
         dest=args.dest,
+        ingame_host=args.ingame_host,
+        ingame_model=args.ingame_model,
+        ingame_clear=args.ingame_clear,
+        verdict=args.verdict,
     )
     return _emit_chain(args, job)
 
@@ -1343,6 +1347,22 @@ def build_parser() -> argparse.ArgumentParser:
         "--dest",
         help="Remote destination root; with a successful build the addon content is pushed and "
         "MD5-verified there (omit to record deploy as skipped)",
+    )
+    q.add_argument(
+        "--ingame-host",
+        help="Host running CS2 (netcon registered, hermes_sandbox loaded): pushes the collected "
+        "artifacts loose and asks the game to spawn the model; verified on the readback only",
+    )
+    q.add_argument(
+        "--ingame-model",
+        help="Addon-relative vmdl to spawn (default: models/<name>/<name>.vmdl)",
+    )
+    q.add_argument("--ingame-clear", action="store_true",
+                   help="hs_clear prop after the readback, so the test leaves nothing behind")
+    q.add_argument(
+        "--verdict", choices=["pass", "fail"],
+        help="Your visual verdict on a verified readback; only `pass` closes the job `passed` "
+        "(without it a verified readback closes `inconclusive`: request a visual verdict)",
     )
     q.add_argument("--project", help="ledger project id to attach the chain to")
     q.set_defaults(fn=_cmd_pipeline)

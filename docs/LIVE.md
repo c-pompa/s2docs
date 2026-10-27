@@ -156,8 +156,25 @@ shipped `spectate.vjs` uses the same pair.
 `Instance.Precache` a compiled model and, once `IsLoadedForAll()` says it is there, spawns the generic
 `hs_tpl_prop` template and swaps the model onto it with `SetModel`/`SetModelScale`. The template is a roasted
 chicken on purpose: a roasted chicken where the requested model should be is the tell that `SetModel` did not
-take. It is **code only** until the live spike records `runtime_precache` as `pass` for the running build
-(`live_capabilities`); nothing in P6 may assume it works before that row exists.
+take.
+
+**Measured 2026-10-27 (pomps-pc, CS2 1.41.9.2/14192): the route works end to end.** The model was compiled on
+desktop-pc, pulled with an MD5 readback, pushed loose into `<CS2>/game/csgo/` at its own relative paths,
+`spawn_group_load hermes_sandbox` streamed the group in, and `hs_model models/tsr_eefa8331/tsr_eefa8331.vmdl`
+answered `[hs] precaching models/…` then `[hs] model models/… spawned name=models/…`. The user confirmed the
+prop appeared and disappeared (a pixel diff agreed). One trap is now part of the recipe: **lock the round
+first** — `mp_ignore_round_win_conditions 1`, `mp_roundtime 60`, `mp_roundtime_defuse 60`, `mp_freezetime 0`
+(`recipes.ROUND_LOCK_LINES`) and only then `mp_restartgame 1`. With no bots the round otherwise ends after
+~2 minutes and the restart wipes every runtime spawn, which is exactly what the user saw on the first attempt.
+
+`s2docs.live.service.show_model(db, host_id, model, clear=False)` is that route in code: it refuses to send
+anything unless `status` lists the spawngroup **and** `hs_ping` answers, sends the lock + `mp_restartgame 1` +
+`hs_model`, and returns `verified` only when the reply carries
+`[hs] model <exact path> spawned name=<exact path>` **and** the `[hs] pong` counter rose. A different name
+(`SetModel` lost → roasted chicken), an `[hs] error …` line, or no line at all within the drain is `failed`;
+a host with no sandbox is `blocked`. The readback is mechanical: `s2docs pipeline run` still closes
+`inconclusive` with `next='request a visual verdict'` unless the caller passes `--verdict pass`.
+
 
 ### Building and loading it
 
@@ -208,6 +225,13 @@ editing the plist is a fleet change). The address must match `host:port`; anythi
 | `POST /api/live/capabilities {cs2_build, name, status, evidence}` | record one spike result |
 | `POST /api/live/sandbox/load {host_id, deploy_id}` | stream `hermes_sandbox` onto the running map; `verified` only on spawngroup + `[hs] pong` |
 | `POST /api/live/launch {host_id, map}` | start CS2 on the host (`de_*` only) and wait for its netcon |
+
+`show_model` (the `hs_model` route above) is reached from `s2docs pipeline run --ingame-host <host>` —
+`live.asset_artifacts` collects the model build's compiled files off the compile host, pushes them loose to
+the target host with an MD5 readback, and the stage is `verified` only on the game's own
+`[hs] model <path> spawned name=<path>` line plus a rising `hs_ping` count. It is CLI/pipeline-only for now
+(no REST route): it needs a build run id and a host that is already in a map with the sandbox loaded, which
+is the pipeline's job, not a one-shot action.
 
 A host that cannot take an action now (no netcon address, unreachable, leased by a test run) is a `409`
 with `conflict: true`; a malformed envelope is `422`.

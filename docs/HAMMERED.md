@@ -304,3 +304,34 @@ the game, not a file.
   an active display adapter — so the chain's best close-out is still `inconclusive`, and no in-game
   verdict was invented. `REAL_STAGES` is now `asset, build, deploy`; covered by
   `tests/test_pipeline.py` (destination, no destination, failed push, failed readback).
+- **2026-10-27 — `ingame` moved from blocked to real, and model compiles keep their artifacts.**
+  The route was proven live first on desktop-pc + pomps-pc (CS2 1.41.9.2/14192), then automated:
+  1. `resourcecompiler -i <CS2>/content/csgo_addons/<addon>/models/<name>/<name>.vmdl -nop4` on the
+     compile host wrote **6 files** under `<CS2>/game/csgo_addons/<addon>/` — `models/<name>/<name>.vmdl_c`
+     (82,487 B, md5 `bab45cc3dc0b8ee4380b21b392c369c2`), `materials/hammered/<name>/<name>.vmat_c`
+     (3,716 B, md5 `5f98a4e14a3eb626dd0ce8e626046c5c`) and four `.vtex_c` (`_color_png_c39ecddf`,
+     `_normal_png_57f19f4d`, `_ao_png_43e04446`, `_vmat_g_tmetalness_ee87d4b4`) — and the build record
+     still said `artifacts: []`. `live.asset_artifacts.collect_model_artifacts` now lists the two trees
+     (`deploys.remote_files`), hashes them in one `Get-FileHash` pass, pulls each over
+     `hosts.scp_pull_argv` into `<data_dir>/artifacts/<build id>/<rel path>`, compares the pulled MD5 to
+     the host's (a mismatch is an error, not a retry) and attaches path+md5+size with
+     `builds.record_artifacts`. Verified live read-only on 2026-10-27 against the still-present
+     `ingame_probe` compile: all 6 files, both expected md5s matched.
+  2. Those files go **loose** into the playing host's `<CS2>/game/csgo/` at the same relative paths
+     (`live.asset_artifacts.deploy_loose` → `deploys.push` + `deploys.verify`): the `vmat` path is baked
+     into the `vmdl_c`, so nothing may be renamed or flattened, and no addon mount is needed.
+  3. With CS2 running, the round has to be locked **first** — `mp_ignore_round_win_conditions 1`,
+     `mp_roundtime 60`, `mp_roundtime_defuse 60`, `mp_freezetime 0`, then `mp_restartgame 1`. Without it,
+     with no bots, the round ended after ~2 min and the restart wiped the prop the user had just seen.
+     Then `hs_model models/<name>/<name>.vmdl` answers `[hs] precaching …` and
+     `[hs] model … spawned name=<path>`, and `hs_ping` counts one more live entity (`pong 0` → `pong 1`);
+     `hs_clear prop` removes it (`[hs] cleared 1`). A different `name=` means `SetModel` lost and the
+     template's roasted chicken stayed — that is the mechanical failure signal.
+  `s2docs pipeline run --ingame-host <host>` now does 1–3 as one stage, judged **only** by that readback.
+  It is not a visual verdict: the job still closes `inconclusive` with `next='request a visual verdict'`
+  unless the caller passes `--verdict pass`. `REAL_STAGES` is now `asset, build, deploy, ingame`; the old
+  "ent_create never renders a loose model / needs an active display adapter" reason is retired, and an
+  artifact pull or a readback that does not match closes the job `failed`. Covered by
+  `tests/test_live_asset_artifacts.py`, `tests/test_live_service.py` (`show_model`), the new
+  `tests/test_live_recipes.py` round-lock case and `tests/test_pipeline.py` (verified / failed / blocked /
+  skipped / verdict).

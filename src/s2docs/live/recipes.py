@@ -27,16 +27,27 @@ ALLOWED = re.compile(
     r"sv_cheats 1|mp_autoteambalance 0|mp_limitteams 0|bot_kick|bot_add_t|bot_add_ct|mp_warmup_end"
     r"|mp_restartgame 1|jointeam [123](?: 1)?|sleep \d+|hs_ping|spawn_group_load hermes_sandbox"
     r"|hs_spawn [a-z][a-z0-9_]* \d{1,2} (?:line|circle|stack|grid) \d+(?:\.\d+)? [01]"
-    r"|hs_clear [a-z][a-z0-9_]*|hs_model models/[a-z0-9_/]+\.vmdl(?: \d+(?:\.\d+)?)?"
+    r"|hs_clear (?:prop|all|[a-z][a-z0-9_]*)|hs_model models/[a-z0-9_/]+\.vmdl(?: \d+(?:\.\d+)?)?"
     r"|ent_remove_all [a-z_]+"
     rf'|ent_create [a-z_]+ \{{"origin" "{_NUM} {_NUM} {_NUM}"\}}'
     r"|say Hermes: [A-Za-z0-9 .,:'()/+-]{0,120}"
     r"|bot_ignore_players 1|bot_dont_shoot 1|god 1|mp_ignore_round_win_conditions 1"
+    # The round lock for a runtime-spawn check, measured 2026-10-27 on pomps-pc (CS2 1.41.9.2/14192): with
+    # no bots a round ends after ~2 min and `mp_restartgame` then WIPES what `hs_model` spawned (the user
+    # saw exactly that). Literal values only: `mp_roundtime 60;quit`, `mp_roundtime 6` and `mp_freezetime 1`
+    # are all still rejected, because every alternative is fullmatched.
+    r"|mp_roundtime 60|mp_roundtime_defuse 60|mp_freezetime 0"
 )
 
 # While Hermes drives a test, nothing may kill the player and nothing may end the round (a round end wipes
 # every spawned entity). All four are in the s2docs index for CS2; the first three are cheats.
 SAFE_TEST_LINES = ("bot_ignore_players 1", "bot_dont_shoot 1", "god 1", "mp_ignore_round_win_conditions 1")
+
+#: Hold the round open before anything is spawned at runtime. Measured 2026-10-27 on pomps-pc (CS2
+#: 1.41.9.2/14192) with no bots: the round ended after ~2 minutes and `mp_restartgame 1` then wiped the
+#: `hs_model` prop the user had just watched appear. Sent WITHOUT the restart (the caller restarts first).
+ROUND_LOCK_LINES = ("mp_ignore_round_win_conditions 1", "mp_roundtime 60", "mp_roundtime_defuse 60",
+                    "mp_freezetime 0")
 
 
 class LiveUnavailable(ValueError):
