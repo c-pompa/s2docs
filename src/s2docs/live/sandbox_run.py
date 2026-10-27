@@ -153,7 +153,10 @@ def reload(db: Database, host_id: str, *, user: sandbox_user.UserModule | None,
         error = _error(user.name)
 
         def done(text: str) -> bool:
-            return bool(ready.search(text) or error.search(text))
+            # wait for BOTH halves of the verdict: the ready line is printed while the group spawns, and
+            # the probe's `[hs] pong` only answers a poll later (measured on pomps-pc 2026-10-27: stopping
+            # on the ready line alone judged a working bundle `failed` for a missing pong)
+            return bool((ready.search(text) and PONG in text) or error.search(text))
     else:
         def done(text: str) -> bool:
             return PONG in text

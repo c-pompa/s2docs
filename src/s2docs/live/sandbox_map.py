@@ -125,14 +125,19 @@ def user_block(user: sandbox_user.UserModule) -> str:
         "  try { start(__hsApi); }",
         f'  catch (e) {{ Instance.Msg("[user:" + {tag} + "] error " + hsUserText(e)); return; }}',
         f'  Instance.Msg("[user:" + {tag} + "] ready " + {nonce});',
-        '  if (typeof stop === "function") {',
-        '    Instance.RegisterCheatCommand("hu_stop", () => {',
-        "      try { stop(__hsApi); }",
-        f'      catch (e) {{ Instance.Msg("[user:" + {tag} + "] error " + hsUserText(e)); }}',
-        "    });",
-        "  }",
-        "})();",
     ]
+    # `stop` is wired only when the module DECLARES it. A runtime `typeof stop === "function"` guard is not
+    # enough: tsc resolves a bare `stop` to the lib's global `stop()` (0 parameters) when the module has
+    # none, and `stop(__hsApi)` then fails the bundle's type-check (TS2554, measured 2026-10-27 with a
+    # start-only module).
+    if sandbox_user.STOP.search(sandbox_user._blank(user.code)[0]):
+        lines += [
+            '  Instance.RegisterCheatCommand("hu_stop", () => {',
+            "    try { stop(__hsApi); }",
+            f'    catch (e) {{ Instance.Msg("[user:" + {tag} + "] error " + hsUserText(e)); }}',
+            "  });",
+        ]
+    lines.append("})();")
     return "\n".join(lines)
 
 

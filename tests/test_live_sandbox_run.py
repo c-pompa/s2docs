@@ -84,6 +84,26 @@ def test_reload_is_verified_on_the_ready_line_AND_a_pong(db):
     assert "hs_ping" in client.probes[1]
 
 
+def test_the_wait_does_not_stop_on_the_ready_line_before_the_pong(db):
+    """Measured live: the ready line lands while the group spawns, the pong one probe later."""
+
+    class Streaming(FakeClient):
+        def poll(self, lines, probe, ready, *, timeout=90.0, **_kw):
+            self.sent.append(list(lines))
+            self.probes.append(list(probe))
+            if any(line.startswith("map ") for line in lines):
+                return bool(ready(self.map_text)), self.map_text
+            early = f"[user:{MODULE}] ready abc123\n"
+            self.stopped_early = ready(early)
+            late = early + "[hs] pong 0\n"
+            return bool(ready(late)), late
+
+    client = Streaming()
+    out = sandbox_run.reload(db, "pomps-pc", user=_module(), client=client)
+    assert client.stopped_early is False, "the poll must keep probing until hs_ping answers"
+    assert out["status"] == "verified"
+
+
 def test_a_stale_nonce_is_not_a_ready_line(db):
     client = FakeClient(load_text=f"[user:{MODULE}] ready deadbee\n[hs] pong 0\n")
     out = sandbox_run.reload(db, "pomps-pc", user=_module(), client=client)

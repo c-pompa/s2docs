@@ -219,3 +219,16 @@ def test_a_module_defining_stop_gets_a_prefixed_hu_stop_command(tmp_path):
     module = _check(GOOD + "function stop(api) { api.msg('bye'); }\n")
     seen = _run_bundle(tmp_path, module)
     assert "hu_stop" in seen["CMDS"]
+
+
+def test_a_start_only_module_gets_no_stop_call_in_the_bundle():
+    """tsc reads a bare `stop` as the lib's 0-arg global: never emit `stop(__hsApi)` for a start-only module."""
+    bundle = sandbox_map.render_script(spawnables.stock(), _check(GOOD))
+    assert "stop(__hsApi)" not in bundle and "hu_stop" not in bundle
+    with_stop = sandbox_map.render_script(spawnables.stock(), _check(GOOD + "function stop(api) { api.msg('bye'); }\n"))
+    assert "stop(__hsApi)" in with_stop
+
+
+def test_a_stop_in_a_comment_or_string_does_not_wire_hu_stop():
+    module = _check(GOOD + "// function stop(api) {}\nconst note = 'function stop(api) {}';\n")
+    assert "hu_stop" not in sandbox_map.render_script(spawnables.stock(), module)
