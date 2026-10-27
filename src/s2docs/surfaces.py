@@ -392,13 +392,24 @@ OPERATIONS: tuple[Operation, ...] = (
              "name exists (the verifier asserts the absence)",
     ),
     Operation(
+        id="pipeline_verdict",
+        summary="Record a human visual verdict on a closed asset-chain job (inconclusive -> passed/failed)",
+        module="s2docs.pipeline", function="record_verdict",
+        surfaces=frozenset({"cli"}),
+        cli=("pipeline", "verdict"), api=("POST", "/api/pipeline/verdict"), mcp="pipeline_verdict",
+        note="CLI-only like pipeline_run: a pipeline job is a local chain record, not a server-side run. "
+             "It is not `job_verdict` — that one answers a running step and needs a linked test run; "
+             "this one attaches the look to a job that already closed inconclusive.",
+    ),
+    Operation(
         id="pipeline_script",
         summary="Run the text -> cs_script chain (generate, validate, compile, deploy) as one job",
         module="s2docs.pipeline", function="run_script_slice",
         surfaces=frozenset({"cli"}),
         cli=("pipeline", "script"), api=("POST", "/api/pipeline/script"), mcp="pipeline_script",
         note="CLI-only by design, like pipeline_run; build/deploy are real with --compile/"
-             "--deploy-host, and only the in-game verdict is still blocked",
+             "--deploy-host, and --run-host bundles the module into the hermes_sandbox runtime and "
+             "judges the verdict by its console readback (no map compile)",
     ),
 )
 

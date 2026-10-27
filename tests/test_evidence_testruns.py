@@ -460,3 +460,38 @@ def test_api_human_confirm_verdict_and_source_validation(edb, client):
         assert r.status_code == 201, r.text
     # a non-confirm kind is not verdict-gated (no verdict required)
     assert client.post("/api/evidence", json={"kind": "note", "test_run_id": run.id, "data": {}}).status_code == 201
+
+
+
+def test_evidence_can_be_anchored_to_a_job(edb, tmp_path):
+    """A pipeline verdict has neither a project step nor a test run: the job is the anchor.
+
+    `s2docs pipeline run` enqueues its own job, so a human-confirm row for it must resolve the project
+    from that job (often NULL — the chain ran without one) and store with the job id as `ref`.
+    """
+    from s2docs import jobs
+
+    job = jobs.enqueue(
+        edb, kind="test", title="chain job", target="probe_addon", host_id="build-pc",
+        purpose="anchor test", expected="a row anchored to me",
+    )
+    row = evidence.add(
+        edb, kind="human-confirm", job_id=job.id, ref=job.id, data={"verdict": "pass", "source": "coordinator"},
+    )
+    assert row.ref == job.id and row.project_id is None and row.test_run_id is None
+    assert evidence.list_evidence(edb, kind="human-confirm")[0].id == row.id
+
+    # a job that carries a project hands it to the row, so the evidence is visible from the project too
+    pid = _project(edb, tmp_path)
+    owned = jobs.enqueue(
+        edb, kind="test", title="chain job with a project", target="probe_addon", host_id="build-pc",
+        purpose="anchor test", expected="a row on the project", project_id=pid,
+    )
+    row2 = evidence.add(
+        edb, kind="human-confirm", job_id=owned.id, ref=owned.id, data={"verdict": "fail", "source": "web"},
+    )
+    assert row2.project_id == pid
+    assert [e.id for e in evidence.list_evidence(edb, project_id=pid)] == [row2.id]
+
+    with pytest.raises(evidence.EvidenceError, match="unknown job"):
+        evidence.add(edb, kind="note", job_id="j-ghost")

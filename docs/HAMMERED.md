@@ -335,3 +335,17 @@ the game, not a file.
   `tests/test_live_asset_artifacts.py`, `tests/test_live_service.py` (`show_model`), the new
   `tests/test_live_recipes.py` round-lock case and `tests/test_pipeline.py` (verified / failed / blocked /
   skipped / verdict).
+
+- **2026-10-27 — pipeline: the visual verdict moved *after* the close-out.** `s2docs pipeline run
+  --ingame-host …` closed the job `inconclusive` with `next='… then re-run with --verdict pass|fail'`,
+  which is backwards twice over: the look happens after the spawn, and by then the job is closed, so
+  `jobs.verdict()` (running-only, needs a linked test run) refuses it — while re-running the chain to
+  pass a verdict would spawn a second model nobody looked at. `s2docs pipeline verdict <job> pass|fail
+  [--notes]` (`pipeline.record_verdict`) now records the look on the closed job:
+  `inconclusive -> passed|failed`, a `human-confirm` evidence row anchored to the job (`evidence.add`
+  gained a `job_id` anchor, because a pipeline job has neither a step nor a test run),
+  a `verdict` stage event (`STAGES` untouched; a judged job reads `STAGES + ('verdict',)`), and a
+  rewritten summary via the new `jobs.rewrite_summary`. Refused: no `ingame` stage, an `ingame` stage
+  that was skipped/blocked, a readback that did not verify, a still-running job, a contradictory second
+  verdict (a repeat is a no-op). CLI-only like the rest of `pipeline` (registered as
+  `pipeline_verdict` in `surfaces.py` with the absence of a route/tool asserted).

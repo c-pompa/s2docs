@@ -109,10 +109,18 @@ which stages are real, so read the timeline rather than assuming every stage ran
   pushes the collected artifacts **loose** into that host's `game/csgo` (md5 readback), then sends the
   round lock and `hs_model`. It is `verified` only on the game's own
   `[hs] model <path> spawned name=<path>` line plus a rising `hs_ping` — a console line is not a visual
-  verdict, so the job still closes `inconclusive` and asks for one unless you pass `--verdict pass`.
+  verdict, so the job closes `inconclusive` and stops there. `--verdict pass|fail` on `pipeline run` is
+  only for a verdict you already made *while* watching; do not use it to predict what you will see.
   `concept` and `mesh` are recorded **stubbed** because no text-to-3D generator is wired into this
   repo (the chain starts from a mesh that exists).
-- `s2docs pipeline script --prompt … --addon <name> --name <script> [--script file.js] [--compile] [--deploy-host <id>]` —
+- `s2docs pipeline verdict <job-id> pass|fail [--notes TEXT] [--source …]` — the look at the screen,
+  recorded **after** the chain closed. `pass` closes the job `passed`, `fail` closes it `failed`; nothing
+  is re-run and nothing is spawned twice. It writes a `human-confirm` evidence row (so the confirm push
+  files fire) and a `verdict` stage event, and rewrites the close-out summary. Refused: a job with no
+  `ingame` stage, an `ingame` stage that was skipped or blocked (nothing was on screen), a readback that
+  did not verify (a `pass` never overrides `failed`), a still-running job (use `job_verdict` for a step),
+  and a second contradictory verdict — repeating the same one is a no-op.
+- `s2docs pipeline script --prompt … --addon <name> --name <script> [--script file.js] [--compile] [--deploy-host <id>] [--run-host <id> [--restore]]` —
   text → cs_script. `generate` writes the `--script` text you supply (the caller is the
   generator, so the stage never invents code it cannot attribute) and `validate` type-checks it
   through the same `validate_cs_script`; a missing TypeScript toolchain (or a data dir with no
@@ -120,8 +128,17 @@ which stages are real, so read the timeline rather than assuming every stage ran
   `build` stage is real: the `.js` is pushed to `--host` and one `resourcecompiler` run turns it
   into `scripts/<name>.vjs_c`, pulled back MD5-checked and attached to the run; a failed
   `validate` never compiles. `--deploy-host` then copies the `.vjs_c` **loose** to that host's
-  `<CS2>/game/csgo/scripts/`. `verdict` stays **blocked**: running the script needs a map whose
-  `point_script` references it.
+  `<CS2>/game/csgo/scripts/`.
+  `--run-host` makes `verdict` **real without a map compile**: the module is bundled into the
+  `hermes_sandbox` runtime (contract: `function start(api) { ... }`, no `Instance`/`import`/`eval`/
+  `globalThis`/`console`, no template literals; `api.msg`/`api.command`→`hu_<name>`/`api.onChat`), the
+  bundle is compiled as that addon's one map script and copied loose to
+  `game/csgo/maps/scripts/hermes_sandbox.vjs_c`, then the map is reloaded (`map de_dust2`, wait for
+  `status` to show `@ Current : game` + `1: de_dust2`, `sv_cheats 1`, `spawn_group_load hermes_sandbox`,
+  poll `status`/`hs_ping`). Verified only on `[user:<name>] ready <nonce>` **and** `[hs] pong`; the nonce
+  is per build, so a stale build cannot produce it. `--restore` re-ships the stock script afterwards and
+  reports whether that reload verified. The job still closes `inconclusive` on a verified readback: a
+  console line is not a visual verdict.
 
 Both return the job; `job_get`/`get_project` show the same chain. A produced artifact is linked
 to the job, not pasted into a message. Two things that bite: `--name` must be addon-safe
