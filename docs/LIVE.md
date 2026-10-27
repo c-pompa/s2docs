@@ -60,8 +60,13 @@ and a mismatch raises before anything is sent — so a bug in a recipe cannot be
 sv_cheats 1 | mp_autoteambalance 0 | mp_limitteams 0 | bot_kick | bot_add_t | bot_add_ct |
 mp_warmup_end | mp_restartgame 1 | jointeam [123]( 1)? | sleep N | hs_ping | spawn_group_load hermes_sandbox |
 hs_spawn <id> <n> <formation> <spacing> <0|1> | hs_clear <id> | ent_remove_all <classname> |
-ent_create <classname> {"origin" "<x> <y> <z>"} | say Hermes: <safe text>
+ent_create <classname> {"origin" "<x> <y> <z>"} | say Hermes: <safe text> |
+map de_dust2 | status | hu_<name> [args]
 ```
+
+The last row is the script-verdict route only (`s2docs.live.sandbox_run`): one literal map reload, the
+`status` readback that proves the spawn finished, and the `hu_`-prefixed commands a bundled user module can
+register. There is no branch for any other map and none for a generic console command.
 
 **Adding a recipe = adding a regex branch + a case in `test_every_line_matches_the_allowlist`.** No
 exception: if a line cannot be described by a branch, the feature is not part of this vocabulary yet.
@@ -148,7 +153,8 @@ The runtime registers cheat commands only, and answers on the console:
 | `hs_model <models/…vmdl> [scale]` | `[hs] precaching …`, then `[hs] model … spawned name=…` (spike S2, Task 4.9) |
 
 `s2docs validate-script` on the generated script is clean: **0 errors**, and only `deprecated_api` warnings
-for `Instance.RegisterCheatCommand` and `Instance.Msg` (16 as of the `hs_model` addition). They are kept on
+for `Instance.RegisterCheatCommand` and `Instance.Msg` (26 as of the bundled-module api; it was 16 after
+`hs_model`). They are kept on
 purpose — they are the only way a script takes console input and writes console output, and iso-spectate's
 shipped `spectate.vjs` uses the same pair.
 
@@ -175,6 +181,45 @@ anything unless `status` lists the spawngroup **and** `hs_ping` answers, sends t
 a host with no sandbox is `blocked`. The readback is mechanical: `s2docs pipeline run` still closes
 `inconclusive` with `next='request a visual verdict'` unless the caller passes `--verdict pass`.
 
+
+### Running a user script: bundle into the runtime, not a map compile
+
+`hermes_sandbox.vpk` carries the world/entity lumps and **no script**. Its `point_script` names
+`maps/scripts/hermes_sandbox.vjs`, and the engine resolves that to the LOOSE
+`<CS2>/game/csgo/maps/scripts/hermes_sandbox.vjs_c` — a file one `resourcecompiler` pass of a single `.js`
+rewrites in about a second, from ssh's session 0, on either host. That is how a *new* script reaches a
+running game: no `.vmap` compile (which needs an Active session on desktop-pc), and stock de_dust2 is still
+never modified.
+
+A user module is therefore **bundled into the runtime**, never shipped as a point_script of its own:
+
+| piece | what it is |
+|---|---|
+| contract | `src/s2docs/live/sandbox_user.py`: the module defines `function start(api) { ... }` and may define `stop(api)`. It never touches `Instance`, `import`/`export`/`require`, `eval`/`Function`, `globalThis`/`process`/`console`/`window`/`document`, and has no template literals (`${...}` is code, so the checker refuses the literal instead of blanking it). Refusal is a **failed validate** with one reason per offending token — before anything is compiled |
+| `api` | `api.msg(text)` → `[user:<name>] text`; `api.command(name, fn)` → a cheat command `hu_<name>` (name-checked, `[a-z][a-z0-9_]*`); `api.onChat(fn)` → fanned out from the runtime's ONE `OnPlayerChat`, because a second registration would overwrite it. A module that defines `stop(api)` also gets `hu_stop` |
+| bundle | `sandbox_map.render_script(spawnables, user)` — the stock runtime plus the module wrapped in its own function scope at `/*USER*/`, so `hs_ping`/`hs_spawn`/`hs_clear`/`hs_model` keep working |
+| proof | on load the module prints `[user:<name>] ready <nonce>` (nonce minted per build) or `[user:<name>] error <message>` when `start` throws. The nonce is what makes a readback prove **this** build is the one the engine loaded |
+| verdict | `verified` only on that ready line **and** `[hs] pong` in the same readback. An `error` line, a pong with no ready line (the script ran, the module did not), or silence is `failed` |
+| restore | `restore=True` re-bundles the STOCK script (no module), compiles, deploys and reloads it, judged by `[hs] pong` — a host is never left running somebody's module |
+
+The reload is the risky part, and it is a readback, not a sleep: the engine **drops** commands sent while
+a map is spawning, and netcon streams console output only to CONNECTED clients, so each wait holds ONE
+connection (`NetconClient.poll`): `map de_dust2` → poll `status` for `@ Current  :  game` **and**
+`1: de_dust2` → `sv_cheats 1` → `spawn_group_load hermes_sandbox` → poll `status`/`hs_ping` for the ready
+line (or its `error`).
+
+The console allowlist (`recipes.ALLOWED`) gains exactly three shapes: `map de_dust2`, `status`, and
+`hu_<name> [args]`. No other map, no other console command.
+
+`sandbox_run.restore_sandbox(db, host_id="pomps-pc")` is the manual way back. The library call is
+`sandbox_run.run_user_script(db, host_id=..., name=..., code=..., compile_host_id=...)`; `s2docs pipeline
+script --run-host <host>` is the job-recorded form of the same thing.
+
+Measured 2026-10-27 (pomps-pc, CS2 1.41.9.2/14192, compile-only probe — no deploy, no run): the bundle with
+a demo module (12,164 B of JS) compiled from ssh's session 0 to a 12,996 B `.vjs_c` (md5
+`f72eef27f920bebfe4174d703c380a36`) under a throwaway addon name, and the probe addon was deleted
+afterwards (`game/csgo/maps/scripts/hermes_sandbox.vjs_c` still `c02af7f4…`, untouched). The in-game half is
+the play host's run.
 
 ### Building and loading it
 
